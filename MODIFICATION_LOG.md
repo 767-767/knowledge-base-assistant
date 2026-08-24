@@ -1,0 +1,260 @@
+# 修改记录（Modification Log）
+
+> 记录本项目从"通用学习工作台"改造为 Sci-RAG 的全过程。按时间倒序排列。
+
+---
+
+## 第八次修改：2026-08-24 —— query_knowledge 新增 Table N 二次过滤（caption 级）+ 检索提示
+
+### 背景
+
+`_rerank_table_first` 已保证命中时只保留匹配的表格块，但存在两个缺口：
+（1）表格块若靠内容/headers 命中而 caption 不含 "Table N"（caption 为空或
+非标准写法），重排序仍会放行；（2）"Table 1" 会被 `Table\s*1` 误匹配
+"Table 12" 的 caption。本次在 `query_knowledge` 中、构建 context_parts 之前
+增加一道 caption 级二次过滤，并在上下文开头提示用户只检索了指定表格的数据。
+
+### 修改内容
+
+| 位置 | 改动 |
+| --- | --- |
+| `query_knowledge()` 重排序之后 | 新增修改 8 块：`re.search(r'Table\s*(\d+)', message, re.IGNORECASE)` 提取表号；未指定表号则不过滤 |
+| 过滤条件 | 保留所有 `type != 'table'` 的文本块 + `table_caption` 命中 `Table\s*N(?!\d)`（IGNORECASE）的表格块——`\s*` 同时覆盖 "Table 2"/"Table2" 两种写法，`(?!\d)` 防止 "Table 1" 误匹配 "Table 12" |
+| 回退保护 | 过滤后若一个表格块都不剩，保持原 ordered 列表不变（回退到全部块，防止无答案） |
+| 提示语 | 过滤生效时在上下文开头附加 `【检索提示】已根据您的要求只检索 Table N 的数据。`；与 rerank 的"未找到 Table N"提示互斥（matched 为空时二次过滤必然回退），不会同时出现两条矛盾提示 |
+
+### 验证（6 个场景全部 ✅）
+
+1. "Table 2 中 DrugR* 的整体优化得分是多少？" → 提示语存在，Table 1/3 块被排除，行级过滤只剩 DrugR* 行 ✅
+2. 表格块靠内容命中 Table 2 但 caption 不含表号 → 被二次过滤剔除，正确表格块保留 ✅
+3. 未指定表号（"表中 DrugR*…"）→ 不过滤、无提示语 ✅
+4. "Table 5…"（无命中）→ 回退全部块，保留"未找到 Table 5"提示，不出现矛盾提示 ✅
+5. 非表格提问 → 无提示、保持原序 ✅
+6. "Table 1" 提问 vs caption "**Table 12**" → Table 12 块被剔除（(?!\d) 边界生效）✅
+
+---
+
+## 第七次修改：2026-08-24 —— 明确最终 order 构造：命中 Table N 时彻底排除其他表格块
+
+### 背景
+
+第五次修改已引入 `table_idx = matched`（命中时只保留命中的表格块），
+但"其他表格块被排除"这一保证分散在两处代码里，且最终 order 构造的注释
+只写"表格块置顶"，容易被误读为仍会混入全部表格块。本次把该保证显式化：
+最终 order 由 `table_idx + other_idx` 唯一决定——命中时 table_idx 即 matched、
+other_idx 只含非表格块，未被命中的 type="table" 块既不在 table_idx、也不在
+other_idx 中，被彻底排除在上下文之外，避免大模型同时看到多张表格
+（如 Table 1 与 Table 2）而取错数据。
+
+### 修改内容
+
+| 位置 | 改动 |
+| --- | --- |
+| `_rerank_table_first()` 的 `if matched:` 分支 | 注释明确：其他表格块（如 Table 1 的块）不得进入最终 order，否则大模型会同时看到多张表格而混淆 |
+| `_rerank_table_first()` 末尾 order 构造 | `text_idx` 更名 `other_idx`；注释写明关键保证——matched 非空时未被命中的 type="table" 块被彻底排除；matched 为空时 table_idx 保持为全部表格块（原有回退行为） |
+| 函数 docstring 规则 2 | 补充"其他 type="table" 块从最终 order 中彻底排除，非表格文本块不受影响" |
+
+### 验证（4 个场景全部 ✅）
+
+1. "Table 2 中 DrugR* 的整体优化得分是多少？" → order = [Table 2 块, 正文块…]，Table 1/3 的块不在 order 中；行级过滤后块内容只剩 DrugR* 行 ✅
+2. "Table 5 的样本量是多少？"（无命中）→ 全部表格块置顶 + 提示语 ✅
+3. "表中 DrugR* 的得分是多少？"（未指定表号）→ 全部表格块置顶、无提示语 ✅
+4. "这篇论文讲了什么？" → 保持向量检索原序 ✅
+
+---
+
+## 第六次修改：2026-08-24 —— if matched 分支新增行级实体过滤，缩小表格上下文
+
+### 背景
+
+命中 Table N 后，整个表格块（含全部变体行）进入上下文，LLM 在多行相近的
+数据里可能取错行。本次在检索侧配合：把与问题实体无关的表格行过滤掉，
+让上下文只保留目标行（与用户自行新增的 Prompt 强制规则 4/5 及
+n_results=60 配合，检索侧先精确、生成侧再约束）。
+
+### 修改内容
+
+| 位置 | 改动 |
+| --- | --- |
+| 新增常量 `_ENTITY_RE` | `[A-Za-z0-9_*+\-]+(?:[-\s][A-Za-z0-9_*+\-]+)*`：从中文问题中提取 ASCII 实体记号（如 "DrugR*"、"CO2 methanation"、"Ni-Fe"），中文被自然截断 |
+| 新增函数 `_filter_table_rows_by_entity()` | 对表格块逐行查找（不区分大小写），只保留"表头行（GFM 含 \| --- \| 分隔行）+ 命中实体名的数据行"；无任何行命中时返回 None（调用方回退原块，宁可多给上下文也不误删） |
+| `_rerank_table_first()` 的 `if matched:` 分支 | 提取实体（排除 "Table N" 表号本身与纯数字，剩余取最长者）→ 对每个命中的表格块做行级过滤 → **原地替换 `texts[i]` 内容**；无实体或未命中行时内容不变 |
+| `query_knowledge()` | 无需改动——它在 `_rerank_table_first` 返回后才按 order 重建上下文，自然读到被替换后的内容 |
+
+### 验证（8 个场景全部 ✅）
+
+1. "Table 2 中 DrugR* 的整体优化得分是多少？" → 块内容过滤为 表头 + `| DrugR* | 0.874 |`，其他变体行（0.812 / Baseline）被移除 ✅
+2. 实体（XYZ）不在表格中 → 回退原块，一行不删 ✅
+3. 问题只有表号没有实体 → 不做行级过滤 ✅
+4. 未指定表号（"表中 DrugR*…"）→ 不走 if matched 分支，不过滤 ✅
+5. 表格里是小写 drugr*、问题是大写 DrugR* → 不区分大小写命中 ✅
+6. 无 \| --- \| 的暴力提取块 → 首行作表头，命中行保留 ✅
+7. 多词实体 "CO2 methanation" → 空格连接整体匹配 ✅
+8. 非表格提问 → 原序且内容不变 ✅
+
+### 已知行为（未修）
+
+- 实体取"排除表号后最长的候选"，问题含多个实体（如 "A 与 B"）时只取最长的一个；
+- 单字母实体（如 "N"）不区分大小写会命中很多行（几乎每个英文行都含 n），
+  此时过滤近似无操作、等价于回退原块，无数据损失风险。
+
+---
+
+## 第五次修改：2026-08-23 —— Table N 匹配改用正则（IGNORECASE），修复加粗标题 "**Table 2**" 失配
+
+### 问题
+
+诊断发现：Table 2 的编号只存在于 metadata 的 `table_caption` 字段
+（形如 "**Table 2** Out-of-Distribution..."——pymupdf4llm 把论文的加粗标题
+转成了 Markdown 加粗标记），表格内容的 Markdown 源码（| 行）中
+不包含 "Table 2"，导致匹配逻辑失配、系统误报"未找到精确匹配"。
+
+### 修改内容（仅 `_rerank_table_first()` 一个函数）
+
+- 匹配 "Table N" 从子串比对改为正则
+  `re.search(rf'Table\s*{N}', 文本, re.IGNORECASE)`：
+  `\s*` 兼容 "**Table 2**" 加粗标记、全角/多空格等格式差异，
+  IGNORECASE 替代手动小写化；
+- 命中检查顺序：① metadata 的 `table_caption`（表格标题只存在这里，
+  块内容仅含 | 行、几乎不含 "Table N" 字样，是最主要命中来源）→
+  ② 块内容（Markdown 表格源码）→ ③ metadata 的 `headers`
+  （保守第三处，延续第四次修改）；任一命中即视为命中；
+- 无命中时不丢弃表格块：保留全部 `type="table"` 的块置顶，并在上下文开头
+  提示 `未找到 Table N 的精确匹配，以下是知识库中所有表格数据供参考。`
+  （复用第四次修改的 note 机制，`query_knowledge()` 无需改动）；
+- 未指定 Table 编号（table_num 为 None）：所有表格块置顶，行为不变；
+- 函数 docstring 改为 raw string（`r"""`），消除 `\s` 无效转义警告。
+
+### 验证（7 个场景全部 ✅）
+
+1. "Table 2" 只存在于 caption（"**Table 2** ..." 加粗形态）→ 正则命中，仅保留 Table 2 块 ✅
+2. caption 为 "Table 2"（不换行空格）→ `\s*` 兼容命中 ✅
+3. "Table 3" 只存在于块内容 → 命中 ✅
+4. "Table 2" 只存在于 headers → 命中（保守第三处）✅
+5. 问 Table 5 无任何命中 → 全部表格块保留置顶 + 提示语 ✅
+6. 未指定表号（"样本量是多少？"）→ 全部表格置顶、无提示语 ✅
+7. 非数值提问 → 保持向量检索原序、无提示语 ✅
+
+### 已知行为（未修）
+
+- 正则 `Table\s*N` 是前缀匹配："Table 20" 的标题也会被 "Table 2" 的提问命中。
+  若论文表格编号达到两位数，可在数字后加 `\b` 收紧（当前论文表格少，暂不处理）。
+
+---
+
+## 第四次修改：2026-08-23 —— Table N 匹配改为三处检查 + 无命中时保留全部表格块并提示
+
+### 问题
+
+问 "Table 2 中 DrugR* 的整体优化得分是多少？" 时，系统明明检索到了 Table 2 的
+表格块（已在 Chroma 中），但重排序函数匹配 "Table 2" 失败，把该块丢弃了，
+导致回答"未提供"。
+
+### 修改内容
+
+| 函数 | 改动 |
+| --- | --- |
+| `_rerank_table_first()` | ① 匹配 "Table N" 时**三处同时检查**（任一命中即视为命中）：metadata 的 `table_caption` 字段、块内容（Markdown 表格源码）、metadata 的 `headers` 字段；② 指定了 Table N 但**没有任何块命中时，不再丢弃表格块**——保留全部 `type="table"` 的块置顶，并返回提示语 `未找到 Table N 的精确匹配，以下是知识库中所有表格数据供参考。`；③ 未指定 Table 编号（table_num 为 None）时所有表格块置顶（原有行为不变）。返回值从 `order` 改为 `(order, note)` |
+| `query_knowledge()` | 解包 `(order, note)`；note 非空时在上下文开头附加 `【检索提示】未找到 Table N 的精确匹配，以下是知识库中所有表格数据供参考。` |
+
+### 验证（6 个场景全部 ✅）
+
+1. 问 Table 2 但 caption/内容/headers 均无 "Table 2" 字样 → 全部表格块置顶不丢弃 + 返回提示语（DrugR* 表格块仍在上下文中，可正常回答）
+2. `table_caption` 精确命中 → 仅保留 Table 2 块，无提示语
+3. `headers` 字段命中 → 命中生效
+4. 块内容（documents 源码）命中 → 命中生效
+5. 未指定表号（"表中数值是多少？"）→ 全部表格置顶，无提示语
+6. 非数值提问 → 保持原序，无提示语
+
+---
+
+## 第三次修改：2026-08-23 —— 修复 Table N 筛选未检查 table_caption 导致匹配失败
+
+### 问题
+
+`_rerank_table_first()` 匹配 "Table N" 时只检查了块内容（documents），
+但表格抽块时标题只存进了 metadata 的 `table_caption` 字段（块内容只有 `|` 行），
+导致"明确问了 Table 2"的筛选总是匹配失败，退化为保留全部表格块。
+
+### 修改内容（仅 `_rerank_table_first()` 一个函数）
+
+- 匹配 "Table N" 时**同时检查** metadata 的 `table_caption` 字段和块内容
+  （两者均小写化比对，任一处命中即视为命中）；
+- 指定了 Table N 但没有任何命中时，**保留全部表格块**（不丢弃），避免上下文为空；
+- 重排序顺序不变：表格块置顶、非表格块随后（保持原相对顺序）；
+- 同步更新了函数 docstring 中规则 2 / 规则 3 的说明。
+
+### 验证（3 个场景全部 ✅）
+
+1. 标题只存在于 `table_caption`、块内容无 "Table 2" 字样 → 正确命中并置顶，
+   其他表格块（Table 1）被忽略，顺序 `[表格, 正文A, 正文B]`
+2. 指定 "Table 5" 但无任何命中 → 保留全部表格块且置顶，无块被丢弃
+3. 非数值/表格类提问 → 保持向量检索原序，不干预
+
+---
+
+## 第二次修改：2026-08-23 —— app.py 直接改造，修复"表格增强召回"完全失灵
+
+### 问题背景
+
+系统能回答"用了哪种强化学习算法？"这类文本抽取问题，但问
+"Table 2 中 DrugR* 的整体优化得分是多少？"时完全检索不到表格块。
+
+根因：app.py 此前仍在用 PyPDFLoader + 一刀切 512 字符分块，
+表格被切碎成普通文本、没有任何 `type="table"` 标记、召回数只有 3，
+重排序也不存在，所以表格类提问必然失败。
+
+### 修改的函数与内容
+
+| 函数 | 改动 |
+| --- | --- |
+| 顶部导入区 | 新增 `re` / `tempfile` / `shutil` / `Document` / `MarkdownHeaderTextSplitter`；**移除 PyPDFLoader**（乱码根源），PDF 改用 pymupdf4llm（函数内延迟导入） |
+| `extract_tables()` | **新建**。修改 2：方案 A 用正则解析标准 GFM 表格（`\| --- \|` 分隔行 → 表头 + 数据行整表抽出）；方案 B 若无任何 GFM 表格，用 `\bTable\s*\d+.*?(?=\n\n|\Z)` 暴力提取所有 "Table N" 连续段落。每个表格块 metadata 强制带 `{"type": "table", "source": filename, "table_caption": ...}`。开关 `_ALWAYS_BRUTE_FORCE` 可让两种方案同时生效（混合情况） |
+| `_split_to_chunks()` | **新建**（修改 3）。最终分块循环：`type="table"` 的块跳过 RecursiveCharacterTextSplitter，整表作为一个 chunk 直接入库，长表格不再被切碎；非表格文本保持 MarkdownHeaderTextSplitter 优先（#/##/###/#### 标题切分），超 1024 字符回退 RecursiveCharacterTextSplitter(chunk_size=1024, chunk_overlap=128, separators=["\n\n", "\n", "。", "；"]) |
+| `load_and_split_document()` | **改写**。修改 1：pymupdf4llm 转完 Markdown 后、切分之前，打印前 3000 字符 + 是否含 GFM 分隔行的统计到终端；PDF→Markdown（表格保留 \| --- \|、公式转 LaTeX 行内格式）+ 图片占位符提取 `[Image: xxx.png]` + 调用 extract_tables / _split_to_chunks |
+| `add_document_to_db()` | **微调**。不再覆盖 metadata，完整保留每个块的 `source` / `headers` / `type` / `table_caption` 存入 Chroma（重排序依赖 `type` 字段） |
+| `query_knowledge()` | **改写**（原 `respond` 更名，ChatInterface 接线同步更新）。修改 4：n_results 3→6；新增 `_rerank_table_first()` 重排序——提问含 `["Table", "表", "数值", "多少", "样本量", "比率", "n="]` 关键词时把 `type="table"` 的块强行置顶（不看相似度得分）；若明确问了 "Table N"（正则提取表号），只保留包含 "Table N" 字样的表格块、忽略其他表格块（无命中时回退不筛选，避免上下文为空）；上下文片段带编号【片段 X】+[表格] 标注 |
+| `SCIENTIFIC_SYSTEM_PROMPT` | **新增常量**。科学严谨模式三规则：①数值原样引用并指明"根据参考片段 [X] 所示"；②趋势判断必须有明确对比依据，否则回复"资料未提供该趋势的明确依据，无法推测。"；③实验步骤按"第一、第二、第三"时间顺序重组。 |
+
+### 本轮验证结果（已实测通过）
+
+用临时脚本（运行后已删除）做了 5 项测试，全部 ✅：
+
+1. GFM 表格提取：正确抽出 1 个表格块，caption 为 "Table 2 Overall optimization scores of DrugR* variants."
+2. 备用暴力提取：无 GFM 分隔行时，成功提取 "Table N" 段落并打 type="table"
+3. 长表格防切碎：4000+ 字符的表格保持为 1 个完整块；超长正文正常回退切分
+4. 重排序："Table 2 中 DrugR*…" → Table 2 块置顶、Table 1 块被忽略；非数值提问不干预
+5. 端到端（真实 bge-small-zh embedding + 临时 ChromaDB）："Table 2 中 DrugR* 的整体优化得分是多少？" → 表格块置顶，`| DrugR* | 0.874 |` 在上下文中
+
+### 运行前必读
+
+- **安装依赖**：`pip install pymupdf4llm pillow`（venv 中尚未安装，PDF 上传会提示）
+- **清空旧库**：chroma_db 里旧的 512 一刀切块没有 type 标记，会稀释检索效果，建议删除 `chroma_db` 目录后重新上传论文
+- **调试打印**：上传 PDF 时终端会打印前 3000 字符 + GFM 分隔行统计，用于确认 pymupdf4llm 是否把表格转成了 `| --- |` 格式；确认无误后可删除 `load_and_split_document` 中的 `[DEBUG]` 打印块
+- **已知行为**：表格在"正文章节块"中还会以一份 HTML 形态存在（MarkdownHeaderTextSplitter 内部转换所致），检索与答案以独立的 `type="table"` 块为准，不影响正确性
+
+---
+
+## 第一次修改：2026-08-23 —— 新建 sci_rag_core.py，完成 4 项改造任务（模块级交付）
+
+### 背景
+
+原 app.py 使用 PyPDFLoader（科学论文乱码）+ RecursiveCharacterTextSplitter(512)
+（上下文割裂）+ n_results=3 + 通用 Prompt（易幻觉），无法胜任 Nature 论文。
+
+### 交付内容
+
+| 文件 | 内容 |
+| --- | --- |
+| `sci_rag_core.py` | **新建**。任务 1：`load_documents()` 用 pymupdf4llm 把 PDF 转 Markdown（保留 \| --- \| 表格、LaTeX 行内公式），图片提取为 PNG 并打 `[Image: xxx.png]` 占位符；任务 2：`split_documents()` MarkdownHeaderTextSplitter 标题级切分 + 超长块回退 RecursiveCharacterTextSplitter(1024/128)；任务 3：`_extract_tables_from_markdown()` 表格独立成块（type="table"）+ `rerank_with_table_priority()` 关键词重排序；任务 4：`SCIENTIFIC_SYSTEM_PROMPT` 防幻觉三规则。另含 `retrieve_for_question()` 统一检索入口（n_results=6） |
+| `test_sci_rag.py` | **新建**。验证脚本：标题切分、表格提取、重排序、端到端检索（真实 embedding + 临时 ChromaDB），全部通过 |
+
+### 当时遗留的问题
+
+- 上次只交付了独立模块 + app.py 接线说明，**未直接修改 app.py**（本次修改完成接线并强化了表格召回）
+- 旧版切分产物残留在 chroma_db 中，需要清空重建
+
+### 当前文件状态
+
+- `app.py`：**本次改造后的唯一权威实现**（自包含全部逻辑）
+- `sci_rag_core.py`：第一次修改的模块实现，现作为参考保留；确认 app.py 工作正常后可删除（`test_sci_rag.py` 依赖它，如需保留回归测试则一并保留）
