@@ -6,3 +6,5 @@ openai
 gradio
 pypdf
 python-docx
+ragas
+datasets

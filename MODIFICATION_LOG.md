@@ -4,6 +4,72 @@
 
 ---
 
+## 第九次修改：2026-08-24 —— 接入 RAGAS 评估框架（evaluation/ + return_contexts）
+
+### 背景
+
+为量化 Sci-RAG 的检索与生成质量，引入 RAGAS 框架计算三个核心指标：
+Context Relevance（上下文相关性）、Answer Faithfulness（答案忠实度）、
+Answer Relevance（答案相关性）。评判 LLM 复用项目自带的 DeepSeek
+客户端（deepseek-chat），AnswerRelevancy 所需 embedding 复用本地缓存的
+BAAI/bge-small-zh-v1.5，均不新增外部 API 依赖。
+
+### 修改内容
+
+| 位置 | 改动 |
+| --- | --- |
+| `requirements.txt` | 新增 `ragas`、`datasets` 两行 |
+| `app.py` `query_knowledge()` | 签名改为 `(message, history=None, return_contexts=True)`；`return_contexts=True` 时返回 `{"answer": 原始回答（不含参考来源页脚）, "contexts": 实际进入提示词的上下文列表（重排序/过滤后）}`，所有早退分支（空问题/空知识库/无检索结果）与异常分支同样返回 dict 形态，契约统一；`False` 时保持原字符串行为不变 |
+| `app.py` 新增 `chat_respond()` | Gradio 包装：`query_knowledge(message, history, return_contexts=False)`，ChatInterface 的 `fn` 改接它（默认值变 True 后 UI 必须显式关闭，否则聊天会拿到 dict） |
+| `evaluation/test_questions.json` | **新建**。11 题测试集（6 表格数值 + 3 方法 + 2 综合），全部基于 2602.08213v1.pdf 真实数据：Table 1/2/5/6 数值、GRPO、三阶段训练、4,855 样本 SFT 数据集、Pareto 自平衡机制；每题含 `question`/`ground_truth`/`contexts`（金标准上下文） |
+| `evaluation/evaluate.py` | **新建**。加载测试集 → 逐题 `query_knowledge(return_contexts=True)` → RAGAS 三指标打分（每题取重排序后 top-10 上下文，`--max-contexts` 可调）→ 输出 `evaluation_report.json` / `evaluation_report.md`；支持 `--limit N` 冒烟测试 |
+
+### 依赖兼容性踩坑（ragas 0.4.3 + langchain 1.x 生态，均已绕过）
+
+1. **vertexai 模块缺失**：ragas 0.4.3 顶层导入 `langchain_community.chat_models.vertexai`，
+   但 langchain-community 0.4.2（最新版）已移除该模块（集成迁至 langchain-classic）。
+   evaluate.py 在 import ragas 之前向 `sys.modules` 注册占位模块（桩类不可实例化，
+   评估只用 OpenAI 兼容接口，不受影响）。
+2. **evaluate() 拒绝新指标**：`ragas.metrics.collections` 的新指标（BaseMetric 体系）
+   过不了 evaluate() 的 `isinstance(m, Metric)` 校验（上游 0.4.3 内部不一致），
+   改用 `ragas.metrics` 经典指标类，经 `evaluate(llm=..., embeddings=...)` 注入。
+3. **旧式接口缺口**：经典 `ContextRelevance`（_nv_metrics）调用旧式
+   `llm.agenerate_text()`，`llm_factory` 返回的 InstructorLLM 没有该方法 →
+   在实例上补方法（内部走 DeepSeek 客户端 + `asyncio.to_thread`，返回
+   `.generations[0][0].text`）；经典 `AnswerRelevancy` 调用 Langchain 风格
+   `embed_query`/`embed_documents`，新版 HuggingFaceEmbeddings 只有 `embed_texts` →
+   同样在实例上补两个方法。
+4. **结果列名**：经典 ContextRelevance 的指标名为 `nv_context_relevance`
+   （而非 context_relevance），报告列名映射已按此处理。
+5. **openai 降级**：pip 安装 ragas 时 openai 3.3.1 → 1.109.1（ragas 依赖要求），
+   app.py 的 `client.chat.completions.create` 用法在 1.x 下完全兼容，已验证。
+
+### 验证（冒烟测试 --limit 2 全链路 ✅）
+
+- 2 题查询均返回 dict 形态：`answer` 正确（0.2712 / 0.2060），contexts 56/55 个
+- 三指标均产出有效分数：Context Relevance 1.0000、Faithfulness 0.5000、
+  Answer Relevance 0.7103；报告 JSON/MD 正常生成
+- 全量 11 题评估已运行，见 `evaluation/evaluation_report.json`
+
+### 运行方式
+
+```bash
+./venv/bin/python evaluation/evaluate.py               # 全量（11 题，约 20-40 分钟）
+./venv/bin/python evaluation/evaluate.py --limit 3     # 冒烟测试
+./venv/bin/python evaluation/evaluate.py --max-contexts 5
+```
+
+### 已知行为（未修）
+
+- DeepSeek 评判模型对 `AnswerRelevancy` 的 n=3 请求只返回 1 个生成
+  （ragas 打印 "LLM returned 1 generations instead of requested 3"，自动降级不报错）；
+- 答案中"根据参考片段 [X] 所示"的编号在 RAGAS 拿到的 raw contexts 中不存在
+  （编号是 query_knowledge 组装提示词时加的），Faithfulness 判定可能因此偏低；
+- ragas 0.4.3 的三处兼容补丁集中在 `evaluate.py` 头部，上游修复后可按注释
+  切换回 `ragas.metrics.collections` 并删除补丁。
+
+---
+
 ## 第八次修改：2026-08-24 —— query_knowledge 新增 Table N 二次过滤（caption 级）+ 检索提示
 
 ### 背景
