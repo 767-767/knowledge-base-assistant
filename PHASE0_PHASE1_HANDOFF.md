@@ -60,6 +60,28 @@ F1 score 为 `0.3404`。旧 ChromaDB 的 104 个块中也存在对应的独立 T
 新增/更新的离线回归测试共 11 项，覆盖上述单元格定位、跨表拒答和旧库兼容场景；未调用
 DeepSeek，未重建 ChromaDB，未运行 Gradio 或完整 RAGAS。
 
+## 一键网页验收
+
+新增 `scripts/launch_phase1_ui_test.sh`。在项目根目录执行：
+
+```bash
+bash scripts/launch_phase1_ui_test.sh
+```
+
+脚本会在 `/tmp` 创建临时空数据库，导入默认的
+`../2602.08213v1.pdf`，然后启动正常的 Gradio UI。脚本读取项目根目录的
+`.env`，但不会复制或修改密钥；按 `Ctrl+C` 后临时数据库自动清理，当前
+`chroma_db/` 不会被写入。
+
+如需只测试旧数据库兼容性：
+
+```bash
+bash scripts/launch_phase1_ui_test.sh --existing
+```
+
+如附件 PDF 不在默认路径，可传绝对路径作为第一个参数。完整验收清单已同步到
+`README.md`，包括三项 Table 1/Table 2 数值、上传、问答、大纲和出题功能。
+
 ## 未包含在本轮
 
 - Hybrid/BM25/RRF/cross-encoder reranker。
