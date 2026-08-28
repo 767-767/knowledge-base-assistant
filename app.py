@@ -24,6 +24,7 @@ from sci_rag_core import (
     split_to_chunks,
     table_number_from_question,
 )
+from sci_rag_retrieval import BM25Index, reciprocal_rank_fusion
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,9 @@ class RuntimeConfig:
     deepseek_model: str = "deepseek-chat"
     retrieval_k: int = 12
     context_k: int = 10
+    retrieval_mode: str = "dense"
+    hybrid_candidate_k: int = 50
+    hybrid_rrf_k: int = 60
 
     @classmethod
     def from_env(cls) -> "RuntimeConfig":
@@ -46,6 +50,9 @@ class RuntimeConfig:
                 return default
             return value if value > 0 else default
 
+        retrieval_mode = os.getenv("SCI_RAG_RETRIEVAL_MODE", cls.retrieval_mode).strip().casefold()
+        if retrieval_mode not in {"dense", "hybrid"}:
+            retrieval_mode = cls.retrieval_mode
         return cls(
             embedding_model=os.getenv("SCI_RAG_EMBEDDING_MODEL", cls.embedding_model),
             db_path=os.getenv("SCI_RAG_DB_PATH", cls.db_path),
@@ -53,7 +60,23 @@ class RuntimeConfig:
             deepseek_model=os.getenv("DEEPSEEK_MODEL", cls.deepseek_model),
             retrieval_k=positive_int("SCI_RAG_RETRIEVAL_K", cls.retrieval_k),
             context_k=positive_int("SCI_RAG_CONTEXT_K", cls.context_k),
+            retrieval_mode=retrieval_mode,
+            hybrid_candidate_k=positive_int(
+                "SCI_RAG_HYBRID_CANDIDATE_K", cls.hybrid_candidate_k
+            ),
+            hybrid_rrf_k=positive_int("SCI_RAG_HYBRID_RRF_K", cls.hybrid_rrf_k),
         )
+
+
+@dataclass
+class LexicalSnapshot:
+    """Cached collection text used only when hybrid retrieval is enabled."""
+
+    collection_count: int
+    ids: list[str]
+    texts: list[str]
+    metadatas: list[dict[str, Any]]
+    index: BM25Index
 
 
 class Runtime:
@@ -64,6 +87,10 @@ class Runtime:
         self.client = client
         self.embedding_model = embedding_model
         self.collection = collection
+        self._lexical_snapshot: LexicalSnapshot | None = None
+
+    def invalidate_lexical_index(self) -> None:
+        self._lexical_snapshot = None
 
 
 _runtime: Runtime | None = None
@@ -211,6 +238,7 @@ def add_document_to_db(file_path: str, runtime: Runtime | None = None) -> str:
             documents=[text],
             metadatas=[_metadata_for_chroma(metadata)],
         )
+    runtime.invalidate_lexical_index()
     return f"✅ 成功添加 {len(chunks)} 个文本块到知识库，当前共 {runtime.collection.count()} 个。"
 
 
@@ -255,6 +283,111 @@ def _merge_results(
     return texts, ids, metas
 
 
+def _flat_result_values(result: dict[str, Any], key: str) -> list[Any]:
+    """Read Chroma get/query values while tolerating simple test doubles."""
+
+    values = result.get(key) or []
+    if values and isinstance(values[0], list):
+        values = values[0]
+    return list(values)
+
+
+def _lexical_search_text(text: str, metadata: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            text,
+            str(metadata.get("table_caption", "")),
+            str(metadata.get("headers", "")),
+            str(metadata.get("source", "")),
+        ]
+    )
+
+
+def _get_lexical_snapshot(runtime: Runtime) -> LexicalSnapshot:
+    """Build or reuse a BM25 snapshot of the current Chroma collection."""
+
+    collection_count = runtime.collection.count()
+    cached = runtime._lexical_snapshot
+    if cached is not None and cached.collection_count == collection_count:
+        return cached
+
+    result = runtime.collection.get(include=["documents", "metadatas"])
+    raw_ids = _flat_result_values(result, "ids")
+    raw_texts = _flat_result_values(result, "documents")
+    raw_metas = _flat_result_values(result, "metadatas")
+    ids = [str(value) for value in raw_ids]
+    texts = [str(raw_texts[index]) if index < len(raw_texts) else "" for index in range(len(ids))]
+    metadatas = [
+        dict(raw_metas[index]) if index < len(raw_metas) and isinstance(raw_metas[index], dict) else {}
+        for index in range(len(ids))
+    ]
+    search_documents = [
+        _lexical_search_text(text, metadata) for text, metadata in zip(texts, metadatas)
+    ]
+    snapshot = LexicalSnapshot(
+        collection_count=collection_count,
+        ids=ids,
+        texts=texts,
+        metadatas=metadatas,
+        index=BM25Index(search_documents),
+    )
+    runtime._lexical_snapshot = snapshot
+    return snapshot
+
+
+def _hybrid_fused_result(
+    question: str,
+    dense: dict[str, Any],
+    runtime: Runtime,
+    candidate_k: int,
+) -> dict[str, Any]:
+    """Fuse Chroma dense results with a cached lexical ranking using RRF."""
+
+    dense_ids = [str(value) for value in _flat_result_values(dense, "ids")]
+    dense_texts = _flat_result_values(dense, "documents")
+    dense_metas = _flat_result_values(dense, "metadatas")
+    dense_by_id = {
+        doc_id: (
+            str(dense_texts[index]) if index < len(dense_texts) else "",
+            dict(dense_metas[index])
+            if index < len(dense_metas) and isinstance(dense_metas[index], dict)
+            else {},
+        )
+        for index, doc_id in enumerate(dense_ids)
+    }
+
+    snapshot = _get_lexical_snapshot(runtime)
+    lexical = (
+        snapshot.index.retrieve(question, candidate_k)
+        if snapshot.index.has_lexical_signal(question)
+        else []
+    )
+    lexical_ids = [snapshot.ids[int(item.key)] for item in lexical]
+    snapshot_by_id = {
+        doc_id: (snapshot.texts[index], snapshot.metadatas[index])
+        for index, doc_id in enumerate(snapshot.ids)
+    }
+    fused = reciprocal_rank_fusion(
+        [dense_ids, lexical_ids],
+        rrf_k=runtime.config.hybrid_rrf_k,
+        limit=candidate_k,
+    )
+
+    ids: list[str] = []
+    texts: list[str] = []
+    metadatas: list[dict[str, Any]] = []
+    for item in fused:
+        doc_id = str(item.key)
+        payload = dense_by_id.get(doc_id) or snapshot_by_id.get(doc_id)
+        if payload is None:
+            continue
+        text, metadata = payload
+        ids.append(doc_id)
+        texts.append(text)
+        metadatas.append(metadata)
+    return {"ids": [ids], "documents": [texts], "metadatas": [metadatas]}
+
+
 def query_knowledge(
     message: str,
     history: Any = None,
@@ -278,12 +411,19 @@ def query_knowledge(
         return {"answer": answer, "contexts": [], "context_ids": [], "context_metadatas": []} if return_contexts else answer
 
     question_embedding = runtime.embedding_model.encode(message).tolist()
-    candidate_k = min(runtime.config.retrieval_k, runtime.collection.count())
+    configured_candidate_k = (
+        runtime.config.hybrid_candidate_k
+        if runtime.config.retrieval_mode == "hybrid"
+        else runtime.config.retrieval_k
+    )
+    candidate_k = min(configured_candidate_k, runtime.collection.count())
     dense = runtime.collection.query(
         query_embeddings=[question_embedding],
         n_results=candidate_k,
         include=["documents", "metadatas", "distances"],
     )
+    if runtime.config.retrieval_mode == "hybrid":
+        dense = _hybrid_fused_result(message, dense, runtime, candidate_k)
     table_results = None
     if is_table_question(message):
         table_results = runtime.collection.get(

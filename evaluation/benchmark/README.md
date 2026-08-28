@@ -107,6 +107,10 @@ HF_HUB_OFFLINE=1 ./venv/bin/python evaluation/benchmark_retrieval.py \
 候选做 RRF（默认 `rrf_k=60`）。脚本使用 `local_files_only=True` 和
 `HF_HUB_OFFLINE=1`；模型不在本地时直接失败，不会下载。
 
+Hybrid 还包含弱词法信号保护：如果 CJK 问题在语料中没有命中任何 CJK 词元，且只命中
+少于两个 ASCII 词元，则跳过该问题的 BM25 列表并保留 dense 排名。这避免中文问题对
+英文论文只命中一个高频方法名时，低信息量的词法顺序反而挤掉跨语言 dense 证据。
+
 同一基准的全局结果（仅作检索比较）如下：
 
 | 方法 / k | 参考片段覆盖 | 目标论文命中 | 页级命中 | Table N 命中 |
@@ -118,9 +122,19 @@ HF_HUB_OFFLINE=1 ./venv/bin/python evaluation/benchmark_retrieval.py \
 | dense @5 | 0.330 | 0.943 | 0.548 | 0.444 |
 | dense @10 | 0.443 | 0.981 | 0.762 | 0.667 |
 | hybrid-RRF @1 | 0.208 | 0.830 | 0.286 | 0.500 |
-| hybrid-RRF @5 | 0.443 | 0.943 | 0.667 | 0.778 |
-| hybrid-RRF @10 | 0.525 | 0.981 | 0.810 | 0.833 |
+| hybrid-RRF @5 | 0.481 | 0.943 | 0.619 | 0.778 |
+| hybrid-RRF @10 | 0.525 | 0.981 | 0.786 | 0.833 |
 
 本次结果不支持直接把 Hybrid 切换为线上默认：它提升了参考片段和页级代理，但在
 `Table N` 命中上仍低于 BM25 的 top-10；还需要保留显式表格的确定性过滤，并在更大
 测试集上确认收益。
+
+线上原型已提供默认关闭的 Hybrid 接线，用于受控网页对比：
+
+```bash
+SCI_RAG_RETRIEVAL_MODE=hybrid ./venv/bin/python app.py
+```
+
+该模式复用本页同一 BM25/RRF 实现，并在融合后继续执行显式 `Table N` 过滤和确定性
+单元格定位；默认 `dense` 行为不变。它尚未加入 cross-encoder reranker，也没有在本
+基准上执行答案生成或 RAGAS，因此不能把上述检索代理解释为答案正确率。

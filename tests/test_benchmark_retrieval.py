@@ -1,17 +1,18 @@
 import unittest
 
-from evaluation.benchmark_retrieval import BM25Index, RankedChunk, evaluate_document, reciprocal_rank_fusion
+from evaluation.benchmark_retrieval import evaluate_document, searchable_text
+from sci_rag_retrieval import BM25Index, RankedItem, reciprocal_rank_fusion
 from sci_rag_core import Chunk
 
 
 class BenchmarkRetrievalTests(unittest.TestCase):
     def test_rrf_deduplicates_each_ranked_list_and_preserves_fused_order(self):
         fused = reciprocal_rank_fusion(
-            [[1, 2, 2, 3], [3, RankedChunk(1, 0.1), 4]],
+            [[1, 2, 2, 3], [3, RankedItem(1, 0.1), 4]],
             rrf_k=10,
         )
 
-        self.assertEqual([item.index for item in fused], [1, 3, 2, 4])
+        self.assertEqual([item.key for item in fused], [1, 3, 2, 4])
         self.assertGreater(fused[0].score, fused[2].score)
 
     def test_rrf_rejects_non_positive_constant(self):
@@ -30,12 +31,25 @@ class BenchmarkRetrievalTests(unittest.TestCase):
                 {"page": 2, "type": "table", "table_number": 1, "table_caption": "Table 1: Results"},
             ),
         ]
-        index = BM25Index(chunks)
+        index = BM25Index(searchable_text(chunk) for chunk in chunks)
         first = index.retrieve("Table 2 DrugR* Score", 3)
         second = index.retrieve("Table 2 DrugR* Score", 3)
 
-        self.assertEqual([item.index for item in first], [item.index for item in second])
-        self.assertEqual(first[0].index, 1)
+        self.assertEqual([item.key for item in first], [item.key for item in second])
+        self.assertEqual(first[0].key, 1)
+
+    def test_bm25_detects_weak_cross_language_signal(self):
+        index = BM25Index(
+            [
+                "DrugR overview and evaluation.",
+                "DrugR dataset contains 4,855 samples.",
+                "Table 2 reports DrugR* scores.",
+            ]
+        )
+
+        self.assertFalse(index.has_lexical_signal("DrugR 的显式推理数据集有多少样本？"))
+        self.assertTrue(index.has_lexical_signal("Table 2 中 DrugR* 的得分是多少？"))
+        self.assertTrue(index.has_lexical_signal("DrugR dataset samples"))
 
     def test_diagnostic_reports_page_and_table_proxies_separately(self):
         chunks = [

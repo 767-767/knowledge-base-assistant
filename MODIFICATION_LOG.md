@@ -2,6 +2,31 @@
 
 > 记录本项目从"通用学习工作台"改造为 Sci-RAG 的全过程。按时间倒序排列。
 
+> 2026-08-28 Phase 2 网页 A/B 复测：用户分别运行 dense 与 Hybrid，表格题和其他既有
+> 功能正常。修复后的显式推理数据集问题在两种模式下均返回 `4,855`、DrugBank 正负
+> 样本构造和 DeepSeek-R1 标注流程，来源为同一 PDF，不再由 table 块挤占证据。该回答
+> 事实正确但只覆盖论文概述，未穷尽 §4.4.1 的 `>0.6`、ADMETLab 和性质增量/SMILES
+> 理由生成细节，因此记录为网页回归通过、严格金标准部分覆盖，而非完整答案满分。
+
+> 2026-08-28 Phase 2 数量型正文问题修复：此前 `is_table_question()` 把单独出现的
+> “多少/样本量/比率/数值”也判为表格意图，会加载并置顶全库 table 块。对“显式推理
+> 数据集包含多少个样本、标注管道是什么”这类正文题，8 个表格块因此占据最终 10 个
+> 上下文，包含 `4,855` 和 reverse-engineering pipeline 的真实正文被挤出。现在只有
+> 明确出现 `Table`、`表2`、`表格`、`下表`、`表中`等指代才启用全表保护；一般数量题
+> 保持正常 dense/Hybrid 排名。对于中文问题只在英文语料命中少于两个 ASCII 词元的
+> 弱 BM25 场景，Hybrid 现在跳过词法列表并保留 dense 排名。当前 Hybrid top-1/3/5/10
+> 参考片段覆盖代理为 `0.208/0.349/0.481/0.525`，页级代理为
+> `0.286/0.476/0.619/0.786`。新增意图、弱词法信号和运行时契约回归，完整离线测试为
+> 35/35；当前 SQLite 仅只读核验，未调用 DeepSeek、未写 ChromaDB。
+
+> 2026-08-28 Phase 2 可选 Hybrid 线上接入：新增无副作用的 `sci_rag_retrieval.py`，
+> 让离线基准和 `app.py` 共用 BM25 与 RRF；`SCI_RAG_RETRIEVAL_MODE=hybrid` 才启用
+> Chroma dense + 内存 BM25 融合，默认仍为 `dense`。词法快照首次查询构建、后续复用，
+> 通过当前 runtime 上传文档后失效；显式 Table N 过滤和确定性单元格定位继续在融合后
+> 执行。35 项离线测试、5 篇/53 题 SHA-256 校验、BM25 与 Hybrid 基准复测通过；未启动
+> Gradio、未调用 DeepSeek/RAGAS、未写 ChromaDB。当前证据不支持把 Hybrid 设为默认，
+> 也未加入 learned cross-encoder reranker；详情见 `PHASE2_HYBRID_HANDOFF.md`。
+
 > 2026-08-28 Phase 2 解析回归：`sci_rag_core.py` 兼容表格前后 caption、跨列分组表头、
 > PDF 断词、独立单位列和加粗标记相邻实体，并排除 DOI/作者元数据布局表。新增
 > `tests/test_parser_regression.py` 的 8 个离线 fixture；四篇外部 PDF 只读冒烟确认
@@ -15,10 +40,10 @@
 > `0.811/0.868/0.868/0.906`，显式表号命中率为 `0.667/0.833/0.833/1.000`。
 > 该诊断不调用 Embedding、Chroma、DeepSeek、Gradio 或 RAGAS，结果不能解释为答案正确率。
 
-> 2026-08-28 Phase 2 Hybrid/RRF 离线对比：`evaluation/benchmark_retrieval.py` 增加本地
+> 2026-08-28 Phase 2 初始 Hybrid/RRF 离线对比：`evaluation/benchmark_retrieval.py` 增加本地
 > dense（Sentence-Transformers，`HF_HUB_OFFLINE=1`）和 BM25+dense 的 RRF 模式，并复用
 > 单一模型实例；新增 RRF 去重、稳定排序和跨论文隔离测试。Hybrid 全局 top-1/3/5/10
-> 参考片段覆盖代理为 `0.208/0.330/0.443/0.525`，Table N 命中率为
+> 当时尚未加入弱跨语言词法保护，参考片段覆盖代理为 `0.208/0.330/0.443/0.525`，Table N 命中率为
 > `0.500/0.667/0.778/0.833`。仅证明离线实验可运行，未替换线上 app 默认 dense 检索，
 > 未调用网络模型、未修改 ChromaDB。
 

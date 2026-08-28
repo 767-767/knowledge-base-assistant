@@ -20,7 +20,7 @@ TABLE_SEPARATOR_RE = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+$")
 TABLE_NUMBER_RE = re.compile(r"\btable\s*(\d+)\b", re.IGNORECASE)
 TABLE_CAPTION_RE = re.compile(r"^\s*table\s*(\d+)\b", re.IGNORECASE)
 TABLE_QUESTION_RE = re.compile(
-    r"\btable\b|表\s*\d*|数值|多少|样本量|比率|\bn\s*=",
+    r"\btables?\b|表\s*\d+|表格|(?:该|此|下|上|上述|以下)表|表(?:中|内|里|所示)",
     re.IGNORECASE,
 )
 ENTITY_RE = re.compile(r"[A-Za-z0-9_*+\-]+(?:[-\s][A-Za-z0-9_*+\-]+)*")

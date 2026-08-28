@@ -109,10 +109,35 @@ For a no-API, no-Chroma multi-paper retrieval baseline, run:
 ```
 
 This BM25-lite diagnostic ranks one global in-memory index and reports document,
-reference-context, page, and table-number proxies. It is the comparison gate
-before implementing Hybrid/RRF; it does not call DeepSeek or prove answer
-correctness.
+reference-context, page, and table-number proxies. It is the fixed comparison
+baseline for Hybrid/RRF; it does not call DeepSeek or prove answer correctness.
 
 For a local-only Hybrid/RRF comparison (the embedding model must already be
 cached), use `--retriever hybrid` with `HF_HUB_OFFLINE=1`. The diagnostic does
 not change the app's default dense retrieval path or the existing ChromaDB.
+
+## Experimental Hybrid runtime
+
+The application still defaults to the original Chroma dense retrieval. To test
+the experimental BM25 + dense Reciprocal Rank Fusion path for one process, run:
+
+```bash
+SCI_RAG_RETRIEVAL_MODE=hybrid ./venv/bin/python app.py
+```
+
+The first Hybrid question reads the current collection once and builds an
+in-memory BM25 snapshot. Later questions reuse it, and a document upload through
+this runtime invalidates it. `SCI_RAG_HYBRID_CANDIDATE_K` controls candidates
+from each ranking (default `50`), `SCI_RAG_HYBRID_RRF_K` controls the RRF
+constant (default `60`), and `SCI_RAG_CONTEXT_K` still caps generation context.
+No new dependency or database rebuild is required.
+
+Explicit `Table N` handling runs after fusion: all structured table chunks are
+still checked, another table cannot replace the requested one, and a resolvable
+row/column question still uses deterministic cell lookup without calling the
+generation model. Generic quantity phrases such as “how many samples” do not
+trigger an all-table scan unless the question explicitly refers to a table.
+This is an opt-in retrieval experiment, not a learned
+cross-encoder reranker. The current 5-paper/53-case proxy metrics do not justify
+making Hybrid the default; see `evaluation/benchmark/README.md` and
+`PHASE2_HYBRID_HANDOFF.md` for results and limitations.
