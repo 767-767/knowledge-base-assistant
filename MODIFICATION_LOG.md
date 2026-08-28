@@ -2,6 +2,14 @@
 
 > 记录本项目从"通用学习工作台"改造为 Sci-RAG 的全过程。按时间倒序排列。
 
+> 2026-08-28 Phase 2 多事实上下文覆盖：新增纯本地、确定性的 `required_facts` 覆盖统计，
+> 输出 top-1/3/5/10 的 macro/micro、full/partial/zero、分论文/分题型和逐题遗漏事实。
+> 跨语言或表面形式差异只允许逐题声明 `required_fact_aliases`，校验器保证别名出现在人工
+> gold contexts；DrugR 的 GRPO/RL 金标准片段同步补全。53/53 题标注自洽，43 项测试通过。
+> 当前 BM25 / dense / Hybrid @10 完整事实覆盖率为 `0.547/0.434/0.547`；Hybrid @50
+> 候选池为 `0.792`，支持把本地 reranker 作为下一项受控实验，但 11 题在 @50 仍不完整，
+> 不能只靠重排。未调用 DeepSeek/RAGAS、未启动 Gradio、未写 ChromaDB。
+
 > 2026-08-28 Phase 2 网页 A/B 复测：用户分别运行 dense 与 Hybrid，表格题和其他既有
 > 功能正常。修复后的显式推理数据集问题在两种模式下均返回 `4,855`、DrugBank 正负
 > 样本构造和 DeepSeek-R1 标注流程，来源为同一 PDF，不再由 table 块挤占证据。该回答

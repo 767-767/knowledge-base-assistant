@@ -109,8 +109,12 @@ For a no-API, no-Chroma multi-paper retrieval baseline, run:
 ```
 
 This BM25-lite diagnostic ranks one global in-memory index and reports document,
-reference-context, page, and table-number proxies. It is the fixed comparison
-baseline for Hybrid/RRF; it does not call DeepSeek or prove answer correctness.
+reference-context, page, table-number, and deterministic required-fact coverage
+proxies. Add `--show-failures` to print every case that is not fully covered and
+its missing facts. Cross-language fact matches are accepted only through
+case-level aliases that the validator checks against human gold contexts. It is
+the fixed comparison baseline for Hybrid/RRF; it does not call DeepSeek or prove
+answer correctness.
 
 For a local-only Hybrid/RRF comparison (the embedding model must already be
 cached), use `--retriever hybrid` with `HF_HUB_OFFLINE=1`. The diagnostic does
@@ -140,4 +144,7 @@ trigger an all-table scan unless the question explicitly refers to a table.
 This is an opt-in retrieval experiment, not a learned
 cross-encoder reranker. The current 5-paper/53-case proxy metrics do not justify
 making Hybrid the default; see `evaluation/benchmark/README.md` and
-`PHASE2_HYBRID_HANDOFF.md` for results and limitations.
+`PHASE2_CONTEXT_COVERAGE_HANDOFF.md` for results and limitations. Hybrid's
+top-50 candidate pool contains substantially more complete evidence than its
+top-10 output, so a local reranker is justified as a controlled next experiment,
+not as an already-proven production improvement.

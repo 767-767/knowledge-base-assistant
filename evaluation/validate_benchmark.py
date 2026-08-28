@@ -17,6 +17,7 @@ from evaluation.benchmark_loader import (  # noqa: E402
     benchmark_summary,
     load_benchmark,
 )
+from evaluation.context_coverage import unsupported_gold_facts  # noqa: E402
 
 
 def main() -> int:
@@ -43,9 +44,22 @@ def main() -> int:
         return 1
 
     summary = benchmark_summary(benchmark)
+    unsupported = {
+        case["case_id"]: missing
+        for case in benchmark["cases"]
+        if (missing := unsupported_gold_facts(case))
+    }
+    if unsupported:
+        for case_id, missing in unsupported.items():
+            print(
+                f"❌ 金标准片段不支持 required_facts：{case_id}: {', '.join(missing)}",
+                file=sys.stderr,
+            )
+        return 3
     status = "complete" if summary["complete"] else "pending"
     print(f"✅ 基准集格式有效：{summary['benchmark_id']}")
     print(f"文档数：{summary['documents']}；用例数：{summary['cases']}；状态：{status}")
+    print("required_facts：全部可由金标准片段或显式别名核验")
     for document_id, count in summary["cases_per_document"].items():
         print(f"  - {document_id}: {count} 题")
     if not summary["complete"]:

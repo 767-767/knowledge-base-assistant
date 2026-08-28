@@ -73,7 +73,8 @@
       "ground_truth": "GRPO（Group Relative Policy Optimization）",
       "required_facts": ["GRPO", "Group Relative Policy Optimization"],
       "contexts": [
-        "### 4.7 Training Settings\nWe adopt GRPO as the reinforcement learning algorithm. Pareto-based dynamic reweighting is applied every 100 batches. All reward components are normalized to compatible ranges to avoid scale dominance. We use AdamW for optimization, with a learning rate of 1 × 10^−5 for reinforcement learning. Each RL batch contains 16-32 rollouts depending on the model size."
+        "### 4.7 Training Settings\nWe adopt GRPO as the reinforcement learning algorithm. Pareto-based dynamic reweighting is applied every 100 batches. All reward components are normalized to compatible ranges to avoid scale dominance. We use AdamW for optimization, with a learning rate of 1 × 10^−5 for reinforcement learning. Each RL batch contains 16-32 rollouts depending on the model size.",
+        "Reinforcement learning (RL): we conduct the Group Relative Policy Optimization (GRPO) algorithm with the multi-granular reward function."
       ]
     },
     {
@@ -83,7 +84,8 @@
       "ground_truth": "三个阶段：(1) 持续预训练（CPT）——用知识库、文献记录等领域语料增强模型的化学知识，同时混入通用与领域指令数据防止灾难性遗忘；(2) 监督微调（SFT）——用反向数据工程构造的任务数据训练模型识别不良性质并设计更好分子的能力；(3) 强化学习（RL）——多目标强化学习进一步优化。",
       "required_facts": ["CPT", "SFT", "RL"],
       "contexts": [
-        "**Model Training**. We adopt LLaMA-3-8B-Instruct as our backbone model. The training process is divided into three stage. (1) Continual pre-training (CPT): we collect domain corpus like knowledge bases and literature records to help enhance the chemical knowledge of the model. Both general and domain instruction tuning data is used to prevent catastrophic forgetting. (2) Supervised fine-tuning (SFT): we use the task data constructed by reverse data engineering to train the capability of recognizing bad properties and designing better molecules."
+        "**Model Training**. We adopt LLaMA-3-8B-Instruct as our backbone model. The training process is divided into three stage. (1) Continual pre-training (CPT): we collect domain corpus like knowledge bases and literature records to help enhance the chemical knowledge of the model. Both general and domain instruction tuning data is used to prevent catastrophic forgetting. (2) Supervised fine-tuning (SFT): we use the task data constructed by reverse data engineering to train the capability of recognizing bad properties and designing better molecules.",
+        "(3) Reinforcement learning (RL): we conduct the Group Relative Policy Optimization (GRPO) algorithm with the multi-granular reward function."
       ]
     },
     {

@@ -4,7 +4,12 @@ import json
 from pathlib import Path
 import tempfile
 
-from evaluation.benchmark_loader import benchmark_summary, load_benchmark
+from evaluation.benchmark_loader import (
+    BenchmarkValidationError,
+    benchmark_summary,
+    load_benchmark,
+)
+from evaluation.context_coverage import unsupported_gold_facts
 
 
 class BenchmarkLoaderTests(unittest.TestCase):
@@ -21,6 +26,38 @@ class BenchmarkLoaderTests(unittest.TestCase):
         case = next(case for case in benchmark["cases"] if case["case_id"] == "af3-08")
         self.assertEqual(case["document_id"], "alphafold3-nature-2024")
         self.assertEqual(case["required_facts"], ["pLDDT", "PAE", "PDE"])
+        self.assertTrue(all(case.get("required_facts") for case in benchmark["cases"]))
+        self.assertTrue(all(not unsupported_gold_facts(case) for case in benchmark["cases"]))
+
+    def test_loader_rejects_alias_for_an_unknown_required_fact(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            manifest = {
+                "schema_version": 1,
+                "benchmark_id": "test",
+                "cases_path": "cases.jsonl",
+                "documents": [
+                    {"document_id": "paper", "filename": "paper.pdf", "sha256": "0" * 64}
+                ],
+            }
+            (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            (root / "cases.jsonl").write_text(
+                json.dumps(
+                    {
+                        "case_id": "case-1",
+                        "document_id": "paper",
+                        "question": "q",
+                        "ground_truth": "a",
+                        "contexts": ["alpha"],
+                        "required_facts": ["alpha"],
+                        "required_fact_aliases": {"beta": ["b"]},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(BenchmarkValidationError):
+                load_benchmark(root / "manifest.json")
 
     def test_verify_files_accepts_multiple_external_directories(self):
         with tempfile.TemporaryDirectory() as temp_root:

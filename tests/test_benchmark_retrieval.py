@@ -1,6 +1,10 @@
 import unittest
 
-from evaluation.benchmark_retrieval import evaluate_document, searchable_text
+from evaluation.benchmark_retrieval import (
+    evaluate_document,
+    fact_failure_lists,
+    searchable_text,
+)
 from sci_rag_retrieval import BM25Index, RankedItem, reciprocal_rank_fusion
 from sci_rag_core import Chunk
 
@@ -66,6 +70,7 @@ class BenchmarkRetrievalTests(unittest.TestCase):
                 "type": "table",
                 "contexts": ["|Model|Score|\n|---|---|\n|DrugR*|0.2060|"],
                 "source_pages": [3],
+                "required_facts": ["DrugR*", "0.2060"],
             }
         ]
         report = evaluate_document("paper", cases, chunks, [1, 2])
@@ -73,6 +78,8 @@ class BenchmarkRetrievalTests(unittest.TestCase):
         self.assertEqual(report["aggregate"]["1"]["source_page_hit_rate"], 1.0)
         self.assertEqual(report["aggregate"]["1"]["table_number_hit_rate"], 1.0)
         self.assertEqual(report["aggregate"]["1"]["reference_context_recall"], 1.0)
+        self.assertEqual(report["aggregate"]["1"]["required_fact_coverage_macro"], 1.0)
+        self.assertEqual(report["aggregate"]["1"]["full_fact_coverage_rate"], 1.0)
 
     def test_report_has_case_weighted_overall_aggregate(self):
         chunks = [Chunk("A result 1.", {"page": 1, "type": "text"})]
@@ -112,12 +119,43 @@ class BenchmarkRetrievalTests(unittest.TestCase):
                 "question": "DrugR score",
                 "contexts": ["DrugR score 0.20 in paper A."],
                 "source_pages": [2],
+                "required_facts": ["0.20"],
             }
         ]
         report = evaluate_document("all-documents", cases, chunks, [1, 2])
 
         self.assertEqual(report["aggregate"]["1"]["reference_context_recall"], 0.0)
         self.assertEqual(report["aggregate"]["2"]["reference_context_recall"], 1.0)
+        self.assertEqual(report["aggregate"]["1"]["required_fact_coverage_macro"], 0.0)
+        self.assertEqual(report["aggregate"]["2"]["required_fact_coverage_macro"], 1.0)
+
+    def test_multifact_coverage_improves_from_partial_to_full_with_larger_k(self):
+        chunks = [
+            Chunk("The dataset contains 4,855 samples.", {"page": 1, "type": "text"}),
+            Chunk("The split is 85%/10%/5%.", {"page": 2, "type": "text"}),
+        ]
+        cases = [
+            {
+                "case_id": "case-1",
+                "question": "dataset samples split",
+                "type": "method",
+                "contexts": ["4,855 samples", "85%/10%/5%"],
+                "source_pages": [1, 2],
+                "required_facts": ["4,855", "85%/10%/5%"],
+            }
+        ]
+        report = evaluate_document("paper", cases, chunks, [1, 2])
+        top_one = report["cases_detail"][0]["metrics"]["1"]
+        top_two = report["cases_detail"][0]["metrics"]["2"]
+
+        self.assertEqual(top_one["fact_coverage_status"], "partial")
+        self.assertEqual(top_one["required_fact_coverage"], 0.5)
+        self.assertEqual(top_two["fact_coverage_status"], "full")
+        self.assertEqual(top_two["required_fact_coverage"], 1.0)
+
+        failures = fact_failure_lists(report["cases_detail"], [1, 2])
+        self.assertEqual(failures["1"][0]["missing_facts"], ["85%/10%/5%"])
+        self.assertEqual(failures["2"], [])
 
 
 if __name__ == "__main__":

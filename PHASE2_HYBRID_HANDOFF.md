@@ -3,6 +3,10 @@
 日期：2026-08-28  
 分支：`phase2/hybrid-rerank`
 
+> 后续说明：本文件保留该分支提交时的历史代理分数。`phase2/context-coverage` 补全了
+> DrugR GRPO/RL 金标准证据并加入 required-fact 覆盖后，当前可比结果以
+> `PHASE2_CONTEXT_COVERAGE_HANDOFF.md` 和 `evaluation/benchmark/README.md` 为准。
+
 ## 本轮目标和结论
 
 本轮将已验证的 BM25/RRF 离线实现接入应用，但保持为显式启用的实验路径。默认

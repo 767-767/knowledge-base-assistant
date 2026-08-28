@@ -114,6 +114,26 @@ def _validate_resolved_case(case: dict[str, Any], case_id: str) -> None:
         or not all(isinstance(fact, str) and fact.strip() for fact in required_facts)
     ):
         raise BenchmarkValidationError(f"用例 {case_id} 的 required_facts 必须是非空字符串数组")
+    aliases = case.get("required_fact_aliases")
+    if aliases is not None:
+        if not isinstance(aliases, dict):
+            raise BenchmarkValidationError(
+                f"用例 {case_id} 的 required_fact_aliases 必须是对象"
+            )
+        unknown = sorted(set(aliases) - set(required_facts or []))
+        if unknown:
+            raise BenchmarkValidationError(
+                f"用例 {case_id} 的 required_fact_aliases 含未知事实：{', '.join(unknown)}"
+            )
+        for fact, values in aliases.items():
+            if (
+                not isinstance(values, list)
+                or not values
+                or not all(isinstance(value, str) and value.strip() for value in values)
+            ):
+                raise BenchmarkValidationError(
+                    f"用例 {case_id} 的事实 {fact} 别名必须是非空字符串数组"
+                )
 
 
 def load_benchmark(

@@ -24,6 +24,10 @@ if __package__ in {None, ""}:
 
 from app import load_and_split_document  # noqa: E402
 from evaluation.benchmark_loader import DEFAULT_MANIFEST, load_benchmark  # noqa: E402
+from evaluation.context_coverage import (  # noqa: E402
+    aggregate_fact_coverage,
+    case_fact_coverage,
+)
 from sci_rag_core import Chunk, normalize_for_match, table_number_from_question  # noqa: E402
 from sci_rag_retrieval import BM25Index, RankedItem, reciprocal_rank_fusion  # noqa: E402
 
@@ -201,15 +205,26 @@ def _case_table_hit(case: dict[str, Any], chunks: list[Chunk], ranked: list[Rank
     )
 
 
+def _case_required_fact_coverage(
+    case: dict[str, Any], chunks: list[Chunk], ranked: list[RankedItem]
+) -> dict[str, Any]:
+    contexts = [
+        chunk.page_content for chunk in _target_ranked_chunks(case, chunks, ranked)
+    ]
+    return case_fact_coverage(case, contexts)
+
+
 def _metric_mean(values: list[float | bool | None]) -> float | None:
     usable = [float(value) for value in values if value is not None]
     return sum(usable) / len(usable) if usable else None
 
 
-def aggregate_case_results(case_results: list[dict[str, Any]], top_k_values: list[int]) -> dict[str, dict[str, float | None]]:
+def aggregate_case_results(
+    case_results: list[dict[str, Any]], top_k_values: list[int]
+) -> dict[str, dict[str, Any]]:
     """Aggregate case-level diagnostics without weighting documents equally."""
 
-    aggregate: dict[str, dict[str, float | None]] = {}
+    aggregate: dict[str, dict[str, Any]] = {}
     for top_k in top_k_values:
         rows = [result["metrics"][str(top_k)] for result in case_results]
         aggregate[str(top_k)] = {
@@ -219,8 +234,62 @@ def aggregate_case_results(case_results: list[dict[str, Any]], top_k_values: lis
             "table_number_hit_rate": _metric_mean(
                 [row["table_number_hit"] for row in rows if row["table_number_hit"] is not None]
             ),
+            **aggregate_fact_coverage(rows),
         }
     return aggregate
+
+
+def aggregate_fact_coverage_by(
+    case_results: list[dict[str, Any]],
+    top_k_values: list[int],
+    field: str,
+) -> dict[str, dict[str, Any]]:
+    """Aggregate global fact coverage by document or question type."""
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for result in case_results:
+        groups.setdefault(str(result.get(field) or "unknown"), []).append(result)
+    return {
+        group: {
+            "cases": len(results),
+            "top_k": {
+                str(top_k): aggregate_fact_coverage(
+                    [result["metrics"][str(top_k)] for result in results]
+                )
+                for top_k in top_k_values
+            },
+        }
+        for group, results in sorted(groups.items())
+    }
+
+
+def fact_failure_lists(
+    case_results: list[dict[str, Any]], top_k_values: list[int]
+) -> dict[str, list[dict[str, Any]]]:
+    """Return every not-fully-covered case and its missing atomic facts."""
+
+    failures: dict[str, list[dict[str, Any]]] = {}
+    for top_k in top_k_values:
+        rows = []
+        for result in case_results:
+            metrics = result["metrics"][str(top_k)]
+            if metrics["fact_coverage_status"] in {"full", "not_scored"}:
+                continue
+            rows.append(
+                {
+                    "case_id": result["case_id"],
+                    "document_id": result["document_id"],
+                    "type": result["type"],
+                    "question": result["question"],
+                    "status": metrics["fact_coverage_status"],
+                    "coverage": metrics["required_fact_coverage"],
+                    "matched_facts": metrics["matched_required_facts"],
+                    "missing_facts": metrics["missing_required_facts"],
+                }
+            )
+        rows.sort(key=lambda row: (float(row["coverage"]), row["document_id"], row["case_id"]))
+        failures[str(top_k)] = rows
+    return failures
 
 
 def evaluate_document(
@@ -244,7 +313,7 @@ def evaluate_document(
     case_results: list[dict[str, Any]] = []
     for case in cases:
         ranked = index.retrieve(str(case["question"]), max_k)
-        metrics: dict[str, dict[str, float | bool | None]] = {}
+        metrics: dict[str, dict[str, Any]] = {}
         for top_k in top_k_values:
             prefix = ranked[:top_k]
             metrics[str(top_k)] = {
@@ -252,12 +321,16 @@ def evaluate_document(
                 "target_document_hit": _case_document_hit(case, chunks, prefix),
                 "source_page_hit": _case_page_hit(case, chunks, prefix),
                 "table_number_hit": _case_table_hit(case, chunks, prefix),
+                **_case_required_fact_coverage(case, chunks, prefix),
             }
         case_results.append(
             {
                 "case_id": case["case_id"],
+                "document_id": case.get("document_id", document_id),
                 "question": case["question"],
                 "type": case.get("type", ""),
+                "required_facts": case.get("required_facts", []),
+                "required_fact_aliases": case.get("required_fact_aliases", {}),
                 "top_results": [
                     {
                         "rank": rank,
@@ -278,6 +351,9 @@ def evaluate_document(
         "chunks": len(chunks),
         "cases": len(case_results),
         "aggregate": aggregate_case_results(case_results, top_k_values),
+        "fact_coverage_by_type": aggregate_fact_coverage_by(
+            case_results, top_k_values, "type"
+        ),
         "cases_detail": case_results,
     }
 
@@ -348,7 +424,7 @@ def run_diagnostic(
         dense_model=dense_model,
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "method": {"bm25": "bm25-lite", "dense": "dense-local", "hybrid": "hybrid-rrf"}[retriever],
         "retriever": retriever,
         "dense_model": dense_model_name if retriever in {"dense", "hybrid"} else None,
@@ -357,6 +433,11 @@ def run_diagnostic(
         "top_k": normalized_k,
         "documents": documents,
         "overall": global_result["aggregate"],
+        "fact_coverage_by_document": aggregate_fact_coverage_by(
+            global_result["cases_detail"], normalized_k, "document_id"
+        ),
+        "fact_coverage_by_type": global_result["fact_coverage_by_type"],
+        "fact_failures": fact_failure_lists(global_result["cases_detail"], normalized_k),
         "overall_case_details": global_result["cases_detail"],
         "notes": [
             "overall metrics rank one global index containing all benchmark documents; per-document metrics are an easier diagnostic and are not the multi-paper routing result.",
@@ -366,37 +447,62 @@ def run_diagnostic(
             "target_document_hit_rate measures whether the target paper enters top-k; the case's document_id is used only for scoring, never added to the query.",
             "source_page_hit_rate uses annotated source_pages and is a page-level diagnostic, not a retrieval gold standard.",
             "table_number_hit_rate is reported only for questions that explicitly name Table N.",
+            "required_fact_coverage is deterministic lexical coverage over atomic required_facts; cross-language equivalents are accepted only through case-level required_fact_aliases that are validated against gold contexts.",
+            "fact coverage measures whether retrieved target-document context contains annotated facts, not whether a generated answer uses them correctly.",
             "No ChromaDB, Gradio, RAGAS, or external API is used; dense-local and hybrid-rrf do use the locally cached embedding model described above.",
         ],
     }
 
 
-def _print_summary(report: dict[str, Any]) -> None:
+def _print_summary(report: dict[str, Any], show_failures: bool = False) -> None:
+    def fmt(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:.3f}"
+
     print(f"方法：{report['method']}；top-k：{','.join(map(str, report['top_k']))}")
     for document in report["documents"]:
         print(f"\n{document['document_id']}：{document['chunks']} chunks；{document['cases']} cases")
         for top_k, metrics in document["aggregate"].items():
-            def fmt(value: float | None) -> str:
-                return "n/a" if value is None else f"{value:.3f}"
-
             print(
                 f"  @{top_k}: reference_context_recall={fmt(metrics['reference_context_recall'])}; "
                 f"target_document_hit_rate={fmt(metrics['target_document_hit_rate'])}; "
                 f"source_page_hit_rate={fmt(metrics['source_page_hit_rate'])}; "
-                f"table_number_hit_rate={fmt(metrics['table_number_hit_rate'])}"
+                f"table_number_hit_rate={fmt(metrics['table_number_hit_rate'])}; "
+                f"fact_macro={fmt(metrics['required_fact_coverage_macro'])}; "
+                f"full_fact_cases={fmt(metrics['full_fact_coverage_rate'])}"
             )
 
     print("\n总体（按用例加权）：")
     for top_k, metrics in report["overall"].items():
-        def fmt(value: float | None) -> str:
-            return "n/a" if value is None else f"{value:.3f}"
-
         print(
             f"  @{top_k}: reference_context_recall={fmt(metrics['reference_context_recall'])}; "
             f"target_document_hit_rate={fmt(metrics['target_document_hit_rate'])}; "
             f"source_page_hit_rate={fmt(metrics['source_page_hit_rate'])}; "
-            f"table_number_hit_rate={fmt(metrics['table_number_hit_rate'])}"
+            f"table_number_hit_rate={fmt(metrics['table_number_hit_rate'])}; "
+            f"fact_macro={fmt(metrics['required_fact_coverage_macro'])}; "
+            f"fact_micro={fmt(metrics['required_fact_coverage_micro'])}; "
+            f"full/partial/zero={fmt(metrics['full_fact_coverage_rate'])}/"
+            f"{fmt(metrics['partial_fact_coverage_rate'])}/"
+            f"{fmt(metrics['zero_fact_coverage_rate'])}"
         )
+
+    largest_k = str(max(report["top_k"]))
+    print(f"\n分题型事实覆盖（@{largest_k}）：")
+    for case_type, group in report["fact_coverage_by_type"].items():
+        metrics = group["top_k"][largest_k]
+        print(
+            f"  {case_type}: cases={group['cases']}; "
+            f"macro={fmt(metrics['required_fact_coverage_macro'])}; "
+            f"full={fmt(metrics['full_fact_coverage_rate'])}"
+        )
+
+    failures = report["fact_failures"][largest_k]
+    print(f"\n@{largest_k} 未完整覆盖：{len(failures)} / {report['overall'][largest_k]['fact_scored_cases']} 题")
+    if show_failures:
+        for failure in failures:
+            print(
+                f"  {failure['case_id']} [{failure['status']}] "
+                f"missing={','.join(failure['missing_facts'])}"
+            )
 
 
 def main() -> int:
@@ -426,6 +532,11 @@ def main() -> int:
         help="dense/hybrid 使用的本地模型名；始终以离线模式加载",
     )
     parser.add_argument("--rrf-k", type=int, default=60, help="hybrid 的 RRF 常数，默认 60")
+    parser.add_argument(
+        "--show-failures",
+        action="store_true",
+        help="打印最大 top-k 下所有未完整覆盖用例及遗漏事实",
+    )
     parser.add_argument("--json-out", help="可选：将完整 JSON 诊断写入指定路径")
     args = parser.parse_args()
 
@@ -443,7 +554,7 @@ def main() -> int:
         print(f"❌ 基线诊断失败：{exc}", file=sys.stderr)
         return 1
 
-    _print_summary(report)
+    _print_summary(report, show_failures=args.show_failures)
     if args.json_out:
         output = Path(args.json_out).expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
