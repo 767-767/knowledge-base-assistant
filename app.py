@@ -24,7 +24,8 @@ from sci_rag_core import (
     split_to_chunks,
     table_number_from_question,
 )
-from sci_rag_retrieval import BM25Index, reciprocal_rank_fusion
+from sci_rag_reranking import CrossEncoderReranker, reranker_document_text
+from sci_rag_retrieval import BM25Index, RankedItem, reciprocal_rank_fusion
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,12 @@ class RuntimeConfig:
     retrieval_mode: str = "dense"
     hybrid_candidate_k: int = 50
     hybrid_rrf_k: int = 60
+    reranker_model: str | None = None
+    reranker_revision: str | None = None
+    reranker_batch_size: int = 8
+    reranker_max_length: int = 512
+    reranker_device: str = "cpu"
+    reranker_rrf_k: int = 60
 
     @classmethod
     def from_env(cls) -> "RuntimeConfig":
@@ -49,6 +56,10 @@ class RuntimeConfig:
             except (TypeError, ValueError):
                 return default
             return value if value > 0 else default
+
+        def optional_text(name: str, default: str | None = None) -> str | None:
+            value = os.getenv(name, default or "").strip()
+            return value or None
 
         retrieval_mode = os.getenv("SCI_RAG_RETRIEVAL_MODE", cls.retrieval_mode).strip().casefold()
         if retrieval_mode not in {"dense", "hybrid"}:
@@ -65,6 +76,21 @@ class RuntimeConfig:
                 "SCI_RAG_HYBRID_CANDIDATE_K", cls.hybrid_candidate_k
             ),
             hybrid_rrf_k=positive_int("SCI_RAG_HYBRID_RRF_K", cls.hybrid_rrf_k),
+            reranker_model=optional_text("SCI_RAG_RERANKER_MODEL"),
+            reranker_revision=optional_text("SCI_RAG_RERANKER_REVISION"),
+            reranker_batch_size=positive_int(
+                "SCI_RAG_RERANKER_BATCH_SIZE", cls.reranker_batch_size
+            ),
+            reranker_max_length=positive_int(
+                "SCI_RAG_RERANKER_MAX_LENGTH", cls.reranker_max_length
+            ),
+            reranker_device=os.getenv(
+                "SCI_RAG_RERANKER_DEVICE", cls.reranker_device
+            ).strip()
+            or cls.reranker_device,
+            reranker_rrf_k=positive_int(
+                "SCI_RAG_RERANKER_RRF_K", cls.reranker_rrf_k
+            ),
         )
 
 
@@ -82,11 +108,21 @@ class LexicalSnapshot:
 class Runtime:
     """Explicitly initialized model/API/database resources."""
 
-    def __init__(self, config: RuntimeConfig, client: Any, embedding_model: Any, collection: Any):
+    def __init__(
+        self,
+        config: RuntimeConfig,
+        client: Any,
+        embedding_model: Any,
+        collection: Any,
+        reranker: Any | None = None,
+    ):
+        if reranker is not None and config.retrieval_mode != "hybrid":
+            raise ValueError("cross-encoder reranker 只能与 hybrid 检索一起启用")
         self.config = config
         self.client = client
         self.embedding_model = embedding_model
         self.collection = collection
+        self.reranker = reranker
         self._lexical_snapshot: LexicalSnapshot | None = None
 
     def invalidate_lexical_index(self) -> None:
@@ -103,6 +139,8 @@ def create_runtime(config: RuntimeConfig | None = None) -> Runtime:
 
     load_dotenv()
     config = config or RuntimeConfig.from_env()
+    if config.reranker_model and config.retrieval_mode != "hybrid":
+        raise ValueError("SCI_RAG_RERANKER_MODEL 需要 SCI_RAG_RETRIEVAL_MODE=hybrid")
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
         raise ValueError("请在 .env 文件中设置 DEEPSEEK_API_KEY")
@@ -113,12 +151,23 @@ def create_runtime(config: RuntimeConfig | None = None) -> Runtime:
 
     client = OpenAI(api_key=api_key, base_url=config.deepseek_base_url)
     embedding_model = SentenceTransformer(config.embedding_model)
+    reranker = None
+    if config.reranker_model:
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        reranker = CrossEncoderReranker(
+            config.reranker_model,
+            revision=config.reranker_revision,
+            batch_size=config.reranker_batch_size,
+            max_length=config.reranker_max_length,
+            device=config.reranker_device,
+            local_files_only=True,
+        )
     chroma_client = chromadb.PersistentClient(path=config.db_path)
     collection = chroma_client.get_or_create_collection(
         name="knowledge_base",
         metadata={"hnsw:space": "cosine"},
     )
-    return Runtime(config, client, embedding_model, collection)
+    return Runtime(config, client, embedding_model, collection, reranker=reranker)
 
 
 def get_runtime() -> Runtime:
@@ -388,6 +437,44 @@ def _hybrid_fused_result(
     return {"ids": [ids], "documents": [texts], "metadatas": [metadatas]}
 
 
+def _cross_encoder_reranked_result(
+    question: str,
+    result: dict[str, Any],
+    runtime: Runtime,
+) -> dict[str, Any]:
+    """Rerank Hybrid candidates, then conservatively fuse the original order."""
+
+    if runtime.reranker is None:
+        return result
+    ids = [str(value) for value in _flat_result_values(result, "ids")]
+    raw_texts = _flat_result_values(result, "documents")
+    raw_metas = _flat_result_values(result, "metadatas")
+    texts = [str(raw_texts[index]) if index < len(raw_texts) else "" for index in range(len(ids))]
+    metadatas = [
+        dict(raw_metas[index])
+        if index < len(raw_metas) and isinstance(raw_metas[index], dict)
+        else {}
+        for index in range(len(ids))
+    ]
+    candidates = [RankedItem(index, 0.0) for index in range(len(ids))]
+    passages = [
+        reranker_document_text(text, metadata)
+        for text, metadata in zip(texts, metadatas)
+    ]
+    reranked = runtime.reranker.rerank(question, candidates, passages).ranked
+    fused = reciprocal_rank_fusion(
+        [reranked, candidates],
+        rrf_k=runtime.config.reranker_rrf_k,
+        limit=len(candidates),
+    )
+    order = [int(item.key) for item in fused]
+    return {
+        "ids": [[ids[index] for index in order]],
+        "documents": [[texts[index] for index in order]],
+        "metadatas": [[metadatas[index] for index in order]],
+    }
+
+
 def query_knowledge(
     message: str,
     history: Any = None,
@@ -424,6 +511,7 @@ def query_knowledge(
     )
     if runtime.config.retrieval_mode == "hybrid":
         dense = _hybrid_fused_result(message, dense, runtime, candidate_k)
+        dense = _cross_encoder_reranked_result(message, dense, runtime)
     table_results = None
     if is_table_question(message):
         table_results = runtime.collection.get(

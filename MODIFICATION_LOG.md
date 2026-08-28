@@ -2,6 +2,21 @@
 
 > 记录本项目从"通用学习工作台"改造为 Sci-RAG 的全过程。按时间倒序排列。
 
+> 2026-08-28 Phase 2 reranker 网页 A/B 回传：用户报告 Hybrid 与 Hybrid + reranker 对
+> DrugR 显式推理数据集和多目标平衡问题给出相同答案。多目标题完整覆盖 Pareto、
+> Reasoning/SMILES 分组和 shortfall boost；数据集题正确返回 `4,855` 及管道方向，但遗漏
+> `DeepSeek-R1`、`>0.6`、`ADMETLab` 和性质增量/SMILES 理由生成细节，严格记为部分完整。
+> 离线 top-10 已含四项必需事实，故记录为通用多片段生成完整性缺口，而非 reranker 候选池
+> 缺失或 DrugR 特例修复项。Table 2 精确值、网页延迟和资源表现仍待最终回传确认。
+
+> 2026-08-28 Phase 2 本地 reranker：经用户授权，将固定 revision 的
+> `BAAI/bge-reranker-base` safetensors 缓存到仓库外，不增加依赖或提交模型。新增无导入
+> 副作用的 cross-encoder 重排、延迟/峰值内存报告和 fake-model 测试；应用只在 Hybrid
+> 且显式配置模型时本地加载，并把重排结果与原 Hybrid 排名再次 RRF，之后继续执行 Table N
+> 和确定性单元格保护。5 篇/53 题 @10 fact macro/micro/完整覆盖率从 Hybrid 的
+> `0.627/0.592/0.547` 提升到 `0.785/0.776/0.698`；CPU mean/P95 为 `2.73/3.31` 秒，
+> 峰值约 2.20 GB。仍有 16 题不完整，未运行 Gradio、DeepSeek/RAGAS 或写 ChromaDB。
+
 > 2026-08-28 Phase 2 多事实上下文覆盖：新增纯本地、确定性的 `required_facts` 覆盖统计，
 > 输出 top-1/3/5/10 的 macro/micro、full/partial/zero、分论文/分题型和逐题遗漏事实。
 > 跨语言或表面形式差异只允许逐题声明 `required_fact_aliases`，校验器保证别名出现在人工

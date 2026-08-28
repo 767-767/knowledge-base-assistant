@@ -141,10 +141,40 @@ still checked, another table cannot replace the requested one, and a resolvable
 row/column question still uses deterministic cell lookup without calling the
 generation model. Generic quantity phrases such as “how many samples” do not
 trigger an all-table scan unless the question explicitly refers to a table.
-This is an opt-in retrieval experiment, not a learned
-cross-encoder reranker. The current 5-paper/53-case proxy metrics do not justify
-making Hybrid the default; see `evaluation/benchmark/README.md` and
-`PHASE2_CONTEXT_COVERAGE_HANDOFF.md` for results and limitations. Hybrid's
-top-50 candidate pool contains substantially more complete evidence than its
-top-10 output, so a local reranker is justified as a controlled next experiment,
-not as an already-proven production improvement.
+Hybrid alone remains an opt-in retrieval experiment and is not the default.
+
+## Experimental local cross-encoder
+
+An additional local-only reranker can be enabled after caching the pinned model
+revision. The download is about 1.1 GB and is stored in the Hugging Face cache,
+not this repository:
+
+```bash
+./venv/bin/hf download BAAI/bge-reranker-base \
+  config.json model.safetensors sentencepiece.bpe.model \
+  special_tokens_map.json tokenizer.json tokenizer_config.json \
+  --revision 2cfc18c --max-workers 4
+```
+
+Run the UI with Hybrid plus the reranker:
+
+```bash
+HF_HUB_OFFLINE=1 \
+SCI_RAG_RETRIEVAL_MODE=hybrid \
+SCI_RAG_RERANKER_MODEL=BAAI/bge-reranker-base \
+SCI_RAG_RERANKER_REVISION=2cfc18c9415c912f9d8155881c133215df768a70 \
+./venv/bin/python app.py
+```
+
+The model is loaded only during explicit runtime creation and always uses
+`local_files_only=True`; a missing cache fails instead of downloading. The
+cross-encoder ranking is conservatively fused with the original Hybrid order,
+then the existing explicit-table filtering and deterministic cell lookup run as
+before. Dense remains the default, and Hybrid without the reranker is unchanged.
+
+On the fixed 5-paper/53-case offline benchmark, Hybrid + cross-encoder + RRF
+raised top-10 full required-fact coverage from `0.547` to `0.698`; fact macro and
+micro reached `0.785/0.776`. CPU reranking averaged `2.73 s` per 50 candidates
+with a `3.31 s` p95 and about `2.20 GB` process peak RSS on the test machine.
+These are retrieval-context proxies, not generated-answer accuracy. See
+`PHASE2_RERANKER_HANDOFF.md` for the gate, regressions, and limitations.

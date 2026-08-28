@@ -16,7 +16,10 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
+import statistics
 import sys
+from time import perf_counter
 from typing import Any, Iterable
 
 if __package__ in {None, ""}:
@@ -29,6 +32,7 @@ from evaluation.context_coverage import (  # noqa: E402
     case_fact_coverage,
 )
 from sci_rag_core import Chunk, normalize_for_match, table_number_from_question  # noqa: E402
+from sci_rag_reranking import CrossEncoderReranker, reranker_document_text  # noqa: E402
 from sci_rag_retrieval import BM25Index, RankedItem, reciprocal_rank_fusion  # noqa: E402
 
 
@@ -42,14 +46,7 @@ def evidence_tokens(value: Any) -> list[str]:
 
 
 def searchable_text(chunk: Chunk) -> str:
-    metadata = chunk.metadata
-    return "\n".join(
-        [
-            chunk.page_content,
-            str(metadata.get("table_caption", "")),
-            str(metadata.get("headers", "")),
-        ]
-    )
+    return reranker_document_text(chunk.page_content, chunk.metadata)
 
 
 class DenseIndex:
@@ -292,6 +289,37 @@ def fact_failure_lists(
     return failures
 
 
+def _latency_statistics(values: Iterable[float]) -> dict[str, float | int | None]:
+    usable = sorted(float(value) for value in values)
+    if not usable:
+        return {"count": 0, "mean": None, "median": None, "p95": None, "max": None}
+    p95_index = max(0, min(len(usable) - 1, int(len(usable) * 0.95 + 0.999999) - 1))
+    return {
+        "count": len(usable),
+        "mean": sum(usable) / len(usable),
+        "median": statistics.median(usable),
+        "p95": usable[p95_index],
+        "max": usable[-1],
+    }
+
+
+def aggregate_case_latency(case_results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize retrieval and optional reranker wall-clock latency."""
+
+    return {
+        field: _latency_statistics(
+            result.get("timing", {}).get(field, 0.0) for result in case_results
+        )
+        for field in ("retrieval_seconds", "rerank_seconds", "total_seconds")
+    }
+
+
+def _process_peak_rss_mb() -> float:
+    peak = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    divisor = 1024.0 * 1024.0 if sys.platform == "darwin" else 1024.0
+    return peak / divisor
+
+
 def evaluate_document(
     document_id: str,
     cases: list[dict[str, Any]],
@@ -301,7 +329,13 @@ def evaluate_document(
     dense_model_name: str = "BAAI/bge-small-zh-v1.5",
     rrf_k: int = 60,
     dense_model: Any | None = None,
+    reranker: CrossEncoderReranker | None = None,
+    reranker_candidate_k: int = 50,
+    reranker_fusion: str = "none",
+    reranker_fusion_rrf_k: int = 60,
 ) -> dict[str, Any]:
+    if reranker_fusion not in {"none", "rrf"}:
+        raise ValueError(f"不支持的 reranker fusion：{reranker_fusion}")
     index = HybridRetriever(
         chunks,
         mode=retriever,
@@ -310,9 +344,37 @@ def evaluate_document(
         dense_model=dense_model,
     )
     max_k = max(top_k_values, default=0)
+    retrieval_k = max(max_k, int(reranker_candidate_k)) if reranker else max_k
+    rerank_documents = [searchable_text(chunk) for chunk in chunks] if reranker else []
     case_results: list[dict[str, Any]] = []
     for case in cases:
-        ranked = index.retrieve(str(case["question"]), max_k)
+        question = str(case["question"])
+        total_started = perf_counter()
+        retrieval_started = perf_counter()
+        candidates = index.retrieve(question, retrieval_k)
+        retrieval_seconds = perf_counter() - retrieval_started
+        initial_scores = {candidate.key: candidate.score for candidate in candidates}
+        reranker_scores: dict[Any, float] = {}
+        rerank_seconds = 0.0
+        scored_pairs = 0
+        cache_hits = 0
+        if reranker:
+            rerank_result = reranker.rerank(question, candidates, rerank_documents)
+            reranker_scores = {item.key: item.score for item in rerank_result.ranked}
+            if reranker_fusion == "rrf":
+                ranked = reciprocal_rank_fusion(
+                    [rerank_result.ranked, candidates],
+                    rrf_k=reranker_fusion_rrf_k,
+                    limit=max_k,
+                )
+            else:
+                ranked = rerank_result.ranked[:max_k]
+            rerank_seconds = rerank_result.elapsed_seconds
+            scored_pairs = rerank_result.scored_pairs
+            cache_hits = rerank_result.cache_hits
+        else:
+            ranked = candidates[:max_k]
+        total_seconds = perf_counter() - total_started
         metrics: dict[str, dict[str, Any]] = {}
         for top_k in top_k_values:
             prefix = ranked[:top_k]
@@ -335,6 +397,10 @@ def evaluate_document(
                     {
                         "rank": rank,
                         "score": round(result.score, 6),
+                        "retrieval_score": round(initial_scores[result.key], 6),
+                        "rerank_score": (
+                            round(reranker_scores[result.key], 6) if reranker else None
+                        ),
                         "chunk_index": int(result.key),
                         "page": chunks[int(result.key)].metadata.get("page"),
                         "chunk_type": chunks[int(result.key)].metadata.get("type", "text"),
@@ -342,6 +408,14 @@ def evaluate_document(
                     }
                     for rank, result in enumerate(ranked, start=1)
                 ],
+                "candidate_count": len(candidates),
+                "timing": {
+                    "retrieval_seconds": retrieval_seconds,
+                    "rerank_seconds": rerank_seconds,
+                    "total_seconds": total_seconds,
+                    "reranker_scored_pairs": scored_pairs,
+                    "reranker_cache_hits": cache_hits,
+                },
                 "metrics": metrics,
             }
         )
@@ -354,6 +428,7 @@ def evaluate_document(
         "fact_coverage_by_type": aggregate_fact_coverage_by(
             case_results, top_k_values, "type"
         ),
+        "latency": aggregate_case_latency(case_results),
         "cases_detail": case_results,
     }
 
@@ -374,6 +449,14 @@ def run_diagnostic(
     retriever: str = "bm25",
     dense_model_name: str = "BAAI/bge-small-zh-v1.5",
     rrf_k: int = 60,
+    reranker_model: str | None = None,
+    reranker_revision: str | None = None,
+    reranker_candidate_k: int = 50,
+    reranker_batch_size: int = 8,
+    reranker_max_length: int = 512,
+    reranker_device: str = "cpu",
+    reranker_fusion: str = "none",
+    reranker_fusion_rrf_k: int = 60,
 ) -> dict[str, Any]:
     directories = [Path(directory).resolve() for directory in papers_dirs]
     if not directories:
@@ -386,13 +469,34 @@ def run_diagnostic(
     normalized_k = sorted({max(1, int(value)) for value in top_k_values})
     if not normalized_k:
         raise ValueError("至少需要一个 top-k")
+    if reranker_model and retriever != "hybrid":
+        raise ValueError("cross-encoder 实验必须基于 --retriever hybrid")
+    if reranker_candidate_k < max(normalized_k):
+        raise ValueError("reranker candidate-k 不能小于最大 top-k")
+    if reranker_fusion not in {"none", "rrf"}:
+        raise ValueError(f"不支持的 reranker fusion：{reranker_fusion}")
     dense_model = None
     if retriever in {"dense", "hybrid"}:
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         from sentence_transformers import SentenceTransformer
 
         dense_model = SentenceTransformer(dense_model_name, local_files_only=True)
-    documents: list[dict[str, Any]] = []
+    reranker = None
+    reranker_load_seconds = None
+    if reranker_model:
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        load_started = perf_counter()
+        reranker = CrossEncoderReranker(
+            reranker_model,
+            revision=reranker_revision,
+            batch_size=reranker_batch_size,
+            max_length=reranker_max_length,
+            device=reranker_device,
+            local_files_only=True,
+            cache_scores=True,
+        )
+        reranker_load_seconds = perf_counter() - load_started
+    parsed_documents: list[tuple[dict[str, Any], list[Chunk]]] = []
     all_chunks: list[Chunk] = []
     for document in benchmark["documents"]:
         path = _find_pdf(str(document["filename"]), directories)
@@ -400,6 +504,26 @@ def run_diagnostic(
         for chunk in chunks:
             chunk.metadata["benchmark_document_id"] = str(document["document_id"])
         all_chunks.extend(chunks)
+        parsed_documents.append((document, chunks))
+
+    # Evaluate the global multi-paper task first so latency is not reduced by
+    # the benchmark-only score cache used by the easier per-document reports.
+    global_result = evaluate_document(
+        "all-documents",
+        benchmark["cases"],
+        all_chunks,
+        normalized_k,
+        retriever=retriever,
+        dense_model_name=dense_model_name,
+        rrf_k=rrf_k,
+        dense_model=dense_model,
+        reranker=reranker,
+        reranker_candidate_k=reranker_candidate_k,
+        reranker_fusion=reranker_fusion,
+        reranker_fusion_rrf_k=reranker_fusion_rrf_k,
+    )
+    documents: list[dict[str, Any]] = []
+    for document, chunks in parsed_documents:
         documents.append(
             evaluate_document(
                 str(document["document_id"]),
@@ -410,25 +534,36 @@ def run_diagnostic(
                 dense_model_name=dense_model_name,
                 rrf_k=rrf_k,
                 dense_model=dense_model,
+                reranker=reranker,
+                reranker_candidate_k=reranker_candidate_k,
+                reranker_fusion=reranker_fusion,
+                reranker_fusion_rrf_k=reranker_fusion_rrf_k,
             )
         )
-
-    global_result = evaluate_document(
-        "all-documents",
-        benchmark["cases"],
-        all_chunks,
-        normalized_k,
-        retriever=retriever,
-        dense_model_name=dense_model_name,
-        rrf_k=rrf_k,
-        dense_model=dense_model,
-    )
+    method = {"bm25": "bm25-lite", "dense": "dense-local", "hybrid": "hybrid-rrf"}[retriever]
+    if reranker:
+        method += "+cross-encoder"
     return {
-        "schema_version": 2,
-        "method": {"bm25": "bm25-lite", "dense": "dense-local", "hybrid": "hybrid-rrf"}[retriever],
+        "schema_version": 3,
+        "method": method,
         "retriever": retriever,
         "dense_model": dense_model_name if retriever in {"dense", "hybrid"} else None,
         "rrf_k": rrf_k if retriever == "hybrid" else None,
+        "reranker": (
+            {
+                "model": reranker_model,
+                "revision": reranker_revision,
+                "candidate_k": reranker_candidate_k,
+                "batch_size": reranker_batch_size,
+                "max_length": reranker_max_length,
+                "device": reranker.device,
+                "fusion": reranker_fusion,
+                "fusion_rrf_k": reranker_fusion_rrf_k if reranker_fusion == "rrf" else None,
+                "load_seconds": reranker_load_seconds,
+            }
+            if reranker
+            else None
+        ),
         "manifest": str(Path(manifest_path).resolve()),
         "top_k": normalized_k,
         "documents": documents,
@@ -438,6 +573,8 @@ def run_diagnostic(
         ),
         "fact_coverage_by_type": global_result["fact_coverage_by_type"],
         "fact_failures": fact_failure_lists(global_result["cases_detail"], normalized_k),
+        "latency": global_result["latency"],
+        "process_peak_rss_mb": _process_peak_rss_mb(),
         "overall_case_details": global_result["cases_detail"],
         "notes": [
             "overall metrics rank one global index containing all benchmark documents; per-document metrics are an easier diagnostic and are not the multi-paper routing result.",
@@ -449,6 +586,7 @@ def run_diagnostic(
             "table_number_hit_rate is reported only for questions that explicitly name Table N.",
             "required_fact_coverage is deterministic lexical coverage over atomic required_facts; cross-language equivalents are accepted only through case-level required_fact_aliases that are validated against gold contexts.",
             "fact coverage measures whether retrieved target-document context contains annotated facts, not whether a generated answer uses them correctly.",
+            "cross-encoder reranking is opt-in, local-files-only, and applied only to the configured Hybrid candidate pool; report latency is measured on the global multi-paper run before easier per-document diagnostics.",
             "No ChromaDB, Gradio, RAGAS, or external API is used; dense-local and hybrid-rrf do use the locally cached embedding model described above.",
         ],
     }
@@ -459,6 +597,15 @@ def _print_summary(report: dict[str, Any], show_failures: bool = False) -> None:
         return "n/a" if value is None else f"{value:.3f}"
 
     print(f"方法：{report['method']}；top-k：{','.join(map(str, report['top_k']))}")
+    if report.get("reranker"):
+        config = report["reranker"]
+        print(
+            f"reranker：{config['model']}@{config['revision'] or 'default'}；"
+            f"candidate_k={config['candidate_k']}；batch={config['batch_size']}；"
+            f"max_length={config['max_length']}；device={config['device']}；"
+            f"fusion={config['fusion']}；"
+            f"load={fmt(config['load_seconds'])}s"
+        )
     for document in report["documents"]:
         print(f"\n{document['document_id']}：{document['chunks']} chunks；{document['cases']} cases")
         for top_k, metrics in document["aggregate"].items():
@@ -503,6 +650,16 @@ def _print_summary(report: dict[str, Any], show_failures: bool = False) -> None:
                 f"  {failure['case_id']} [{failure['status']}] "
                 f"missing={','.join(failure['missing_facts'])}"
             )
+    if report.get("reranker"):
+        rerank_latency = report["latency"]["rerank_seconds"]
+        print(
+            "\n全局 reranker 单题延迟："
+            f"mean={fmt(rerank_latency['mean'])}s；"
+            f"median={fmt(rerank_latency['median'])}s；"
+            f"p95={fmt(rerank_latency['p95'])}s；"
+            f"max={fmt(rerank_latency['max'])}s；"
+            f"peak_rss={report['process_peak_rss_mb']:.1f} MB"
+        )
 
 
 def main() -> int:
@@ -532,6 +689,24 @@ def main() -> int:
         help="dense/hybrid 使用的本地模型名；始终以离线模式加载",
     )
     parser.add_argument("--rrf-k", type=int, default=60, help="hybrid 的 RRF 常数，默认 60")
+    parser.add_argument("--reranker-model", help="可选：本地已缓存的 cross-encoder 模型或路径")
+    parser.add_argument("--reranker-revision", help="可选：固定模型 commit/revision")
+    parser.add_argument("--reranker-candidate-k", type=int, default=50, help="重排候选数，默认 50")
+    parser.add_argument("--reranker-batch-size", type=int, default=8, help="重排 batch size，默认 8")
+    parser.add_argument("--reranker-max-length", type=int, default=512, help="query-passage 最大 token，默认 512")
+    parser.add_argument("--reranker-device", default="cpu", help="重排设备，默认 cpu")
+    parser.add_argument(
+        "--reranker-fusion",
+        choices=("none", "rrf"),
+        default="none",
+        help="是否将 cross-encoder 与原候选排名再次 RRF，默认 none",
+    )
+    parser.add_argument(
+        "--reranker-fusion-rrf-k",
+        type=int,
+        default=60,
+        help="reranker fusion 的 RRF 常数，默认 60",
+    )
     parser.add_argument(
         "--show-failures",
         action="store_true",
@@ -549,8 +724,16 @@ def main() -> int:
             retriever=args.retriever,
             dense_model_name=args.embedding_model,
             rrf_k=args.rrf_k,
+            reranker_model=args.reranker_model,
+            reranker_revision=args.reranker_revision,
+            reranker_candidate_k=args.reranker_candidate_k,
+            reranker_batch_size=args.reranker_batch_size,
+            reranker_max_length=args.reranker_max_length,
+            reranker_device=args.reranker_device,
+            reranker_fusion=args.reranker_fusion,
+            reranker_fusion_rrf_k=args.reranker_fusion_rrf_k,
         )
-    except (ValueError, FileNotFoundError, OSError) as exc:
+    except (ValueError, FileNotFoundError, OSError, RuntimeError) as exc:
         print(f"❌ 基线诊断失败：{exc}", file=sys.stderr)
         return 1
 

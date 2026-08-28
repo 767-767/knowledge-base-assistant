@@ -5,11 +5,53 @@ from evaluation.benchmark_retrieval import (
     fact_failure_lists,
     searchable_text,
 )
+from sci_rag_reranking import CrossEncoderReranker
 from sci_rag_retrieval import BM25Index, RankedItem, reciprocal_rank_fusion
 from sci_rag_core import Chunk
 
 
 class BenchmarkRetrievalTests(unittest.TestCase):
+    def test_cross_encoder_rrf_is_applied_before_fact_metrics(self):
+        class Model:
+            device = "cpu"
+
+            def predict(self, pairs, batch_size, show_progress_bar):
+                return [1.0 if "answer" in passage else 0.0 for _, passage in pairs]
+
+        chunks = [
+            Chunk("query but no evidence", {"page": 1, "type": "text"}),
+            Chunk("The answer is 42.", {"page": 2, "type": "text"}),
+        ]
+        cases = [
+            {
+                "case_id": "case-1",
+                "question": "query",
+                "contexts": ["The answer is 42."],
+                "required_facts": ["42"],
+                "source_pages": [2],
+            }
+        ]
+        reranker = CrossEncoderReranker(model=Model(), batch_size=2)
+
+        report = evaluate_document(
+            "paper",
+            cases,
+            chunks,
+            [1],
+            reranker=reranker,
+            reranker_candidate_k=2,
+            reranker_fusion="rrf",
+        )
+
+        detail = report["cases_detail"][0]
+        self.assertEqual(detail["top_results"][0]["chunk_index"], 1)
+        self.assertEqual(detail["metrics"]["1"]["fact_coverage_status"], "full")
+        self.assertEqual(detail["timing"]["reranker_scored_pairs"], 2)
+
+    def test_diagnostic_rejects_unknown_reranker_fusion(self):
+        with self.assertRaises(ValueError):
+            evaluate_document("paper", [], [], [1], reranker_fusion="unknown")
+
     def test_rrf_deduplicates_each_ranked_list_and_preserves_fused_order(self):
         fused = reciprocal_rank_fusion(
             [[1, 2, 2, 3], [3, RankedItem(1, 0.1), 4]],

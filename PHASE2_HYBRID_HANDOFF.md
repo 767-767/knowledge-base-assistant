@@ -6,6 +6,7 @@
 > 后续说明：本文件保留该分支提交时的历史代理分数。`phase2/context-coverage` 补全了
 > DrugR GRPO/RL 金标准证据并加入 required-fact 覆盖后，当前可比结果以
 > `PHASE2_CONTEXT_COVERAGE_HANDOFF.md` 和 `evaluation/benchmark/README.md` 为准。
+> 后续默认关闭的 cross-encoder 实验见 `PHASE2_RERANKER_HANDOFF.md`。
 
 ## 本轮目标和结论
 

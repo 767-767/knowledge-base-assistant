@@ -65,14 +65,12 @@ Dense/Hybrid 只加载已经缓存的 `BAAI/bge-small-zh-v1.5`，并设置
 `local_files_only=True`；没有下载模型。BM25 不加载 embedding。所有 PDF 只在内存中解析，
 没有启动 Gradio、调用 DeepSeek/RAGAS、写 ChromaDB 或修改现有数据库。
 
-## 下一步：reranker 实验门槛
+## 后续状态：reranker 门槛已执行
 
-建议下一分支只做本地、默认关闭的 cross-encoder reranker 对比，不立即接入线上默认。
-固定 Hybrid top-50 候选池，至少报告 top-5/top-10 required-fact macro、micro、完整覆盖率、
-Table N 命中和每题耗时。建议验收门槛：top-10 完整覆盖率比当前 0.547 至少提高 5 个百分点，
-Table N 和现有确定性单元格回归不下降，并记录模型大小、峰值内存及冷/热延迟。若本地没有
-合适缓存模型、收益未达门槛或延迟不可接受，就停止接线，转向对 @50 仍不完整的 11 题做
-解析/切分和查询扩展诊断。
+后续已在长期 `develop` 分支完成本地 cross-encoder 门槛实验，并以默认关闭方式接线。
+Hybrid + cross-encoder + 原排名 RRF 的 top-10 完整事实覆盖率为 `0.698`，超过本文件设定
+的 `0.597` 门槛。完整实现、逐题回退、延迟和网页 A/B 步骤见
+`PHASE2_RERANKER_HANDOFF.md`。
 
 ## 未证明
 

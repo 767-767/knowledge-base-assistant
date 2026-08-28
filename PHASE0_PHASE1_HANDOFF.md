@@ -146,8 +146,8 @@ BM25/RRF 已在 `phase2/hybrid-rerank` 分支以默认关闭的实验模式接�
 
 ## 仍未包含
 
-- learned cross-encoder reranker 及其延迟/收益验证；当前 Hybrid top-50 候选覆盖已支持
-  将其作为受控实验，门槛见 `PHASE2_CONTEXT_COVERAGE_HANDOFF.md`。
+- learned cross-encoder 已以默认关闭方式完成门槛实验和应用接线；当前仍缺真实网页 A/B、
+  并发资源和答案质量验证，详见 `PHASE2_RERANKER_HANDOFF.md`。
 - 多模态图片资产持久化、OCR/VLM。
 - 通用 Agent 工具调用。
 - Graph-RAG。

@@ -145,8 +145,47 @@ Hybrid 还包含弱词法信号保护：如果 CJK 问题在语料中没有命�
 3.8 个百分点，但 @10 两者同为 0.547，Hybrid 的 fact micro 还略低；`Table N` 命中也
 低于 BM25。Hybrid @50 的候选池达到 fact macro 0.849、fact micro 0.844、完整覆盖率
 0.792，说明排序仍有可利用空间；但 11/53 题即使 @50 也不完整，其中 3 题为零覆盖，
-这些不能靠 reranker 单独解决。因此下一步可以做受控的本地 reranker 实验，同时必须
-保留显式表格保护，并另行处理切分/解析或查询扩展问题。
+这些不能靠 reranker 单独解决。因此本地 reranker 只应作为受控实验，同时必须保留显式
+表格保护，并另行处理切分/解析或查询扩展问题。该实验结果见下节。
+
+## 本地 cross-encoder 重排结果
+
+使用已缓存且固定 revision 的 `BAAI/bge-reranker-base`，对 Hybrid top-50 候选逐题打分。
+为了减少纯 cross-encoder 对个别题的回退，最终策略将 cross-encoder 排名与原 Hybrid
+排名再做一次 RRF：
+
+```bash
+HF_HUB_OFFLINE=1 ./venv/bin/python evaluation/benchmark_retrieval.py \
+  --papers-dir /Users/qinleqi/Desktop \
+  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
+  --retriever hybrid --top-k 1,3,5,10 \
+  --reranker-model BAAI/bge-reranker-base \
+  --reranker-revision 2cfc18c9415c912f9d8155881c133215df768a70 \
+  --reranker-candidate-k 50 --reranker-batch-size 8 \
+  --reranker-max-length 512 --reranker-device cpu \
+  --reranker-fusion rrf --reranker-fusion-rrf-k 60 --show-failures
+```
+
+| 方法 / k | fact macro | fact micro | 完整 | 部分 | 零 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Hybrid @5 | 0.516 | 0.469 | 0.472 | 0.113 | 0.415 |
+| Hybrid @10 | 0.627 | 0.592 | 0.547 | 0.132 | 0.321 |
+| Hybrid + CE + RRF @5 | 0.634 | 0.599 | 0.509 | 0.245 | 0.245 |
+| Hybrid + CE + RRF @10 | 0.785 | 0.776 | 0.698 | 0.170 | 0.132 |
+
+@10 完整覆盖率绝对提高 15.1 个百分点，超过预设的 5 个百分点门槛；目标论文、页级和
+Table N 命中分别为 `0.981/0.905/0.944`。CPU 对每题 50 个候选的 mean/median/p95/max
+为 `2.734/2.737/3.312/3.489` 秒，进程峰值 RSS 约 `2201 MB`。
+
+纯 cross-encoder @10 也达到 0.698 完整覆盖率，但相对原 Hybrid 有 4 题回退；保守 RRF
+只剩 `drugr-11` 从 0.75 降至 0.50，并把 17 个 table 类型用例的事实完整覆盖恢复到
+1.000，因此应用接线采用 RRF 版本。离线 `Table N` 命中仍为 0.944，唯一未命中结构化
+表号的是 `scidqa-09`，但其事实覆盖完整；应用仍会在重排之后加载并检查所有结构化表，
+因此确定性表格保护不能移除。
+
+该结果达到“可以默认关闭地接线”的门槛，不支持将 Hybrid 或 reranker 改为默认，更不
+证明生成答案准确率。@10 仍有 16/53 题不完整，@50 候选本身不完整的问题也不会被重排
+解决。
 
 线上原型已提供默认关闭的 Hybrid 接线，用于受控网页对比：
 
@@ -155,5 +194,6 @@ SCI_RAG_RETRIEVAL_MODE=hybrid ./venv/bin/python app.py
 ```
 
 该模式复用本页同一 BM25/RRF 实现，并在融合后继续执行显式 `Table N` 过滤和确定性
-单元格定位；默认 `dense` 行为不变。它尚未加入 cross-encoder reranker，也没有在本
-基准上执行答案生成或 RAGAS，因此不能把上述检索代理解释为答案正确率。
+单元格定位；默认 `dense` 行为不变。设置 `SCI_RAG_RERANKER_MODEL` 和固定 revision 后
+才会额外加载本地 cross-encoder。尚未在本基准上执行答案生成或 RAGAS，因此不能把上述
+检索代理解释为答案正确率。

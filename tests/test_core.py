@@ -4,6 +4,8 @@ import unittest
 from unittest.mock import patch
 
 import app
+from sci_rag_reranking import RerankResult
+from sci_rag_retrieval import RankedItem
 from sci_rag_core import (
     Chunk,
     extract_table_cell,
@@ -105,14 +107,108 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIsNone(app._runtime)
 
     def test_runtime_config_defaults_dense_and_validates_hybrid_settings(self):
-        with patch.dict(os.environ, {"SCI_RAG_RETRIEVAL_MODE": "hybrid", "SCI_RAG_HYBRID_RRF_K": "45"}, clear=True):
+        with patch.dict(
+            os.environ,
+            {
+                "SCI_RAG_RETRIEVAL_MODE": "hybrid",
+                "SCI_RAG_HYBRID_RRF_K": "45",
+                "SCI_RAG_RERANKER_MODEL": "BAAI/bge-reranker-base",
+                "SCI_RAG_RERANKER_REVISION": "fixed-revision",
+            },
+            clear=True,
+        ):
             config = app.RuntimeConfig.from_env()
         self.assertEqual(config.retrieval_mode, "hybrid")
         self.assertEqual(config.hybrid_rrf_k, 45)
+        self.assertEqual(config.reranker_model, "BAAI/bge-reranker-base")
+        self.assertEqual(config.reranker_revision, "fixed-revision")
 
         with patch.dict(os.environ, {"SCI_RAG_RETRIEVAL_MODE": "unsupported"}, clear=True):
             config = app.RuntimeConfig.from_env()
         self.assertEqual(config.retrieval_mode, "dense")
+        self.assertIsNone(config.reranker_model)
+
+    def test_runtime_rejects_reranker_outside_hybrid_mode(self):
+        with self.assertRaises(ValueError):
+            app.Runtime(app.RuntimeConfig(), None, None, None, reranker=object())
+
+    def test_opt_in_reranker_changes_hybrid_order_and_prompt_context(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        class Collection:
+            def count(self):
+                return 3
+
+            def query(self, **_kwargs):
+                return {
+                    "ids": [["weak", "strong"]],
+                    "documents": [["Weak context.", "The answer is 4,855 samples."]],
+                    "metadatas": [[{"type": "text"}, {"type": "text"}]],
+                }
+
+            def get(self, **_kwargs):
+                return {
+                    "ids": ["weak", "strong", "other"],
+                    "documents": [
+                        "Weak context.",
+                        "The answer is 4,855 samples.",
+                        "Other context.",
+                    ],
+                    "metadatas": [{"type": "text"}] * 3,
+                }
+
+        class Reranker:
+            def __init__(self):
+                self.calls = 0
+
+            def rerank(self, _question, candidates, documents):
+                self.calls += 1
+                order = sorted(
+                    candidates,
+                    key=lambda item: "4,855" not in documents[int(item.key)],
+                )
+                ranked = [
+                    RankedItem(item.key, float(len(order) - index))
+                    for index, item in enumerate(order)
+                ]
+                return RerankResult(ranked, 0.01, len(ranked), 0)
+
+        class Client:
+            def __init__(self):
+                self.prompt = ""
+                self.chat = self
+                self.completions = self
+
+            def create(self, **kwargs):
+                self.prompt = kwargs["messages"][1]["content"]
+                return type(
+                    "Response",
+                    (),
+                    {"choices": [type("Choice", (), {"message": type("Message", (), {"content": "ok"})()})()]},
+                )()
+
+        reranker = Reranker()
+        client = Client()
+        runtime = app.Runtime(
+            app.RuntimeConfig(
+                retrieval_mode="hybrid", hybrid_candidate_k=3, context_k=2
+            ),
+            client,
+            Embedding(),
+            Collection(),
+            reranker=reranker,
+        )
+        result = app.query_knowledge("How many samples?", runtime=runtime)
+
+        self.assertEqual(reranker.calls, 1)
+        self.assertIn("4,855", result["contexts"][0])
+        self.assertTrue(all(context in client.prompt for context in result["contexts"]))
 
     def test_dense_narrative_quantity_question_does_not_scan_tables(self):
         class Vector(list):
@@ -415,7 +511,14 @@ class RuntimeContractTests(unittest.TestCase):
         config = app.RuntimeConfig(
             retrieval_mode="hybrid", hybrid_candidate_k=2, context_k=2
         )
-        runtime = app.Runtime(config, Client(), Embedding(), Collection())
+        class Reranker:
+            def rerank(self, _question, candidates, _documents):
+                ranked = [RankedItem(item.key, 1.0) for item in reversed(candidates)]
+                return RerankResult(ranked, 0.01, len(ranked), 0)
+
+        runtime = app.Runtime(
+            config, Client(), Embedding(), Collection(), reranker=Reranker()
+        )
         result = app.query_knowledge(
             "Table 2 中 DrugR* 的 Target property F1 score 是多少？",
             runtime=runtime,
