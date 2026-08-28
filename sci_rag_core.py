@@ -18,11 +18,18 @@ from typing import Any, Iterable
 
 TABLE_SEPARATOR_RE = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+$")
 TABLE_NUMBER_RE = re.compile(r"\btable\s*(\d+)\b", re.IGNORECASE)
+TABLE_CAPTION_RE = re.compile(r"^\s*table\s*(\d+)\b", re.IGNORECASE)
 TABLE_QUESTION_RE = re.compile(
     r"\btable\b|表\s*\d*|数值|多少|样本量|比率|\bn\s*=",
     re.IGNORECASE,
 )
 ENTITY_RE = re.compile(r"[A-Za-z0-9_*+\-]+(?:[-\s][A-Za-z0-9_*+\-]+)*")
+HEADER_HINT_RE = re.compile(
+    r"\b(?:model|dataset|setting|data|parameters?|time|metric|score|error|"
+    r"accuracy|precision|recall|mse|f1(?:-score)?|meteor|rouge(?:-\d+)?|"
+    r"berts?|l\s*2|h\s*1|pipe|ns\d*)\b",
+    re.IGNORECASE,
+)
 
 # These aliases are deliberately semantic rather than tied to one paper.  A
 # user may ask for an English table header in Chinese, or abbreviate a header
@@ -73,6 +80,19 @@ class Chunk:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def _restore_bold_boundaries(text: str) -> str:
+    """Strip bold markers without joining adjacent alphanumeric tokens."""
+
+    def replace(match: re.Match[str]) -> str:
+        before = text[match.start() - 1] if match.start() else ""
+        after = text[match.end()] if match.end() < len(text) else ""
+        left = " " if before.isalnum() else ""
+        right = " " if after.isalnum() else ""
+        return f"{left}{match.group(1)}{right}"
+
+    return re.sub(r"\*\*(.*?)\*\*", replace, text, flags=re.DOTALL)
+
+
 def file_sha256(file_path: str | Path) -> str:
     """Return a stable content hash without loading the whole file in memory."""
 
@@ -93,7 +113,9 @@ def normalize_for_match(value: Any) -> str:
 
     text = html.unescape(str(value or ""))
     text = re.sub(r"<[^>]*>", " ", text)
-    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text, flags=re.DOTALL)
+    # Keep a token boundary when bold markup is adjacent to another token
+    # (``**Baseline**MgNO`` is emitted by some PDF table converters).
+    text = _restore_bold_boundaries(text)
     text = text.replace("∗", "*").replace("﹡", "*").replace("＊", "*")
     text = unicodedata.normalize("NFKC", text)
     text = re.sub(r"[_~`]+", "", text)
@@ -107,18 +129,194 @@ def display_table_cell(value: Any) -> str:
 
     text = html.unescape(str(value or ""))
     text = re.sub(r"<[^>]*>", "", text)
+    text = _restore_bold_boundaries(text)
     text = re.sub(r"[*_~`]+", "", text)
     text = text.replace("∗", "*").replace("﹡", "*").replace("＊", "*")
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
-def _caption_near(lines: list[str], header_idx: int) -> tuple[str, int | None]:
-    for candidate_idx in range(header_idx - 1, max(-1, header_idx - 4), -1):
-        candidate = lines[candidate_idx].strip()
-        if candidate and TABLE_NUMBER_RE.search(candidate):
-            return candidate, candidate_idx
+def _caption_text(line: str) -> str:
+    """Strip presentation markup before deciding whether a line is a caption."""
+
+    text = html.unescape(str(line or ""))
+    text = re.sub(r"<[^>]*>", "", text)
+    text = re.sub(r"[*_~`]+", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _is_table_caption(line: str) -> bool:
+    return bool(TABLE_CAPTION_RE.match(_caption_text(line)))
+
+
+def _caption_near(
+    lines: list[str],
+    header_idx: int,
+    table_end_idx: int,
+) -> tuple[str, int | None]:
+    """Find a caption immediately before or after a Markdown table.
+
+    ``pymupdf4llm`` commonly emits captions after the table, while LaTeX
+    exports often place them before it.  Only blank lines may occur between a
+    table and its caption; this prevents a prose cross-reference to another
+    table from being attached accidentally.
+    """
+
+    for direction, start in ((-1, header_idx - 1), (1, table_end_idx)):
+        candidate_idx = start
+        blank_lines = 0
+        while 0 <= candidate_idx < len(lines) and not lines[candidate_idx].strip():
+            blank_lines += 1
+            if blank_lines > 3:
+                break
+            candidate_idx += direction
+        if 0 <= candidate_idx < len(lines) and _is_table_caption(lines[candidate_idx]):
+            return lines[candidate_idx].strip(), candidate_idx
     return "未命名表格", None
+
+
+def _clean_header_cell(value: Any) -> str:
+    """Normalize a header cell while retaining readable metric names."""
+
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"<br\s*/?>", " ", text, flags=re.IGNORECASE)
+    return display_table_cell(text)
+
+
+def _looks_numeric_cell(value: Any) -> bool:
+    text = display_table_cell(value)
+    if not text:
+        return False
+    if text.casefold() in {"n/a", "na", "—", "-"}:
+        return True
+    return bool(re.fullmatch(r"[\s0-9.,+\-−×x*/()^<>eE]+", text))
+
+
+def _looks_like_header_row(row: str) -> bool:
+    """Recognize a second header row emitted below a spanning header."""
+
+    cells = _split_markdown_row(row)
+    if len(cells) < 2:
+        return False
+    hints = sum(bool(HEADER_HINT_RE.search(_clean_header_cell(cell))) for cell in cells)
+    numeric = sum(_looks_numeric_cell(cell) for cell in cells)
+    return hints >= 2 and numeric <= len(cells) // 2
+
+
+def _looks_like_group_header_row(row: str) -> bool:
+    """Require visible spanning/wrapping evidence before merging headers."""
+
+    cells = [_clean_header_cell(cell) for cell in _split_markdown_row(row)]
+    if not cells:
+        return False
+    if any(not cell for cell in cells):
+        return True
+    if any(left == right for left, right in zip(cells, cells[1:]) if left):
+        return True
+    return any(
+        right and right[0].islower() and left and not _looks_numeric_cell(left)
+        for left, right in zip(cells, cells[1:])
+    )
+
+
+def _join_markdown_cells(cells: list[str]) -> str:
+    return "|" + "|".join(cells) + "|"
+
+
+def _combine_header_rows(group_line: str, header_line: str) -> str:
+    """Combine a spanning header row with the concrete metric header row."""
+
+    group_cells = _split_markdown_row(group_line)
+    metric_cells = _split_markdown_row(header_line)
+    if not group_cells or len(group_cells) != len(metric_cells):
+        return header_line
+    clean_groups = [_clean_header_cell(cell) for cell in group_cells]
+    clean_metrics = [_clean_header_cell(cell) for cell in metric_cells]
+    if not any(clean_groups):
+        return header_line
+
+    spans: list[list[Any]] = []
+    index = 0
+    while index < len(clean_groups):
+        label = clean_groups[index]
+        if not label:
+            index += 1
+            continue
+        end = index
+        while end + 1 < len(clean_groups):
+            next_label = clean_groups[end + 1]
+            if not next_label or not next_label[0].islower():
+                break
+            # PDF line wrapping can split a word across adjacent cells (for
+            # example ``Darcy s`` + ``mooth``).  Join a one-letter trailing
+            # fragment directly; normal multi-word group labels retain a
+            # separating space (``Darcy`` + ``rough``).
+            last_token = label.rsplit(" ", 1)[-1]
+            joiner = "" if len(last_token) == 1 and last_token.isalpha() else " "
+            label = f"{label}{joiner}{next_label}"
+            end += 1
+        spans.append([index, end, label])
+        index = end + 1
+
+    # Some PDF table exporters place a final group label in the last cell of
+    # a two-column metric group, leaving the preceding cell empty.  If that
+    # pair repeats earlier in the header, move the label back one column.
+    if spans:
+        start, end, label = spans[-1]
+        if start > 0 and not clean_groups[start - 1]:
+            pair = tuple(normalize_for_match(value) for value in clean_metrics[start - 1 : start + 1])
+            if len(pair) == 2 and any(
+                tuple(normalize_for_match(value) for value in clean_metrics[pos : pos + 2]) == pair
+                for pos in range(max(0, start - 2))
+            ):
+                spans[-1][0] = start - 1
+
+    group_for_column = [""] * len(clean_metrics)
+    for span_index, (start, _end, label) in enumerate(spans):
+        next_start = spans[span_index + 1][0] if span_index + 1 < len(spans) else len(clean_metrics)
+        for column in range(start, next_start):
+            group_for_column[column] = label
+
+    combined = []
+    for group, metric in zip(group_for_column, clean_metrics):
+        combined.append(f"{group} {metric}".strip() if group and metric else group or metric)
+    return _join_markdown_cells(combined)
+
+
+def _unit_header(value: Any) -> bool:
+    text = _clean_header_cell(value)
+    return "10" in text and any(symbol in text for symbol in ("×", "x", "^", "−", "-"))
+
+
+def _canonicalize_unit_column(header_line: str, rows: list[str]) -> tuple[str, list[str]]:
+    """Merge a standalone unit cell when data rows contain a blank column."""
+
+    headers = _split_markdown_row(header_line)
+    if not headers:
+        return header_line, rows
+    row_cells = [_split_markdown_row(row) for row in rows]
+    for index in range(len(headers) - 1):
+        if not _unit_header(headers[index + 1]):
+            continue
+        if not row_cells or not all(index < len(cells) and not display_table_cell(cells[index]) for cells in row_cells):
+            continue
+        headers = headers[:index] + [f"{_clean_header_cell(headers[index])} {_clean_header_cell(headers[index + 1])}"] + headers[index + 2 :]
+        row_cells = [cells[:index] + cells[index + 1 :] for cells in row_cells]
+        rows = [_join_markdown_cells(cells) for cells in row_cells]
+        break
+    return _join_markdown_cells(headers), rows
+
+
+def _looks_like_layout_table(header_line: str, rows: list[str], caption_idx: int | None) -> bool:
+    """Avoid indexing one-row URL/metadata layout tables as scientific tables."""
+
+    if caption_idx is not None:
+        return False
+    cells = _split_markdown_row(header_line)
+    cells.extend(cell for row in rows for cell in _split_markdown_row(row))
+    return bool(cells) and any("http://" in cell or "https://" in cell for cell in cells) and not any(
+        _looks_numeric_cell(cell) for cell in cells
+    )
 
 
 def _table_metadata(
@@ -181,14 +379,28 @@ def _parse_gfm_tables(
             i += 1
             continue
 
-        caption, caption_idx = _caption_near(lines, header_idx)
+        data_rows = rows
+        if (
+            header_line
+            and rows
+            and _looks_like_group_header_row(header_line)
+            and _looks_like_header_row(rows[0])
+        ):
+            header_line = _combine_header_rows(header_line, rows[0])
+            data_rows = rows[1:]
+        header_line, data_rows = _canonicalize_unit_column(header_line, data_rows)
+        caption, caption_idx = _caption_near(lines, header_idx, j)
+        if _looks_like_layout_table(header_line, data_rows, caption_idx):
+            i = j
+            continue
         start_idx = caption_idx if caption_idx is not None else header_idx
-        consumed.update(range(max(0, start_idx), j))
+        end_idx = max(j, (caption_idx + 1) if caption_idx is not None else j)
+        consumed.update(range(max(0, start_idx), end_idx))
         metadata = _table_metadata(source, caption, len(tables) + 1, base_metadata)
         metadata["headers"] = normalize_for_match(header_line)
         tables.append(
             Chunk(
-                page_content="\n".join([header_line, lines[separator_idx]] + rows),
+                page_content="\n".join([header_line, lines[separator_idx]] + data_rows),
                 metadata=metadata,
             )
         )
@@ -453,15 +665,22 @@ def _match_table_column(question: str, headers: list[str]) -> tuple[int, str] | 
     normalized_question = normalize_for_match(question)
     normalized_headers = [normalize_for_match(header) for header in headers]
 
+    def without_unit(header: str) -> str:
+        # Headers such as ``L2 Error (×10−2)`` are commonly asked about as
+        # simply ``L2 Error``.  Keep the original header for display while
+        # matching both forms against the question.
+        return re.sub(r"\s*[\(\[][^)\]]*10[^)\]]*[\)\]]", "", header).strip()
+
     # Prefer a literal header match.  This avoids mapping a question about a
     # longer header to a shorter, ambiguous alias.
-    literal_matches = [
-        (idx, header)
-        for idx, header in enumerate(normalized_headers)
-        if header and header in normalized_question
-    ]
+    literal_matches: list[tuple[int, str, int]] = []
+    for idx, header in enumerate(normalized_headers):
+        for candidate in {header, without_unit(header)}:
+            if candidate and candidate in normalized_question:
+                literal_matches.append((idx, header, len(candidate)))
     if literal_matches:
-        return max(literal_matches, key=lambda item: len(item[1]))
+        idx, header, _ = max(literal_matches, key=lambda item: item[2])
+        return idx, header
 
     alias_matches: list[tuple[int, str, int]] = []
     for idx, header in enumerate(normalized_headers):

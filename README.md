@@ -62,3 +62,57 @@ Acceptance checks for the default paper:
 - the answer does not substitute Table 1 for an explicit Table 2 question;
 - a normal narrative question, outline generation, quiz generation, and a
   second document upload still complete normally.
+
+## Multi-paper benchmark (Phase 2)
+
+The benchmark manifest is in `evaluation/benchmark/`. It currently contains
+five papers and 53 cases (11 existing DrugR cases plus independently curated
+cases for four additional papers). Each external PDF is represented by its
+SHA-256 without storing the PDF in Git. Validate the manifest offline with:
+
+```bash
+./venv/bin/python evaluation/validate_benchmark.py
+```
+
+To verify the seed PDF and the four new PDFs against recorded hashes, pass both
+external directories (the flag may be repeated):
+
+```bash
+./venv/bin/python evaluation/validate_benchmark.py \
+  --papers-dir /Users/qinleqi/Desktop \
+  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
+  --verify-files --require-complete
+```
+
+Add future PDFs outside the repository, then add their metadata and cases to the
+manifest/JSONL files before implementing or comparing new retrieval methods.
+
+The current Phase 2 parser regression suite is offline and does not rebuild the
+database:
+
+```bash
+./venv/bin/python -m unittest discover -s tests -v
+```
+
+The suite covers caption placement, grouped/unit table headers, PDF markup
+boundaries, and layout-table false positives. A local PDF smoke check confirms
+that the same ingestion path can recover table numbers and deterministic cells;
+it does not prove retrieval or answer-generation quality.
+
+For a no-API, no-Chroma multi-paper retrieval baseline, run:
+
+```bash
+./venv/bin/python evaluation/benchmark_retrieval.py \
+  --papers-dir /Users/qinleqi/Desktop \
+  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
+  --top-k 1,3,5,10
+```
+
+This BM25-lite diagnostic ranks one global in-memory index and reports document,
+reference-context, page, and table-number proxies. It is the comparison gate
+before implementing Hybrid/RRF; it does not call DeepSeek or prove answer
+correctness.
+
+For a local-only Hybrid/RRF comparison (the embedding model must already be
+cached), use `--retriever hybrid` with `HF_HUB_OFFLINE=1`. The diagnostic does
+not change the app's default dense retrieval path or the existing ChromaDB.

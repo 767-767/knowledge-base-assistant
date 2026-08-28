@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-multipaper-v1",
+  "description": "Multi-paper retrieval benchmark manifest. Source PDFs stay outside the repository.",
+  "minimum_documents": 3,
+  "cases_path": "cases.jsonl",
+  "documents": [
+    {
+      "document_id": "drugr-2602-08213-v1",
+      "filename": "2602.08213v1.pdf",
+      "sha256": "15c08759ae28ac10b329528b20cc234c5046618a074dd59fd862d3af4cd0976f",
+      "domain": "chemistry / molecular optimization",
+      "layout_tags": ["two-column", "markdown-tables", "figures", "formulas"],
+      "status": "seed"
+    },
+    {
+      "document_id": "scidqa-emnlp-2024",
+      "filename": "2024.emnlp-main.1163.pdf",
+      "sha256": "e098264a70fdb6a1e9d05daade8015141ed54018eeb196abc1478bfe344b5a20",
+      "title": "SciDQA: A Deep Reading Comprehension Dataset over Scientific Papers",
+      "venue": "EMNLP 2024",
+      "year": 2024,
+      "domain": "NLP / scientific question answering",
+      "layout_tags": ["two-column", "tables", "figures", "equations", "appendix", "algorithms"],
+      "source_url": "https://aclanthology.org/2024.emnlp-main.1163/",
+      "pdf_url": "https://aclanthology.org/2024.emnlp-main.1163.pdf",
+      "access": "official free PDF; ACL materials after 2016 are CC BY 4.0",
+      "status": "curated"
+    },
+    {
+      "document_id": "table-llm-sdp-2024",
+      "filename": "2024.sdp-1.28.pdf",
+      "sha256": "e0d13f79aee19df2b09f6dc24a5479786536348efc3124020f599b08f66808b8",
+      "title": "Integrating Table Representations into Large Language Models for Improved Scholarly Document Comprehension",
+      "venue": "SDP 2024 Workshop",
+      "year": 2024,
+      "domain": "NLP / scientific table understanding",
+      "layout_tags": ["two-column", "tables", "figures", "appendix"],
+      "source_url": "https://aclanthology.org/2024.sdp-1.28/",
+      "pdf_url": "https://aclanthology.org/2024.sdp-1.28.pdf",
+      "access": "official free PDF; ACL materials after 2016 are CC BY 4.0",
+      "status": "curated"
+    },
+    {
+      "document_id": "mgno-iclr-2024",
+      "filename": "ICLR-2024-mgno-efficient-parameterization-of-linear-operators-via-multigrid-Paper-Conference.pdf",
+      "sha256": "743d8119f044f35a02729c7f70e121062ca1b44f1a795ad09bf9c059361df71a",
+      "title": "MgNO: Efficient Parameterization of Linear Operators via Multigrid",
+      "venue": "ICLR 2024",
+      "year": 2024,
+      "domain": "scientific machine learning / PDE neural operators",
+      "layout_tags": ["two-column", "formulas", "tables", "figures", "appendix", "algorithms"],
+      "source_url": "https://proceedings.iclr.cc/paper_files/paper/2024/hash/eb3c8135137c8a60425a0320869ad87e-Abstract-Conference.html",
+      "pdf_url": "https://proceedings.iclr.cc/paper_files/paper/2024/file/eb3c8135137c8a60425a0320869ad87e-Paper-Conference.pdf",
+      "access": "official free conference PDF",
+      "status": "curated"
+    },
+    {
+      "document_id": "alphafold3-nature-2024",
+      "filename": "s41586-024-07487-w.pdf",
+      "sha256": "aba3109f2892454c9512570001598a069aaf422adb5aa0f3879414cb29a258fb",
+      "title": "Accurate structure prediction of biomolecular interactions with AlphaFold 3",
+      "venue": "Nature",
+      "year": 2024,
+      "domain": "biology / biomolecular structure prediction",
+      "layout_tags": ["Nature layout", "figures", "extended-data tables", "methods", "supplementary material"],
+      "source_url": "https://www.nature.com/articles/s41586-024-07487-w",
+      "pdf_url": "https://www.nature.com/articles/s41586-024-07487-w.pdf",
+      "access": "official free PDF; Open Access CC BY 4.0",
+      "status": "curated"
+    }
+  ]
+}

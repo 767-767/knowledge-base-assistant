@@ -2,12 +2,47 @@
 
 > 记录本项目从"通用学习工作台"改造为 Sci-RAG 的全过程。按时间倒序排列。
 
+> 2026-08-28 Phase 2 解析回归：`sci_rag_core.py` 兼容表格前后 caption、跨列分组表头、
+> PDF 断词、独立单位列和加粗标记相邻实体，并排除 DOI/作者元数据布局表。新增
+> `tests/test_parser_regression.py` 的 8 个离线 fixture；四篇外部 PDF 只读冒烟确认
+> SciDQA 6/6、Scientific Table LLM 3/3、MgNO 7/7 的表号识别，AlphaFold 3 不再误建
+> 元数据表格块。MgNO Table 1/4 的确定性单元格回归返回 `0.339`/`1.63`。未调用外部模型、
+> 未启动 UI、未写入 ChromaDB。
+
+> 2026-08-28 Phase 2 离线检索基线：新增 `evaluation/benchmark_retrieval.py` 和
+> `tests/test_benchmark_retrieval.py`。BM25-lite 在五篇论文的全局内存索引上输出文档、
+> 参考片段、页码和 Table N 命中代理；全局 top-1/3/5/10 目标论文命中率为
+> `0.811/0.868/0.868/0.906`，显式表号命中率为 `0.667/0.833/0.833/1.000`。
+> 该诊断不调用 Embedding、Chroma、DeepSeek、Gradio 或 RAGAS，结果不能解释为答案正确率。
+
+> 2026-08-28 Phase 2 Hybrid/RRF 离线对比：`evaluation/benchmark_retrieval.py` 增加本地
+> dense（Sentence-Transformers，`HF_HUB_OFFLINE=1`）和 BM25+dense 的 RRF 模式，并复用
+> 单一模型实例；新增 RRF 去重、稳定排序和跨论文隔离测试。Hybrid 全局 top-1/3/5/10
+> 参考片段覆盖代理为 `0.208/0.330/0.443/0.525`，Table N 命中率为
+> `0.500/0.667/0.778/0.833`。仅证明离线实验可运行，未替换线上 app 默认 dense 检索，
+> 未调用网络模型、未修改 ChromaDB。
+
 > 2026-08-28 Phase 0/1 的代码、离线验收和迁移注意事项见
 > [PHASE0_PHASE1_HANDOFF.md](PHASE0_PHASE1_HANDOFF.md)。本次未重建现有 ChromaDB、未运行 RAGAS、未调用外部模型。
 
 > 2026-08-28 追加修复：明确 Table N/行/列的问题现在走通用的确定性 Markdown
 > 单元格查找；缺失表号不再回退到其他表格；`.gitignore` 补充本地运行时文件规则。
 > 附件 PDF 和现有 104 块 ChromaDB 均只读核验，未调用外部模型或重建数据库。
+
+> 2026-08-28 Phase 2 多论文基准：用户提供了四篇仓库外的免费论文 PDF。新增
+> `evaluation/benchmark/PAPER_AUDIT.md`，并在清单中登记 SciDQA（EMNLP 2024）、
+> Scientific Table LLM（SDP 2024 Workshop）、MgNO（ICLR 2024）和 AlphaFold 3
+>（Nature 2024）的文件名、SHA-256、来源、领域和版式标签；`cases.jsonl` 增加每篇
+> 10–11 道独立问题，覆盖文本、表格、公式、图注、限制和复现性。校验器支持多个
+> `--papers-dir`，已通过 5 篇/53 题的离线 SHA-256 校验。解析审计发现部分 PDF 的
+> 表号/caption 未稳定进入 table metadata，AlphaFold 3 还有 3 个无文本页；这些是
+> 后续通用解析改进的输入，不是已解决的检索证据。
+
+> 2026-08-28 Phase 2 标注核对：对新增 42 道问题逐题对照本地 PDF 的文本层和渲染页面，
+> 未发现核心数值或表号冲突。修订 `cases.jsonl`：为表格证据补充完整列名、单位和表注，
+> 在 SDP Table 2 答案中保留括号内变化量，将 `caption` 明确为“题注”，并把 MgNO 公式
+> 用例改为只陈述原文直接给出的初始化和残差公式。此次仅证明基准标注自洽，不证明
+> 当前解析器、检索器或生成器已经正确。
 
 ---
 

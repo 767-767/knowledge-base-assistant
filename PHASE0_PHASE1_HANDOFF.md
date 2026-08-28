@@ -82,6 +82,62 @@ bash scripts/launch_phase1_ui_test.sh --existing
 如附件 PDF 不在默认路径，可传绝对路径作为第一个参数。完整验收清单已同步到
 `README.md`，包括三项 Table 1/Table 2 数值、上传、问答、大纲和出题功能。
 
+## Phase 2 基准集第一步
+
+在 `phase2/multipaper-benchmark` 分支新增了 `evaluation/benchmark/`、
+`evaluation/benchmark_loader.py` 和 `evaluation/validate_benchmark.py`。用户已将四篇
+免费 PDF 放在仓库外的 `/Users/qinleqi/Desktop/sci-rag-benchmark-papers/`；当前清单
+登记现有种子加这四篇论文，共 5 篇、53 道问题。校验器只读取 JSON/JSONL 和可选的外部
+PDF SHA-256，不会加载模型、Chroma、Gradio 或 API；`--papers-dir` 可重复传入多个目录。
+
+新增论文应放在仓库外，登记文件名、SHA-256、领域和版式标签，并为每篇准备独立问题。
+当前 53 道题中的 42 个新增用例已完成一次 PDF 逐题人工核对，且已补充表头、单位、
+caption 和公式语义。`evaluation/benchmark/PAPER_AUDIT.md` 记录了同一解析管线下的
+页数、块数和表格识别风险。标注核对不等于检索或生成验证；表号未稳定进入 metadata 的
+PDF，仍需先完成解析回归测试和离线检索诊断，再比较 Hybrid/RRF 的收益。
+
+## Phase 2 解析回归（本轮）
+
+`sci_rag_core.py` 现在兼容表格前后 caption、HTML/Markdown 装饰、跨列分组表头、PDF
+断词、独立单位列和加粗标记相邻实体，并排除 DOI/作者元数据布局表。新增
+`tests/test_parser_regression.py`，覆盖 8 个离线 fixture。四篇外部 PDF 的只读冒烟结果
+为：SciDQA 6 个编号表格块（1、2、3、4、5、7）、Scientific Table LLM 3 个（1–3）、
+MgNO 7 个（1–7）、AlphaFold 3 0 个误识别表格块；MgNO Table 1/4 的两个单元格查询
+分别得到 `0.339` 和 `1.63`。这些结果只证明解析和确定性单元格定位，不证明检索、生成或
+RAGAS 质量。
+
+## Phase 2 离线检索基线（本轮）
+
+新增 `evaluation/benchmark_retrieval.py`，以标准库 BM25-lite 在五篇论文上建立一个全局
+内存词法索引；它不加载 Chroma、Embedding、Gradio 或外部 API。运行：
+
+```bash
+./venv/bin/python evaluation/benchmark_retrieval.py \
+  --papers-dir /Users/qinleqi/Desktop \
+  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
+  --top-k 1,3,5,10
+```
+
+当前全局结果（53 题）为：top-1/3/5/10 的参考片段覆盖代理分别为
+`0.252/0.336/0.365/0.506`，目标论文命中率为 `0.811/0.868/0.868/0.906`，页级命中率为
+`0.310/0.429/0.429/0.690`，显式表号命中率为 `0.667/0.833/0.833/1.000`。这些是后续
+Hybrid/RRF/reranker 的比较基线，不是答案正确率；参考片段、页码和表号均来自人工标注。
+
+进一步使用本地缓存模型并设置 `HF_HUB_OFFLINE=1` 后，Hybrid-RRF 全局 top-1/3/5/10
+的参考片段覆盖代理为 `0.208/0.330/0.443/0.525`，目标论文命中率为
+`0.830/0.906/0.943/0.981`，页级命中率为 `0.286/0.476/0.667/0.810`，显式表号命中率为
+`0.500/0.667/0.778/0.833`。Hybrid 提升了部分证据/页级代理，但 Table N top-10 仍低于
+BM25，因此尚不切换线上默认检索；下一步应做显式表格保护与 reranker 的组合实验。
+
+验证当前外部文件：
+
+```bash
+./venv/bin/python evaluation/validate_benchmark.py \
+  --papers-dir /Users/qinleqi/Desktop \
+  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
+  --verify-files --require-complete
+```
+
 ## 未包含在本轮
 
 - Hybrid/BM25/RRF/cross-encoder reranker。
