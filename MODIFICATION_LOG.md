@@ -2,6 +2,13 @@
 
 > 记录本项目从"通用学习工作台"改造为 Sci-RAG 的全过程。按时间倒序排列。
 
+> 2026-08-28 Phase 0/1 的代码、离线验收和迁移注意事项见
+> [PHASE0_PHASE1_HANDOFF.md](PHASE0_PHASE1_HANDOFF.md)。本次未重建现有 ChromaDB、未运行 RAGAS、未调用外部模型。
+
+> 2026-08-28 追加修复：明确 Table N/行/列的问题现在走通用的确定性 Markdown
+> 单元格查找；缺失表号不再回退到其他表格；`.gitignore` 补充本地运行时文件规则。
+> 附件 PDF 和现有 104 块 ChromaDB 均只读核验，未调用外部模型或重建数据库。
+
 ---
 
 ## 第九次修改：2026-08-24 —— 接入 RAGAS 评估框架（evaluation/ + return_contexts）

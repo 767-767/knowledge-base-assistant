@@ -221,3 +221,13 @@ __marimo__/
 chroma_db/
 
 .gradio/
+
+# Sci-RAG local configuration and runtime artifacts
+.env.*
+!.env.example
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.ses
+.DS_Store
+tmp/
