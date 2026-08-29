@@ -23,12 +23,29 @@ TABLE_QUESTION_RE = re.compile(
     r"\btables?\b|表\s*\d+|表格|(?:该|此|下|上|上述|以下)表|表(?:中|内|里|所示)",
     re.IGNORECASE,
 )
+TABLE_ROW_VALUE_QUESTION_RE = re.compile(
+    r"数量|占比|比例|数值|值|values?|count|percentage|proportion|how\s+many",
+    re.IGNORECASE,
+)
+TABLE_COMPARISON_QUESTION_RE = re.compile(
+    r"相比|比较|各基线|基线模型|哪些指标|最优|最高|最低|优于|逊于|"
+    r"compare|comparison|baselines?|which\s+metrics?|best|highest|lowest",
+    re.IGNORECASE,
+)
 ENTITY_RE = re.compile(r"[A-Za-z0-9_*+\-]+(?:[-\s][A-Za-z0-9_*+\-]+)*")
 HEADER_HINT_RE = re.compile(
     r"\b(?:model|dataset|setting|data|parameters?|time|metric|score|error|"
     r"accuracy|precision|recall|mse|f1(?:-score)?|meteor|rouge(?:-\d+)?|"
     r"berts?|l\s*2|h\s*1|pipe|ns\d*)\b",
     re.IGNORECASE,
+)
+
+EVIDENCE_ASCII_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_*+./-]*")
+EVIDENCE_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:[<>≤≥]=?\s*)?\d[\d,]*(?:\.\d+)?(?:\s*[%A-Za-z]+)?"
+)
+EVIDENCE_ENTITY_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:[A-Z]{2,}[A-Za-z0-9]*|[A-Z][A-Za-z0-9]*[-_][A-Za-z0-9_*.-]+|[A-Za-z0-9]+\*)(?![A-Za-z0-9])"
 )
 
 # These aliases are deliberately semantic rather than tied to one paper.  A
@@ -68,6 +85,13 @@ TABLE_COLUMN_ALIASES = {
         "reasoning richness",
         "richness",
         "推理丰富度",
+    ),
+    "target set": (
+        "target set",
+        "target sets",
+        "靶点集合",
+        "靶点集",
+        "目标集合",
     ),
 }
 
@@ -122,6 +146,250 @@ def normalize_for_match(value: Any) -> str:
     text = re.sub(r"\s*\*\s*", "*", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip().casefold()
+
+
+def _evidence_query_tokens(question: str) -> set[str]:
+    """Return stable ASCII tokens useful for matching evidence lines."""
+
+    tokens = set()
+    for token in EVIDENCE_ASCII_TOKEN_RE.findall(normalize_for_match(question)):
+        token = token.strip("._/-")
+        if len(token) >= 3 and not token.isdigit():
+            tokens.add(token)
+    return tokens
+
+
+def build_evidence_ledger(
+    question: str,
+    texts: Iterable[str],
+    metadatas: Iterable[dict[str, Any]] | None = None,
+    *,
+    max_lines: int = 32,
+) -> list[str]:
+    """Extract a compact, deterministic checklist from retrieved evidence.
+
+    The ledger is only an index of literal lines already present in the
+    retrieved chunks.  It intentionally does not infer facts, normalize
+    values, or replace the full context.  Lines containing question terms are
+    preferred; numeric and scientific-entity lines from the same relevant
+    chunks are retained so thresholds, tool names, and dataset sizes are not
+    silently lost during generation.
+    """
+
+    if max_lines <= 0:
+        return []
+    text_list = [str(text or "") for text in texts]
+    metadata_list = list(metadatas or [])
+    query_tokens = _evidence_query_tokens(question)
+    candidates: list[tuple[int, int, int, str]] = []
+    context_has_query: list[bool] = []
+
+    for context_index, text in enumerate(text_list):
+        lines = [line.strip() for line in re.split(r"\n+", text) if line.strip()]
+        line_data: list[tuple[int, int, int, str]] = []
+        context_query = False
+        for line_index, line in enumerate(lines):
+            normalized_line = normalize_for_match(line)
+            query_hits = sum(1 for token in query_tokens if token in normalized_line)
+            number_hits = len(EVIDENCE_NUMBER_RE.findall(line))
+            entity_hits = len(EVIDENCE_ENTITY_RE.findall(line))
+            if query_hits:
+                context_query = True
+            if query_hits or number_hits or entity_hits:
+                score = query_hits * 4 + number_hits * 2 + entity_hits
+                line_data.append((score, context_index, line_index, line))
+        context_has_query.append(context_query)
+        candidates.extend(line_data)
+
+    # Prefer salient lines from contexts that contain at least one question
+    # term.  Then fill any remaining budget from other retrieved contexts. The
+    # fallback is important for translated questions: a Chinese question may
+    # have no literal overlap with an English sentence that contains the
+    # threshold or tool name needed for a complete answer.
+    preferred = [row for row in candidates if context_has_query[row[1]]]
+    preferred.sort(key=lambda row: (-row[0], row[1], row[2]))
+    remaining = [row for row in candidates if not context_has_query[row[1]]]
+    remaining.sort(key=lambda row: (-row[0], row[1], row[2]))
+    ranked = preferred + remaining
+
+    # Reserve up to two salient lines for every retrieved context before
+    # filling the remaining budget by relevance.  A pure global sort can
+    # otherwise spend the entire budget on duplicate table rows from one
+    # chunk and silently drop a threshold/tool line that lives in a sibling
+    # chunk of the same section.
+    selected_rows: list[tuple[int, int, int, str]] = []
+    selected_keys: set[tuple[int, int]] = set()
+    for context_index in range(len(text_list)):
+        context_rows = [row for row in ranked if row[1] == context_index]
+        if not context_rows or len(selected_rows) >= max_lines:
+            continue
+        for row in context_rows[:2]:
+            if len(selected_rows) >= max_lines:
+                break
+            selected_rows.append(row)
+            selected_keys.add((row[1], row[2]))
+    for row in ranked:
+        if len(selected_rows) >= max_lines:
+            break
+        key = (row[1], row[2])
+        if key in selected_keys:
+            continue
+        selected_rows.append(row)
+        selected_keys.add(key)
+    selected = {(row[1], row[2]): row for row in selected_rows}
+
+    def render(row: tuple[int, int, int, str]) -> str:
+        _, context_index, _, line = row
+        metadata = metadata_list[context_index] if context_index < len(metadata_list) else {}
+        source = metadata.get("source") if isinstance(metadata, dict) else None
+        header = metadata.get("headers") if isinstance(metadata, dict) else None
+        section = str(header).split(">")[-1].strip() if header else ""
+        suffix = f"，{source}" if source else ""
+        if section:
+            suffix += f"，{section}"
+        return f"【片段 {context_index + 1}{suffix}】{line}"
+
+    return [
+        render(selected[key])
+        for key in sorted(selected, key=lambda value: (value[0], value[1]))
+    ]
+
+
+def supplement_answer_with_evidence(
+    answer: str,
+    question: str,
+    ledger: Iterable[str],
+    *,
+    max_lines: int = 2,
+) -> str:
+    """Append literal high-signal evidence when a composite answer omits it.
+
+    This is a conservative, model-free safeguard.  It only appends lines that
+    already appeared in the ledger, contain at least two high-signal numeric
+    or scientific markers, and are not fully represented in the generated
+    answer.  The original answer is never rewritten, and the supplement is
+    visibly labeled as a quotation for manual review rather than presented as
+    an inference.
+    """
+
+    answer_text = str(answer or "").strip()
+    if not answer_text or max_lines <= 0:
+        return answer_text
+    question_normalized = normalize_for_match(question)
+    if not any(
+        cue in question_normalized
+        for cue in ("多少", "样本", "数量", "dataset", "pipeline", "管道", "阈值", "threshold")
+    ):
+        return answer_text
+    answer_normalized = normalize_for_match(answer_text)
+    query_tokens = _evidence_query_tokens(question)
+    section_aliases = {
+        "数据集": ("dataset", "data"),
+        "显式推理": ("explicit-reasoning", "reasoning"),
+        "推理": ("reasoning",),
+        "强化学习": ("reinforcement", "rl"),
+        "训练": ("training", "train"),
+        "奖励": ("reward",),
+        "管道": ("pipeline",),
+    }
+    for phrase, aliases in section_aliases.items():
+        if phrase in normalize_for_match(question):
+            query_tokens.update(aliases)
+    rows: list[tuple[int, int, int, str, list[str]]] = []
+    max_section_hits = 0
+    for line_index, raw_line in enumerate(ledger):
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        content = line.split("】", 1)[-1].strip()
+        prefix = line.split("】", 1)[0]
+        section = prefix.rsplit("，", 1)[-1] if "，" in prefix else ""
+        section_hits = sum(1 for token in query_tokens if token in normalize_for_match(section))
+        max_section_hits = max(max_section_hits, section_hits)
+        if content.count("|") >= 2:
+            continue
+        # Skip heading/caption lines and bare hyphenated ordinals such as
+        # ``COX-1/COX-2``.  They are useful entity text in the ledger but are
+        # not reliable omitted quantities or thresholds for an answer
+        # supplement.
+        if content.startswith("#") or re.match(r"^\s*\*{0,2}table\s+\d+\b", content, re.IGNORECASE):
+            continue
+        if re.search(
+            r"\btrain/dev/test\b|dataset statistics|statistical characterization|"
+            r"token-level statistics|held[- ]?out",
+            content,
+            flags=re.IGNORECASE,
+        ):
+            continue
+        numbers = [
+            value
+            for value in EVIDENCE_NUMBER_RE.findall(content)
+            if not re.search(r",\s*[A-Za-z]", value)
+            and (
+                re.search(r"\d+\.\d+", value)
+                or re.search(r"[%<>≤≥]", value)
+                or len(re.sub(r"\D", "", value)) >= 2
+            )
+        ]
+        entities = EVIDENCE_ENTITY_RE.findall(content)
+        high_signal_entities = [
+            entity
+            for entity in entities
+            if (
+                len(re.sub(r"[^A-Za-z0-9]", "", entity)) >= 5
+                and (
+                    re.search(r"[A-Z0-9]", re.sub(r"[^A-Za-z0-9]", "", entity)[1:])
+                    or re.sub(r"[^A-Za-z0-9]", "", entity).isupper()
+                )
+            )
+            or (
+                re.search(r"[-_*]", entity)
+                and re.search(r"[A-Z0-9]", entity[1:])
+            )
+        ]
+        number_hits = len(numbers)
+        markers = [*numbers, *high_signal_entities]
+        # A supplement is a last-resort check for omitted quantities,
+        # thresholds, or named tools/models.  Entity-only prose is admitted
+        # only when it contains at least two high-signal names, which keeps a
+        # generic category list from being appended merely because it shares
+        # a section heading with the question.
+        if len(markers) < 2:
+            continue
+        missing = []
+        for marker in markers:
+            marker_normalized = normalize_for_match(marker)
+            if marker_normalized in answer_normalized:
+                continue
+            numeric_match = re.match(
+                r"[<>≤≥]?\s*\d[\d,]*(?:\.\d+)?",
+                str(marker),
+            )
+            if numeric_match and normalize_for_match(numeric_match.group(0)) in answer_normalized:
+                continue
+            missing.append(marker)
+        if not missing:
+            continue
+        query_hits = sum(1 for token in query_tokens if token in normalize_for_match(content))
+        score = (
+            number_hits * 10
+            + query_hits * 4
+            + section_hits * 6
+            + len(high_signal_entities)
+            - line_index * 0.001
+        )
+        rows.append((score, section_hits, line_index, line, missing))
+
+    if not rows:
+        return answer_text
+    if max_section_hits:
+        rows = [row for row in rows if row[1] == max_section_hits]
+    if not rows:
+        return answer_text
+    rows.sort(key=lambda row: (-row[0], row[2]))
+    selected = [row[3] for row in rows[:max_lines]]
+    supplement = "\n\n【补充原文核对项】\n" + "\n".join(f"- {line}" for line in selected)
+    return answer_text + supplement
 
 
 def display_table_cell(value: Any) -> str:
@@ -738,11 +1006,62 @@ def extract_table_cell(
     return None
 
 
+def extract_table_row_values(
+    question: str,
+    table_content: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Extract all value columns for an explicitly named table row.
+
+    Some questions ask for a row's count and percentage together without
+    repeating the table's English column headers (for example, "数量和占比").
+    In that case a single-column matcher cannot answer deterministically.  We
+    return the row's non-label cells, preserving their parsed header names and
+    literal values; this remains table-agnostic and does not infer units.
+    """
+
+    if not TABLE_ROW_VALUE_QUESTION_RE.search(question or ""):
+        return None
+    parsed = parse_markdown_table(table_content)
+    if parsed is None:
+        return None
+    headers, rows = parsed
+    entity = select_row_entity(question, table_content)
+    if not entity:
+        return None
+    target = normalize_for_match(entity)
+    for row in rows:
+        if not row:
+            continue
+        row_label = normalize_for_match(row[0])
+        if not (target == row_label or target in row_label or row_label in target):
+            continue
+        values: list[dict[str, str]] = []
+        for column_idx, value in enumerate(row[1:], start=1):
+            if column_idx >= len(headers):
+                break
+            values.append(
+                {
+                    "column": display_table_cell(headers[column_idx]),
+                    "value": display_table_cell(value),
+                }
+            )
+        if not values:
+            return None
+        number = table_number_from_metadata(metadata or {})
+        return {
+            "table_number": str(number) if number is not None else "",
+            "row": display_table_cell(row[0]),
+            "values": values,
+        }
+    return None
+
+
 def find_table_cell_in_chunks(
     question: str,
     texts: list[str],
     metas: list[dict[str, Any]],
-) -> tuple[int, dict[str, str]] | None:
+) -> tuple[int, dict[str, Any]] | None:
     """Find a requested table cell without crossing an explicit table boundary."""
 
     # Without an explicit table number, the same row/column may legitimately
@@ -754,6 +1073,9 @@ def find_table_cell_in_chunks(
         cell = extract_table_cell(question, texts[idx], metas[idx])
         if cell is not None:
             return idx, cell
+        row_values = extract_table_row_values(question, texts[idx], metas[idx])
+        if row_values is not None:
+            return idx, row_values
     return None
 
 
@@ -784,6 +1106,12 @@ def filter_table_rows_by_entity(content: str, entity: str) -> str | None:
 
 def is_table_question(question: str) -> bool:
     return bool(TABLE_QUESTION_RE.search(question or ""))
+
+
+def is_comparative_table_question(question: str) -> bool:
+    """Whether a table question needs multiple rows for comparison."""
+
+    return bool(TABLE_COMPARISON_QUESTION_RE.search(question or ""))
 
 
 def table_number_from_question(question: str) -> str | None:
@@ -817,12 +1145,17 @@ def rerank_table_first(
     note = ""
     if table_num is not None:
         if table_idx:
-            for idx in table_idx:
-                entity = select_row_entity(question, working_texts[idx])
-                if entity:
-                    filtered = filter_table_rows_by_entity(working_texts[idx], entity)
-                    if filtered is not None:
-                        working_texts[idx] = filtered
+            # Comparative questions (e.g. "DrugR compared with each
+            # baseline") need the complete table.  Row filtering is reserved
+            # for deterministic single-row lookups so baseline evidence is
+            # not discarded before generation.
+            if not is_comparative_table_question(question):
+                for idx in table_idx:
+                    entity = select_row_entity(question, working_texts[idx])
+                    if entity:
+                        filtered = filter_table_rows_by_entity(working_texts[idx], entity)
+                        if filtered is not None:
+                            working_texts[idx] = filtered
         else:
             # Never compensate for a missing Table N with another table.  The
             # previous fallback made Table 1 look like an answer to a Table 2

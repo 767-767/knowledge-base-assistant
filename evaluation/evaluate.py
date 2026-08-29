@@ -20,6 +20,8 @@ import time
 from datetime import datetime
 from typing import Any
 
+from evaluation.answer_audit import audit_answer
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_TESTSET = os.path.join(SCRIPT_DIR, "test_questions.json")
@@ -66,13 +68,11 @@ def fact_coverage(answer: str, case: dict[str, Any]) -> tuple[float | None, bool
     semantic human review.  Cases without ``required_facts`` return ``None``.
     """
 
-    required = case.get("required_facts")
-    if not required:
+    audit = audit_answer(case, answer)
+    score = audit["answer_fact_coverage"]
+    if score is None:
         return None, None
-    normalised_answer = _normalise_for_evaluation(answer)
-    hits = sum(_normalise_for_evaluation(fact) in normalised_answer for fact in required)
-    score = hits / len(required)
-    return score, hits == len(required)
+    return float(score), audit["answer_fact_status"] == "full"
 
 
 def gold_context_recall(contexts: list[str], case: dict[str, Any]) -> float | None:

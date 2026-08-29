@@ -13,19 +13,22 @@ import hashlib
 import os
 from pathlib import Path
 import random
+import re
 from typing import Any
 
 from sci_rag_core import (
     Chunk,
+    build_evidence_ledger,
     find_table_cell_in_chunks,
     is_table_question,
     matching_table_indices,
     rerank_table_first,
     split_to_chunks,
+    supplement_answer_with_evidence,
     table_number_from_question,
 )
 from sci_rag_reranking import CrossEncoderReranker, reranker_document_text
-from sci_rag_retrieval import BM25Index, RankedItem, reciprocal_rank_fusion
+from sci_rag_retrieval import BM25Index, RankedItem, reciprocal_rank_fusion, tokenize
 
 
 @dataclass(frozen=True)
@@ -300,6 +303,7 @@ def upload_file(file: Any, runtime: Runtime | None = None) -> str:
 def _merge_results(
     dense: dict[str, Any],
     tables: dict[str, Any] | None,
+    additional_results: list[dict[str, Any]] | None = None,
 ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
     texts: list[str] = []
     ids: list[str] = []
@@ -318,7 +322,8 @@ def _merge_results(
             texts.append(result_docs[index] if index < len(result_docs) else "")
             metas.append(result_metas[index] if index < len(result_metas) else {})
 
-    add(dense)
+    for result in [*(additional_results or []), dense]:
+        add(result)
     if tables:
         # Collection.get() returns flat lists, unlike query()'s nested lists.
         flat_ids = tables.get("ids") or []
@@ -475,6 +480,121 @@ def _cross_encoder_reranked_result(
     }
 
 
+_COMPOSITE_FACT_CUE_RE = re.compile(
+    r"多少|哪些|如何|管道|步骤|阶段|以及|并且|同时|与|和|\b(?:what|which|how|and|pipeline|dataset)\b",
+    re.IGNORECASE,
+)
+_SECTION_QUERY_ALIASES = {
+    "数据集": ("dataset", "data"),
+    "显式推理": ("explicit-reasoning", "reasoning"),
+    "推理": ("reasoning",),
+    "强化学习": ("reinforcement", "rl"),
+    "训练": ("training", "train"),
+    "奖励": ("reward",),
+    "管道": ("pipeline",),
+}
+
+
+def _is_composite_fact_question(question: str) -> bool:
+    """Detect questions likely to require evidence from multiple chunks."""
+
+    matches = _COMPOSITE_FACT_CUE_RE.findall(str(question or ""))
+    return len(matches) >= 2
+
+
+def _section_query_terms(question: str) -> set[str]:
+    terms = {token for token in tokenize(question) if len(token) >= 3}
+    normalized = str(question or "").casefold()
+    for phrase, aliases in _SECTION_QUERY_ALIASES.items():
+        if phrase in normalized:
+            terms.update(aliases)
+    return terms
+
+
+def _header_match_score(header: str, query_terms: set[str]) -> int:
+    """Score the deepest heading more heavily than inherited parent headings."""
+
+    parts = [part.strip() for part in str(header).split(">") if part.strip()]
+    if not parts:
+        return 0
+    deepest = set(tokenize(parts[-1]))
+    score = len(deepest & query_terms) * 3
+    if len(parts) > 1:
+        score += len(set(tokenize(parts[-2])) & query_terms)
+    return score
+
+
+def _section_expansion_result(
+    question: str,
+    base_result: dict[str, Any],
+    runtime: Runtime,
+) -> dict[str, Any] | None:
+    """Add same-section chunks for composite questions without cross-paper mixing.
+
+    PDF-to-Markdown chunkers keep the heading path in ``metadata['headers']``.
+    A multi-fact question can retrieve a section's overview while missing the
+    immediately following chunk that contains a threshold or tool name.  This
+    bounded expansion reads the existing collection, selects the strongest
+    matching header within sources already present in the dense/Hybrid result,
+    and returns all chunks in the strongest matching section so they are
+    prioritized before the final context cap.  It never invents text or facts.
+    """
+
+    if not _is_composite_fact_question(question):
+        return None
+    base_metas = _flat_result_values(base_result, "metadatas")
+    base_sources = {
+        str(meta.get("source"))
+        for meta in base_metas
+        if isinstance(meta, dict) and meta.get("source")
+    }
+    if not base_sources:
+        return None
+    all_result = runtime.collection.get(include=["documents", "metadatas"])
+    all_texts = _flat_result_values(all_result, "documents")
+    all_metas = _flat_result_values(all_result, "metadatas")
+    query_terms = _section_query_terms(question)
+    if not query_terms:
+        return None
+
+    header_rows: list[tuple[int, int, str, str]] = []
+    for index, raw_meta in enumerate(all_metas):
+        metadata = raw_meta if isinstance(raw_meta, dict) else {}
+        source = str(metadata.get("source", ""))
+        header = str(metadata.get("headers", ""))
+        if source not in base_sources or not header:
+            continue
+        score = _header_match_score(header, query_terms)
+        if score:
+            header_rows.append((score, index, source, header))
+    if not header_rows:
+        return None
+
+    best_score = max(row[0] for row in header_rows)
+    selected_headers = {(row[2], row[3]) for row in header_rows if row[0] == best_score}
+    selected_ids: list[str] = []
+    selected_docs: list[str] = []
+    selected_metas: list[dict[str, Any]] = []
+    all_ids = _flat_result_values(all_result, "ids")
+    for index, raw_meta in enumerate(all_metas):
+        metadata = raw_meta if isinstance(raw_meta, dict) else {}
+        key = (str(metadata.get("source", "")), str(metadata.get("headers", "")))
+        if key not in selected_headers or index >= len(all_texts) or index >= len(all_ids):
+            continue
+        doc_id = str(all_ids[index])
+        selected_ids.append(doc_id)
+        selected_docs.append(str(all_texts[index]))
+        selected_metas.append(dict(metadata))
+
+    if not selected_ids:
+        return None
+    return {
+        "ids": [selected_ids],
+        "documents": [selected_docs],
+        "metadatas": [selected_metas],
+    }
+
+
 def query_knowledge(
     message: str,
     history: Any = None,
@@ -512,13 +632,18 @@ def query_knowledge(
     if runtime.config.retrieval_mode == "hybrid":
         dense = _hybrid_fused_result(message, dense, runtime, candidate_k)
         dense = _cross_encoder_reranked_result(message, dense, runtime)
+    section_result = _section_expansion_result(message, dense, runtime)
     table_results = None
     if is_table_question(message):
         table_results = runtime.collection.get(
             where={"type": "table"},
             include=["documents", "metadatas"],
         )
-    retrieved_texts, retrieved_ids, retrieved_metas = _merge_results(dense, table_results)
+    retrieved_texts, retrieved_ids, retrieved_metas = _merge_results(
+        dense,
+        table_results,
+        [section_result] if section_result is not None else None,
+    )
     if not retrieved_texts:
         answer = "未找到相关内容，请换个问法。"
         return {"answer": answer, "contexts": [], "context_ids": [], "context_metadatas": []} if return_contexts else answer
@@ -544,17 +669,28 @@ def query_knowledge(
     if cell_match is not None:
         cell_index, cell = cell_match
         table_number = cell["table_number"] or explicit_table_number or "?"
-        cell_context = (
-            f"Table {table_number} 结构化单元格：行={cell['row']}；"
-            f"列={cell['column']}；值={cell['value']}。\n\n{filtered_texts[cell_index]}"
-        )
+        if "values" in cell:
+            value_text = "；".join(
+                f"{item['column']}={item['value']}"
+                for item in cell["values"]
+            )
+            cell_context = (
+                f"Table {table_number} 结构化行：行={cell['row']}；{value_text}\n\n"
+                f"{filtered_texts[cell_index]}"
+            )
+            answer = f"根据 Table {table_number} 中“{cell['row']}”行，相关列值为：{value_text}。"
+        else:
+            cell_context = (
+                f"Table {table_number} 结构化单元格：行={cell['row']}；"
+                f"列={cell['column']}；值={cell['value']}。\n\n{filtered_texts[cell_index]}"
+            )
+            answer = (
+                f"根据 Table {table_number} 中“{cell['row']}”行的“{cell['column']}”列，"
+                f"数值为 **{cell['value']}**。"
+            )
         ordered_texts = [cell_context]
         ordered_ids = [retrieved_ids[cell_index]]
         ordered_metas = [retrieved_metas[cell_index]]
-        answer = (
-            f"根据 Table {table_number} 中“{cell['row']}”行的“{cell['column']}”列，"
-            f"数值为 **{cell['value']}**。"
-        )
         if return_contexts:
             return {
                 "answer": answer,
@@ -578,9 +714,23 @@ def query_knowledge(
         label = f"【片段 {index}】[表格]" if metadata.get("type") == "table" else f"【片段 {index}】"
         context_parts.append(f"{label}\n{text}")
     context = "\n\n---\n\n".join(context_parts)
+    evidence_ledger = build_evidence_ledger(
+        message,
+        ordered_texts,
+        ordered_metas,
+    )
+    ledger_text = ""
+    if evidence_ledger:
+        ledger_lines = [f"- {line}" for line in evidence_ledger]
+        ledger_text = (
+            "【事实核对清单】以下内容仅逐字摘自后面的参考片段，不是新增事实；"
+            "回答复合问题时请逐项核对其中与问题相关的数字、阈值、工具名和步骤。\n"
+            + "\n".join(ledger_lines)
+            + "\n\n"
+        )
     if note:
         context = f"【检索提示】{note}\n\n{context}"
-    user_prompt = f"【参考资料】\n{context}\n\n【问题】\n{message}"
+    user_prompt = f"{ledger_text}【参考资料】\n{context}\n\n【问题】\n{message}"
 
     try:
         response = runtime.client.chat.completions.create(
@@ -595,6 +745,9 @@ def query_knowledge(
         answer = response.choices[0].message.content
     except Exception as exc:
         answer = f"❌ 调用出错：{exc}"
+
+    if _is_composite_fact_question(message) and not is_table_question(message):
+        answer = supplement_answer_with_evidence(answer, message, evidence_ledger)
 
     if return_contexts:
         return {
@@ -639,6 +792,8 @@ SCIENTIFIC_SYSTEM_PROMPT = """你是一个面向科学论文的严谨学术问�
 【其他要求】
 - 表格以 Markdown 形式给出，数值问题请直接依据表格行列作答。
 - 若问题涉及图片内容，请说明“该图内容未纳入文本检索范围”。
+- 若问题包含“多少、哪些、如何、管道、步骤”等多个事实维度，先在内部逐项核对问题要求，综合所有互补片段；不得因第一段已有概述就省略后续片段中的专有名词、工具名、阈值、数据规模、筛选条件或生成步骤。
+- 若用户问题包含两个或以上事实维度，优先使用分点回答，并逐项覆盖参考资料中与问题直接相关的数字、阈值、工具/模型名称、实体和操作步骤；“流程概述”不能替代这些具体事实。
 - 若参考片段无法回答问题，请如实说明“资料未提供相关信息”，严禁编造。"""
 
 

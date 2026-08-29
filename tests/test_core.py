@@ -8,14 +8,18 @@ from sci_rag_reranking import RerankResult
 from sci_rag_retrieval import RankedItem
 from sci_rag_core import (
     Chunk,
+    build_evidence_ledger,
     extract_table_cell,
+    extract_table_row_values,
     extract_tables,
     filter_table_rows_by_entity,
+    is_comparative_table_question,
     is_table_question,
     normalize_for_match,
     rerank_table_first,
     select_row_entity,
     split_to_chunks,
+    supplement_answer_with_evidence,
 )
 
 
@@ -31,9 +35,137 @@ TABLE_2_FULL = """|Baseline|Overall Optimization Score|Target property F1 score|
 |---|---|---|
 |**DrugR**<sup>_∗_</sup>|**0.2060**|**0.3404**|
 |_SFT_<sup>_∗_</sup>|0.1949|0.2997|"""
+TABLE_6 = """|**Metric**|**Mean / Value**|**Range / Definition|
+|---|---|---|
+|Heavy atoms|24.12|2–43|
+|Unique SMILES|3,863 / 4,826|80.05%|
+|Unique scaffolds|1,117 / 4,826|23.15%|"""
+TABLE_5 = """|**Drug category**|**Target set**|**Representative drugs (examples)**|
+|---|---|---|
+|Anti-inflammatory (NSAIDs)|COX1,COX2|aspirin,ibuprofen|
+|Antihypertensive<br>(ACEi/ARB/_β_-blockers)|ACE, AGTR1, ADRB1,<br>ADRB2|captopril,losartan|"""
 
 
 class CoreTests(unittest.TestCase):
+    def test_evidence_ledger_keeps_complementary_numbers_and_entities(self):
+        question = "显式推理数据集包含多少个样本？标注管道是什么？"
+        texts = [
+            "DeepSeek-R1 proposes structurally comparable candidates.\n"
+            "ADMET properties are predicted with ADMETLab.\n"
+            "Candidates are retained with fingerprint similarity greater than 0.6.",
+            "The reverse-engineering pipeline generates rationales from two SMILES strings.",
+            "The dataset contains 4,855 samples.",
+        ]
+        ledger = build_evidence_ledger(
+            question,
+            texts,
+            [{"source": "paper.pdf"}] * len(texts),
+        )
+        joined = "\n".join(ledger)
+        for fact in ("DeepSeek-R1", "ADMETLab", "0.6", "SMILES", "4,855"):
+            self.assertIn(fact, joined)
+        self.assertTrue(all(line.startswith("【片段 ") for line in ledger))
+
+    def test_answer_supplement_quotes_missing_high_signal_evidence(self):
+        question = "显式推理数据集包含多少个样本？标注管道如何构建？"
+        ledger = [
+            "【片段 1，paper.pdf，Explicit Reasoning Dataset】"
+            "DeepSeek-R1 proposes candidates; ADMETLab evaluates them with similarity greater than 0.6.",
+            "【片段 2，paper.pdf，Dataset Statistics】The dataset contains 4,855 samples.",
+            "【片段 3，paper.pdf，Explicit Reasoning Dataset】"
+            "Starting molecules cover COX-1/COX-2, ACE and other therapeutic targets.",
+            "【片段 4，paper.pdf，Explicit Reasoning Dataset】**Table 5** Category-specific target sets use ACE and AGTR1.",
+        ]
+        answer = supplement_answer_with_evidence(
+            "数据集包含 4,855 个样本。",
+            question,
+            ledger,
+        )
+        self.assertIn("【补充原文核对项】", answer)
+        self.assertIn("ADMETLab", answer)
+        self.assertIn("0.6", answer)
+        self.assertNotIn("Dataset Statistics", answer)
+        self.assertNotIn("COX-1/COX-2", answer)
+        self.assertNotIn("Table 5", answer)
+        self.assertEqual(
+            supplement_answer_with_evidence(
+                "Pareto 重加权可以缓解失衡。",
+                "强化学习阶段如何解决目标主导与目标饥饿？",
+                ledger,
+            ),
+            "Pareto 重加权可以缓解失衡。",
+        )
+
+    def test_composite_question_prioritizes_matching_section_siblings(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        section = "H1: Paper > H3: Explicit Reasoning Dataset"
+        other = "H1: Paper > H3: Introduction"
+
+        class Collection:
+            def count(self):
+                return 3
+
+            def query(self, **_kwargs):
+                return {
+                    "ids": [["overview", "other"]],
+                    "documents": [["Dataset overview.", "Unrelated introduction."]],
+                    "metadatas": [[
+                        {"source": "paper.pdf", "headers": section, "type": "text"},
+                        {"source": "paper.pdf", "headers": other, "type": "text"},
+                    ]],
+                }
+
+            def get(self, **_kwargs):
+                return {
+                    "ids": ["overview", "sibling", "other"],
+                    "documents": [
+                        "Dataset overview.",
+                        "ADMETLab is used and similarity must be greater than 0.6.",
+                        "Unrelated introduction.",
+                    ],
+                    "metadatas": [
+                        {"source": "paper.pdf", "headers": section, "type": "text"},
+                        {"source": "paper.pdf", "headers": section, "type": "text"},
+                        {"source": "paper.pdf", "headers": other, "type": "text"},
+                    ],
+                }
+
+        class Client:
+            def __init__(self):
+                self.prompt = ""
+                self.chat = self
+                self.completions = self
+
+            def create(self, **kwargs):
+                self.prompt = kwargs["messages"][1]["content"]
+                return type(
+                    "Response",
+                    (),
+                    {"choices": [type("Choice", (), {"message": type("Message", (), {"content": "ok"})()})()]},
+                )()
+
+        client = Client()
+        runtime = app.Runtime(
+            app.RuntimeConfig(retrieval_k=2, context_k=2),
+            client,
+            Embedding(),
+            Collection(),
+        )
+        result = app.query_knowledge(
+            "显式推理数据集包含多少个样本？标注管道如何构建？",
+            runtime=runtime,
+        )
+        self.assertIn("ADMETLab", result["contexts"][1])
+        self.assertNotIn("Unrelated introduction", result["contexts"])
+        self.assertIn("ADMETLab", client.prompt)
+
     def test_table_intent_requires_an_explicit_table_reference(self):
         self.assertFalse(is_table_question("显式推理数据集包含多少个样本？"))
         self.assertFalse(is_table_question("训练样本量和成功比率是多少？"))
@@ -80,6 +212,46 @@ class CoreTests(unittest.TestCase):
         )
         self.assertIsNotNone(cell)
         self.assertEqual(cell["value"], "0.3404")
+
+    def test_structured_row_lookup_returns_multiple_value_columns(self):
+        row = extract_table_row_values(
+            "Table 6 中 Unique SMILES 的数量和占比是多少？",
+            TABLE_6,
+            {"type": "table", "table_caption": "**Table 6** Molecular complexity"},
+        )
+        self.assertIsNotNone(row)
+        self.assertEqual(row["table_number"], "6")
+        self.assertEqual(row["row"], "Unique SMILES")
+        self.assertEqual(
+            row["values"],
+            [
+                {"column": "Mean / Value", "value": "3,863 / 4,826"},
+                {"column": "Range / Definition", "value": "80.05%"},
+            ],
+        )
+
+    def test_structured_target_set_alias_resolves_table_row(self):
+        cell = extract_table_cell(
+            "Table 5 中抗高血压药物（Antihypertensive）类别用于结合亲和力评估的靶点集合有哪些？",
+            TABLE_5,
+            {"type": "table", "table_caption": "**Table 5** Targets"},
+        )
+        self.assertIsNotNone(cell)
+        self.assertEqual(cell["column"], "Target set")
+        self.assertIn("ACE", cell["value"])
+        self.assertIn("ADRB2", cell["value"])
+
+    def test_comparative_table_question_preserves_all_rows(self):
+        question = "结合 Table 1 的数据，DrugR 相比各基线模型在哪些指标上取得了最优结果？"
+        self.assertTrue(is_comparative_table_question(question))
+        order, _, filtered = rerank_table_first(
+            question,
+            [TABLE_1],
+            [{"type": "table", "table_caption": "**Table 1** Results"}],
+        )
+        self.assertEqual(order, [0])
+        self.assertIn("GPT5", filtered[0])
+        self.assertIn("DrugR", filtered[0])
 
     def test_caption_detection_does_not_match_stable(self):
         markdown = "Figure 5 stable training dynamics.\n\n|x|y|\n|---|---|\n|0|1|"
@@ -247,12 +419,15 @@ class RuntimeContractTests(unittest.TestCase):
                     {"choices": [type("Choice", (), {"message": type("Message", (), {"content": "ok"})()})()]},
                 )()
 
-        runtime = app.Runtime(app.RuntimeConfig(), Client(), Embedding(), Collection())
+        client = Client()
+        runtime = app.Runtime(app.RuntimeConfig(), client, Embedding(), Collection())
         result = app.query_knowledge(
             "DrugR 的显式推理数据集包含多少个样本？推理标注是通过什么管道构建的？",
             runtime=runtime,
         )
         self.assertIn("4,855 samples", result["contexts"][0])
+        self.assertIn("【事实核对清单】", client.prompt)
+        self.assertIn("4,855 samples", client.prompt)
         self.assertIsNone(runtime._lexical_snapshot)
 
     def test_hybrid_mode_adds_lexical_candidate_and_reuses_snapshot(self):

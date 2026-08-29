@@ -2,6 +2,21 @@
 
 > 记录本项目从"通用学习工作台"改造为 Sci-RAG 的全过程。按时间倒序排列。
 
+> 2026-08-29 Phase 3 答案完整性基础：新增无模型的 `evaluation/answer_audit.py`，对已保存
+> 的 JSON/JSONL 回答按 required facts 输出 full/partial/zero 和遗漏事实；`evaluate.py` 的
+> 答案事实检查改为复用同一套规范化/别名逻辑。科学问答 Prompt 增加通用多片段互补事实
+> 整合约束，未写入 DrugR 特例。新增 `PHASE3_ANSWER_COMPLETENESS_HANDOFF.md` 和离线测试；
+> 用旧 `evaluation/evaluation_report.json` 离线回归得到答案 fact macro/micro `0.8409/0.8387`，
+> full/partial/zero `0.8182/0.0909/0.0909`，定位第 3、9 题遗漏事实；随后完成一次 4 题
+> Dense 与 Hybrid+Rerank 的 DeepSeek A/B，并将结果写入 `PHASE3_ANSWER_COMPLETENESS_HANDOFF.md`。
+> 第二轮新增通用 `build_evidence_ledger()`，并让复合问题在最终截断前扩展同来源、同小节的
+> 兄弟块；清单按上下文保留高信号行，补充规则排除表格/表题/统计摘要噪声。随后补充多列
+> 行查询、`target set` 别名和比较题全表保护，离线测试达到 `58/58`。使用现有 104 块数据库
+> 对完整 11 题做 Dense 与 Hybrid+Rerank 端到端回归，两种模式答案 fact macro/micro 与 full
+> 覆盖均为 `1.0000`；Q5/Q6/Q10 的语义路径也通过网页函数验证。五篇论文的离线检索回归显示
+> Hybrid+CE+RRF @10 fact macro/micro=`0.785/0.776`、完整覆盖=`0.698`，仍有 16/53 题不完整。
+> 尚未重跑 RAGAS 或完成五篇论文生成答案统计，不能据此证明整体泛化。
+
 > 2026-08-28 Phase 2 reranker 网页 A/B 回传：用户报告 Hybrid 与 Hybrid + reranker 对
 > DrugR 显式推理数据集和多目标平衡问题给出相同答案。多目标题完整覆盖 Pareto、
 > Reasoning/SMILES 分组和 shortfall boost；数据集题正确返回 `4,855` 及管道方向，但遗漏

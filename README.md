@@ -178,3 +178,40 @@ micro reached `0.785/0.776`. CPU reranking averaged `2.73 s` per 50 candidates
 with a `3.31 s` p95 and about `2.20 GB` process peak RSS on the test machine.
 These are retrieval-context proxies, not generated-answer accuracy. See
 `PHASE2_RERANKER_HANDOFF.md` for the gate, regressions, and limitations.
+
+## Offline answer completeness audit (Phase 3)
+
+The retrieval benchmark checks whether required facts reached the context. The
+separate answer audit checks whether a saved answer explicitly contains those
+same manually declared facts; it does not call a model and does not decide
+semantic truth, citation correctness, or causal logic.
+
+Save one JSON object per line outside the repository:
+
+```json
+{"case_id":"drugr-09","answer":"...","mode":"hybrid","latency_seconds":2.1}
+```
+
+Audit the 11-paper seed set with:
+
+```bash
+./venv/bin/python evaluation/answer_audit.py \
+  --testset evaluation/test_questions.json \
+  --answers /tmp/sci_rag_answers.jsonl \
+  --require-all \
+  --json-out /tmp/sci_rag_answer_audit.json
+```
+
+Use `evaluation/benchmark/cases.jsonl` as `--testset` for the 53-case
+multi-paper benchmark. The output reports answer fact macro/micro coverage,
+full/partial/zero rates, and missing facts per case. This is an answer
+completeness smoke check, not a replacement for human review or RAGAS.
+
+Current Phase 3 validation has 59 offline tests passing. On the existing
+104-chunk DrugR database, all 11 seed questions reached full required-fact
+coverage in one Dense run and one Hybrid+Rerank run; this remains a
+single-paper generation check, not a multi-paper or RAGAS generalization
+result. The multi-paper retrieval-only benchmark reports Hybrid+CE+RRF @10
+full required-fact context coverage of 0.698 across 53 cases, with 16 cases
+incomplete. See `PHASE3_ANSWER_COMPLETENESS_HANDOFF.md` for saved temporary
+JSONL paths and scope limitations.
