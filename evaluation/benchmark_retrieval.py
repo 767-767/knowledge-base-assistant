@@ -25,7 +25,12 @@ from typing import Any, Iterable
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import load_and_split_document  # noqa: E402
+from app import (  # noqa: E402
+    _header_match_score,
+    _is_composite_fact_question,
+    _section_query_terms,
+    load_and_split_document,
+)
 from evaluation.benchmark_loader import DEFAULT_MANIFEST, load_benchmark  # noqa: E402
 from evaluation.context_coverage import (  # noqa: E402
     aggregate_fact_coverage,
@@ -37,6 +42,7 @@ from sci_rag_retrieval import BM25Index, RankedItem, reciprocal_rank_fusion  # n
 
 
 ASCII_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9*._+\-]*")
+MAX_SECTION_EXPANSION_CHUNKS = 6
 
 
 def evidence_tokens(value: Any) -> list[str]:
@@ -128,6 +134,104 @@ class HybridRetriever:
             rrf_k=self.rrf_k,
             limit=k,
         )
+
+
+def _section_expansion_indices(
+    question: str,
+    ranked: list[RankedItem],
+    chunks: list[Chunk],
+    anchor_ranked: list[RankedItem] | None = None,
+) -> list[int]:
+    """Return application-equivalent same-section additions for a query.
+
+    The application expands only sections already represented by the retrieved
+    context, only for composite questions, and only when the corpus is a single
+    source. This benchmark helper mirrors that bounded rule over the in-memory
+    parsed corpus so the effect can be measured without touching ChromaDB. It
+    returns additions first, followed by the original ranking with duplicates
+    removed.
+    """
+
+    if not _is_composite_fact_question(question):
+        return [int(item.key) for item in ranked]
+    anchor_items = anchor_ranked if anchor_ranked is not None else ranked
+    anchor_sources = {
+        str(chunks[int(item.key)].metadata.get("source", ""))
+        for item in anchor_items
+        if 0 <= int(item.key) < len(chunks)
+        and chunks[int(item.key)].metadata.get("source")
+    }
+    if len(anchor_sources) > 1:
+        return [int(item.key) for item in ranked]
+    base_source = ""
+    for item in anchor_items:
+        index = int(item.key)
+        if 0 <= index < len(chunks):
+            base_source = str(chunks[index].metadata.get("source", ""))
+            if base_source:
+                break
+    if not base_source:
+        return [int(item.key) for item in ranked]
+    corpus_sources = {
+        str(chunk.metadata.get("source", ""))
+        for chunk in chunks
+        if chunk.metadata.get("source")
+    }
+    if len(corpus_sources) > 1:
+        return [int(item.key) for item in ranked]
+    query_terms = _section_query_terms(question)
+    if not query_terms:
+        return [int(item.key) for item in ranked]
+
+    header_rows: list[tuple[int, int, str, str]] = []
+    for index, chunk in enumerate(chunks):
+        source = str(chunk.metadata.get("source", ""))
+        header = str(chunk.metadata.get("headers", ""))
+        if source != base_source or not header:
+            continue
+        score = _header_match_score(header, query_terms)
+        if score:
+            header_rows.append((score, index, source, header))
+    if not header_rows:
+        return [int(item.key) for item in ranked]
+
+    best_score = max(row[0] for row in header_rows)
+    selected_headers = {(row[2], row[3]) for row in header_rows if row[0] == best_score}
+    original = [int(item.key) for item in ranked]
+    anchors = [
+        index
+        for item in anchor_items
+        for index in [int(item.key)]
+        if 0 <= index < len(chunks)
+        and (
+            str(chunks[index].metadata.get("source", "")),
+            str(chunks[index].metadata.get("headers", "")),
+        ) in selected_headers
+    ]
+    if not anchors:
+        return original
+    expanded = [
+        index
+        for index, chunk in enumerate(chunks)
+        if (
+            str(chunk.metadata.get("source", "")),
+            str(chunk.metadata.get("headers", "")),
+        ) in selected_headers
+    ]
+    expanded.sort(
+        key=lambda index: (
+            min((abs(index - anchor) for anchor in anchors), default=index),
+            index,
+        )
+    )
+    ordered: list[int] = []
+    seen: set[int] = set()
+    for index in [*expanded[:MAX_SECTION_EXPANSION_CHUNKS], *original]:
+        if index in seen:
+            continue
+        seen.add(index)
+        ordered.append(index)
+    return ordered
 
 
 def _reference_context_match(reference: str, chunk_text: str, threshold: float = 0.6) -> bool:
@@ -333,9 +437,13 @@ def evaluate_document(
     reranker_candidate_k: int = 50,
     reranker_fusion: str = "none",
     reranker_fusion_rrf_k: int = 60,
+    reranker_fusion_ce_weight: float = 1.0,
+    section_expansion: bool = False,
 ) -> dict[str, Any]:
-    if reranker_fusion not in {"none", "rrf"}:
+    if reranker_fusion not in {"none", "rrf", "weighted_rrf"}:
         raise ValueError(f"不支持的 reranker fusion：{reranker_fusion}")
+    if not reranker_fusion_ce_weight > 0:
+        raise ValueError("reranker fusion 的 CE 权重必须为正数")
     index = HybridRetriever(
         chunks,
         mode=retriever,
@@ -361,19 +469,39 @@ def evaluate_document(
         if reranker:
             rerank_result = reranker.rerank(question, candidates, rerank_documents)
             reranker_scores = {item.key: item.score for item in rerank_result.ranked}
+            fusion_limit = retrieval_k if section_expansion else max_k
             if reranker_fusion == "rrf":
                 ranked = reciprocal_rank_fusion(
                     [rerank_result.ranked, candidates],
                     rrf_k=reranker_fusion_rrf_k,
-                    limit=max_k,
+                    limit=fusion_limit,
+                )
+            elif reranker_fusion == "weighted_rrf":
+                ranked = reciprocal_rank_fusion(
+                    [rerank_result.ranked, candidates],
+                    rrf_k=reranker_fusion_rrf_k,
+                    limit=fusion_limit,
+                    weights=[reranker_fusion_ce_weight, 1.0],
                 )
             else:
-                ranked = rerank_result.ranked[:max_k]
+                ranked = rerank_result.ranked[:fusion_limit]
             rerank_seconds = rerank_result.elapsed_seconds
             scored_pairs = rerank_result.scored_pairs
             cache_hits = rerank_result.cache_hits
         else:
             ranked = candidates[:max_k]
+        if section_expansion:
+            ranked = [
+                RankedItem(index, 0.0)
+                for index in _section_expansion_indices(
+                    question,
+                    ranked,
+                    chunks,
+                    anchor_ranked=ranked[:max_k],
+                )[:max_k]
+            ]
+        else:
+            ranked = ranked[:max_k]
         total_seconds = perf_counter() - total_started
         metrics: dict[str, dict[str, Any]] = {}
         for top_k in top_k_values:
@@ -397,9 +525,15 @@ def evaluate_document(
                     {
                         "rank": rank,
                         "score": round(result.score, 6),
-                        "retrieval_score": round(initial_scores[result.key], 6),
+                        "retrieval_score": (
+                            round(initial_scores[result.key], 6)
+                            if result.key in initial_scores
+                            else None
+                        ),
                         "rerank_score": (
-                            round(reranker_scores[result.key], 6) if reranker else None
+                            round(reranker_scores[result.key], 6)
+                            if reranker and result.key in reranker_scores
+                            else None
                         ),
                         "chunk_index": int(result.key),
                         "page": chunks[int(result.key)].metadata.get("page"),
@@ -457,6 +591,8 @@ def run_diagnostic(
     reranker_device: str = "cpu",
     reranker_fusion: str = "none",
     reranker_fusion_rrf_k: int = 60,
+    reranker_fusion_ce_weight: float = 1.0,
+    section_expansion: bool = False,
 ) -> dict[str, Any]:
     directories = [Path(directory).resolve() for directory in papers_dirs]
     if not directories:
@@ -473,8 +609,10 @@ def run_diagnostic(
         raise ValueError("cross-encoder 实验必须基于 --retriever hybrid")
     if reranker_candidate_k < max(normalized_k):
         raise ValueError("reranker candidate-k 不能小于最大 top-k")
-    if reranker_fusion not in {"none", "rrf"}:
+    if reranker_fusion not in {"none", "rrf", "weighted_rrf"}:
         raise ValueError(f"不支持的 reranker fusion：{reranker_fusion}")
+    if not reranker_fusion_ce_weight > 0:
+        raise ValueError("reranker fusion 的 CE 权重必须为正数")
     dense_model = None
     if retriever in {"dense", "hybrid"}:
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -521,6 +659,8 @@ def run_diagnostic(
         reranker_candidate_k=reranker_candidate_k,
         reranker_fusion=reranker_fusion,
         reranker_fusion_rrf_k=reranker_fusion_rrf_k,
+        reranker_fusion_ce_weight=reranker_fusion_ce_weight,
+        section_expansion=section_expansion,
     )
     documents: list[dict[str, Any]] = []
     for document, chunks in parsed_documents:
@@ -538,6 +678,8 @@ def run_diagnostic(
                 reranker_candidate_k=reranker_candidate_k,
                 reranker_fusion=reranker_fusion,
                 reranker_fusion_rrf_k=reranker_fusion_rrf_k,
+                reranker_fusion_ce_weight=reranker_fusion_ce_weight,
+                section_expansion=section_expansion,
             )
         )
     method = {"bm25": "bm25-lite", "dense": "dense-local", "hybrid": "hybrid-rrf"}[retriever]
@@ -559,6 +701,10 @@ def run_diagnostic(
                 "device": reranker.device,
                 "fusion": reranker_fusion,
                 "fusion_rrf_k": reranker_fusion_rrf_k if reranker_fusion == "rrf" else None,
+                "fusion_ce_weight": (
+                    reranker_fusion_ce_weight if reranker_fusion == "weighted_rrf" else None
+                ),
+                "section_expansion": section_expansion,
                 "load_seconds": reranker_load_seconds,
             }
             if reranker
@@ -586,7 +732,8 @@ def run_diagnostic(
             "table_number_hit_rate is reported only for questions that explicitly name Table N.",
             "required_fact_coverage is deterministic lexical coverage over atomic required_facts; cross-language equivalents are accepted only through case-level required_fact_aliases that are validated against gold contexts.",
             "fact coverage measures whether retrieved target-document context contains annotated facts, not whether a generated answer uses them correctly.",
-            "cross-encoder reranking is opt-in, local-files-only, and applied only to the configured Hybrid candidate pool; report latency is measured on the global multi-paper run before easier per-document diagnostics.",
+            "cross-encoder reranking is opt-in, local-files-only, and applied only to the configured Hybrid candidate pool; weighted_rrf scales the CE list against the original candidate list while preserving the default equal-weight rrf path; report latency is measured on the global multi-paper run before easier per-document diagnostics.",
+            "section_expansion is an opt-in benchmark control that mirrors the application's bounded same-section expansion for composite questions; it is disabled unless --section-expansion is passed.",
             "No ChromaDB, Gradio, RAGAS, or external API is used; dense-local and hybrid-rrf do use the locally cached embedding model described above.",
         ],
     }
@@ -697,15 +844,26 @@ def main() -> int:
     parser.add_argument("--reranker-device", default="cpu", help="重排设备，默认 cpu")
     parser.add_argument(
         "--reranker-fusion",
-        choices=("none", "rrf"),
+        choices=("none", "rrf", "weighted_rrf"),
         default="none",
-        help="是否将 cross-encoder 与原候选排名再次 RRF，默认 none",
+        help="cross-encoder 与原候选排名的融合：none、等权 rrf 或加权 weighted_rrf；默认 none",
     )
     parser.add_argument(
         "--reranker-fusion-rrf-k",
         type=int,
         default=60,
         help="reranker fusion 的 RRF 常数，默认 60",
+    )
+    parser.add_argument(
+        "--reranker-fusion-ce-weight",
+        type=float,
+        default=1.0,
+        help="weighted_rrf 中 cross-encoder 列表的权重，原候选列表固定为 1；默认 1",
+    )
+    parser.add_argument(
+        "--section-expansion",
+        action="store_true",
+        help="对复合问题加入应用同小节扩展的离线对照；默认关闭",
     )
     parser.add_argument(
         "--show-failures",
@@ -732,6 +890,8 @@ def main() -> int:
             reranker_device=args.reranker_device,
             reranker_fusion=args.reranker_fusion,
             reranker_fusion_rrf_k=args.reranker_fusion_rrf_k,
+            reranker_fusion_ce_weight=args.reranker_fusion_ce_weight,
+            section_expansion=args.section_expansion,
         )
     except (ValueError, FileNotFoundError, OSError, RuntimeError) as exc:
         print(f"❌ 基线诊断失败：{exc}", file=sys.stderr)

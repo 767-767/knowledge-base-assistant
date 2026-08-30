@@ -118,22 +118,37 @@ def reciprocal_rank_fusion(
     rankings: Iterable[Iterable[Hashable | RankedItem]],
     rrf_k: int = 60,
     limit: int | None = None,
+    weights: Iterable[float] | None = None,
 ) -> list[RankedItem]:
-    """Fuse ranked keys while deduplicating each list and preserving stable ties."""
+    """Fuse ranked keys with optional per-list weights.
+
+    ``weights`` is opt-in so existing callers retain ordinary equal-weight
+    RRF. A weight scales a list's rank contribution without changing the
+    within-list order.
+    """
 
     if rrf_k <= 0:
         raise ValueError("rrf_k 必须为正整数")
+    ranking_lists = list(rankings)
+    if weights is None:
+        ranking_weights = [1.0] * len(ranking_lists)
+    else:
+        ranking_weights = [float(value) for value in weights]
+        if len(ranking_weights) != len(ranking_lists):
+            raise ValueError("weights 数量必须与 rankings 数量一致")
+        if any(not math.isfinite(value) or value <= 0.0 for value in ranking_weights):
+            raise ValueError("weights 必须为有限正数")
     scores: dict[Hashable, float] = {}
     first_seen: dict[Hashable, int] = {}
     seen_order = 0
-    for ranking in rankings:
+    for ranking, weight in zip(ranking_lists, ranking_weights):
         list_seen: set[Hashable] = set()
         for rank, item in enumerate(ranking, start=1):
             key = item.key if isinstance(item, RankedItem) else item
             if key in list_seen:
                 continue
             list_seen.add(key)
-            scores[key] = scores.get(key, 0.0) + 1.0 / (rrf_k + rank)
+            scores[key] = scores.get(key, 0.0) + weight / (rrf_k + rank)
             if key not in first_seen:
                 first_seen[key] = seen_order
                 seen_order += 1

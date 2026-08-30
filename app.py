@@ -493,6 +493,7 @@ _SECTION_QUERY_ALIASES = {
     "奖励": ("reward",),
     "管道": ("pipeline",),
 }
+MAX_SECTION_EXPANSION_CHUNKS = 6
 
 
 def _is_composite_fact_question(question: str) -> bool:
@@ -533,26 +534,44 @@ def _section_expansion_result(
 
     PDF-to-Markdown chunkers keep the heading path in ``metadata['headers']``.
     A multi-fact question can retrieve a section's overview while missing the
-    immediately following chunk that contains a threshold or tool name.  This
-    bounded expansion reads the existing collection, selects the strongest
-    matching header within sources already present in the dense/Hybrid result,
-    and returns all chunks in the strongest matching section so they are
-    prioritized before the final context cap.  It never invents text or facts.
+    immediately following chunk that contains a threshold or tool name. This
+    bounded expansion reads the existing collection, stays within the source
+    of the highest-ranked candidate, selects the strongest matching header, and
+    adds at most a small neighborhood of chunks before the final context cap.
+    It never invents text or facts or mixes papers merely because their headings
+    use the same generic terms.
     """
 
     if not _is_composite_fact_question(question):
         return None
+    base_ids = [str(value) for value in _flat_result_values(base_result, "ids")]
     base_metas = _flat_result_values(base_result, "metadatas")
-    base_sources = {
-        str(meta.get("source"))
-        for meta in base_metas
+    anchor_ids = base_ids[: runtime.config.context_k]
+    anchor_metas = base_metas[: runtime.config.context_k]
+    anchor_sources = {
+        str(meta.get("source", ""))
+        for meta in anchor_metas
         if isinstance(meta, dict) and meta.get("source")
     }
-    if not base_sources:
+    if len(anchor_sources) > 1:
+        return None
+    base_source = ""
+    for meta in anchor_metas:
+        if isinstance(meta, dict) and meta.get("source"):
+            base_source = str(meta["source"])
+            break
+    if not base_source:
         return None
     all_result = runtime.collection.get(include=["documents", "metadatas"])
     all_texts = _flat_result_values(all_result, "documents")
     all_metas = _flat_result_values(all_result, "metadatas")
+    corpus_sources = {
+        str(meta.get("source", ""))
+        for meta in all_metas
+        if isinstance(meta, dict) and meta.get("source")
+    }
+    if len(corpus_sources) > 1:
+        return None
     query_terms = _section_query_terms(question)
     if not query_terms:
         return None
@@ -562,7 +581,7 @@ def _section_expansion_result(
         metadata = raw_meta if isinstance(raw_meta, dict) else {}
         source = str(metadata.get("source", ""))
         header = str(metadata.get("headers", ""))
-        if source not in base_sources or not header:
+        if source != base_source or not header:
             continue
         score = _header_match_score(header, query_terms)
         if score:
@@ -572,15 +591,48 @@ def _section_expansion_result(
 
     best_score = max(row[0] for row in header_rows)
     selected_headers = {(row[2], row[3]) for row in header_rows if row[0] == best_score}
+    all_ids = _flat_result_values(all_result, "ids")
+    all_id_to_index = {str(doc_id): index for index, doc_id in enumerate(all_ids)}
+    anchors = [
+        all_id_to_index[doc_id]
+        for doc_id in anchor_ids
+        if doc_id in all_id_to_index
+        and (
+            str(
+                all_metas[all_id_to_index[doc_id]].get("source", "")
+                if isinstance(all_metas[all_id_to_index[doc_id]], dict)
+                else ""
+            ),
+            str(
+                all_metas[all_id_to_index[doc_id]].get("headers", "")
+                if isinstance(all_metas[all_id_to_index[doc_id]], dict)
+                else ""
+            ),
+        ) in selected_headers
+    ]
+    if not anchors:
+        return None
+    selected_indices = [
+        index
+        for index, raw_meta in enumerate(all_metas)
+        if (
+            str(raw_meta.get("source", "")) if isinstance(raw_meta, dict) else "",
+            str(raw_meta.get("headers", "")) if isinstance(raw_meta, dict) else "",
+        ) in selected_headers
+        and index < len(all_texts)
+        and index < len(all_ids)
+    ]
+    selected_indices.sort(
+        key=lambda index: (
+            min((abs(index - anchor) for anchor in anchors), default=index),
+            index,
+        )
+    )
     selected_ids: list[str] = []
     selected_docs: list[str] = []
     selected_metas: list[dict[str, Any]] = []
-    all_ids = _flat_result_values(all_result, "ids")
-    for index, raw_meta in enumerate(all_metas):
-        metadata = raw_meta if isinstance(raw_meta, dict) else {}
-        key = (str(metadata.get("source", "")), str(metadata.get("headers", "")))
-        if key not in selected_headers or index >= len(all_texts) or index >= len(all_ids):
-            continue
+    for index in selected_indices[:MAX_SECTION_EXPANSION_CHUNKS]:
+        metadata = all_metas[index] if isinstance(all_metas[index], dict) else {}
         doc_id = str(all_ids[index])
         selected_ids.append(doc_id)
         selected_docs.append(str(all_texts[index]))

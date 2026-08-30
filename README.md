@@ -207,11 +207,39 @@ multi-paper benchmark. The output reports answer fact macro/micro coverage,
 full/partial/zero rates, and missing facts per case. This is an answer
 completeness smoke check, not a replacement for human review or RAGAS.
 
-Current Phase 3 validation has 59 offline tests passing. On the existing
+Current Phase 4 validation has 63 offline tests passing. On the existing
 104-chunk DrugR database, all 11 seed questions reached full required-fact
 coverage in one Dense run and one Hybrid+Rerank run; this remains a
 single-paper generation check, not a multi-paper or RAGAS generalization
-result. The multi-paper retrieval-only benchmark reports Hybrid+CE+RRF @10
-full required-fact context coverage of 0.698 across 53 cases, with 16 cases
-incomplete. See `PHASE3_ANSWER_COMPLETENESS_HANDOFF.md` for saved temporary
-JSONL paths and scope limitations.
+result. The pre-alias multi-paper retrieval baseline reported Hybrid+CE+RRF
+@10 full required-fact context coverage of 0.698 across 53 cases, with 16
+cases incomplete. After PDF-verified alias/markup corrections (without
+changing ranking), the same result is 0.717 with 15 cases incomplete. See
+`PHASE3_ANSWER_COMPLETENESS_HANDOFF.md` and
+`PHASE4_RETRIEVAL_FAILURE_AUDIT.md` for scope and temporary JSONL paths.
+
+Phase 4.0 has completed an offline root-cause audit of those 16 incomplete
+cases. The audit separates gold-fact surface/normalization gaps, Hybrid
+top-50 candidate misses, cross-encoder demotions, and final RRF fusion
+dilution; it does not yet change the default retriever. See
+`PHASE4_RETRIEVAL_FAILURE_AUDIT.md` before running a five-paper generation
+benchmark.
+
+Phase 4.0 also compared CE-only with the current CE-plus-original-rank RRF
+under the same candidate pool. Both reached 0.717 full fact coverage at
+`@10`, but they recovered different cases; neither has replaced the default
+fusion path. An offline weighted-RRF sweep (CE weights 2, 4, and 8) also
+found no strict overall improvement: weight 2 raised fact macro/micro to
+0.800/0.789 but kept full coverage at 0.717 and lowered page hit to 0.881;
+weights 4 and 8 lowered full coverage to 0.698. The default fusion therefore
+remains unchanged.
+
+The same-section expansion safety check found that unbounded expansion can
+pollute a multi-paper top-10; it is now bounded to a single-source context,
+requires an existing section anchor, caps additions at six chunks, and is
+skipped for multi-source collections. This preserves the single-paper UI path
+without claiming a multi-paper retrieval gain.
+
+The candidate-k=80 control increased fact macro/micro only to 0.800/0.789
+while leaving full coverage at 0.717; rerank mean/P95 rose to 4.453/5.231s
+with peak RSS about 2.685GB. The default candidate-k therefore remains 50.

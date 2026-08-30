@@ -4,6 +4,7 @@ from evaluation.benchmark_retrieval import (
     evaluate_document,
     fact_failure_lists,
     searchable_text,
+    _section_expansion_indices,
 )
 from sci_rag_reranking import CrossEncoderReranker
 from sci_rag_retrieval import BM25Index, RankedItem, reciprocal_rank_fusion
@@ -64,6 +65,43 @@ class BenchmarkRetrievalTests(unittest.TestCase):
     def test_rrf_rejects_non_positive_constant(self):
         with self.assertRaises(ValueError):
             reciprocal_rank_fusion([[1]], rrf_k=0)
+
+    def test_weighted_rrf_scales_a_ranked_list(self):
+        equal = reciprocal_rank_fusion([["ce", "shared"], ["shared", "original"]], rrf_k=10)
+        weighted = reciprocal_rank_fusion(
+            [["ce", "shared"], ["shared", "original"]],
+            rrf_k=10,
+            weights=[20.0, 1.0],
+        )
+
+        self.assertEqual(equal[0].key, "shared")
+        self.assertEqual(weighted[0].key, "ce")
+
+    def test_weighted_rrf_validates_weights(self):
+        with self.assertRaises(ValueError):
+            reciprocal_rank_fusion([[1], [2]], weights=[1.0])
+        with self.assertRaises(ValueError):
+            reciprocal_rank_fusion([[1]], weights=[0.0])
+
+    def test_section_expansion_adds_same_header_chunks_after_candidate(self):
+        chunks = [
+            Chunk("section overview", {"source": "paper.pdf", "headers": "H2: Pipeline"}),
+            Chunk("missing sibling fact", {"source": "paper.pdf", "headers": "H2: Pipeline"}),
+            Chunk("other section", {"source": "paper.pdf", "headers": "H2: Results"}),
+        ]
+        expanded = _section_expansion_indices(
+            "What is the dataset pipeline and its steps?",
+            [RankedItem(0, 1.0)],
+            chunks,
+        )
+
+        self.assertEqual(expanded[:2], [0, 1])
+        mixed = _section_expansion_indices(
+            "What is the dataset pipeline and its steps?",
+            [RankedItem(0, 1.0)],
+            [*chunks, Chunk("same heading from another paper", {"source": "other.pdf", "headers": "H2: Pipeline"})],
+        )
+        self.assertEqual(mixed, [0])
 
     def test_bm25_prefers_matching_table_and_is_deterministic(self):
         chunks = [

@@ -166,6 +166,63 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("Unrelated introduction", result["contexts"])
         self.assertIn("ADMETLab", client.prompt)
 
+    def test_composite_section_expansion_skips_multi_source_collection(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        class Collection:
+            def count(self):
+                return 3
+
+            def query(self, **_kwargs):
+                return {
+                    "ids": [["overview", "other"]],
+                    "documents": [["Dataset overview.", "Other paper context."]],
+                    "metadatas": [[
+                        {"source": "paper.pdf", "headers": "H2: Pipeline", "type": "text"},
+                        {"source": "other.pdf", "headers": "H2: Pipeline", "type": "text"},
+                    ]],
+                }
+
+            def get(self, **_kwargs):
+                return {
+                    "ids": ["overview", "sibling", "other"],
+                    "documents": ["Dataset overview.", "Should not be injected.", "Other paper context."],
+                    "metadatas": [
+                        {"source": "paper.pdf", "headers": "H2: Pipeline", "type": "text"},
+                        {"source": "paper.pdf", "headers": "H2: Pipeline", "type": "text"},
+                        {"source": "other.pdf", "headers": "H2: Pipeline", "type": "text"},
+                    ],
+                }
+
+        class Client:
+            def __init__(self):
+                self.chat = self
+                self.completions = self
+
+            def create(self, **kwargs):
+                return type(
+                    "Response",
+                    (),
+                    {"choices": [type("Choice", (), {"message": type("Message", (), {"content": "ok"})()})()]},
+                )()
+
+        result = app.query_knowledge(
+            "显式推理数据集包含多少个样本？标注管道如何构建？",
+            runtime=app.Runtime(
+                app.RuntimeConfig(retrieval_k=2, context_k=2),
+                Client(),
+                Embedding(),
+                Collection(),
+            ),
+        )
+        self.assertNotIn("Should not be injected.", result["contexts"])
+
     def test_table_intent_requires_an_explicit_table_reference(self):
         self.assertFalse(is_table_question("显式推理数据集包含多少个样本？"))
         self.assertFalse(is_table_question("训练样本量和成功比率是多少？"))

@@ -2,6 +2,38 @@
 
 > 记录本项目从"通用学习工作台"改造为 Sci-RAG 的全过程。按时间倒序排列。
 
+> 2026-08-29 Phase 4.0 检索失败审计：对五篇论文、53 道问题的 Hybrid+CE+RRF `@10` 结果中
+> 16 道未完整案例逐题对照现行解析块、Hybrid top-50、cross-encoder top-50 和最终 RRF top-10。
+> 分类出 gold/数学/连字符表面形式缺口、候选池未召回、cross-encoder 降权和最终 RRF 稀释四类
+> 可重复现象，并通过 MgNO、SciDQA、AlphaFold 3 PDF 页面核对公式、初始化、立体化学和
+> third-person 等原文。新增 `PHASE4_RETRIEVAL_FAILURE_AUDIT.md`；本阶段只写审计文档，未改
+> 默认检索器、未重建 ChromaDB、未调用 DeepSeek/RAGAS/Gradio。
+
+> 2026-08-29 Phase 4.0 P0 benchmark 表面形式修正：为 `third-person`、`Initialization/initialize`、
+> `stride of 2`、`overlapping (clashing) atoms` 和 PDF 数学上标拆分后的 `d 2 n 2` 增加逐题 alias。
+> 保持 Hybrid+CE+RRF 最终排名不变，离线 `@10` fact macro/micro 从 `0.785/0.776` 更新为
+> `0.794/0.782`，完整覆盖从 `0.698` 更新为 `0.717`，未完整案例从 16 降为 15；该变化属于
+> matcher 修正，不是检索收益。未写 ChromaDB、未调用 DeepSeek/RAGAS/Gradio。
+
+> 2026-08-29 Phase 4.0 P1 融合对照：在同一五论文解析块、Hybrid candidate-50 和固定
+> `BAAI/bge-reranker-base` revision 上，补跑 CE-only 与 CE 权重为 2/4/8 的 weighted RRF。
+> CE-only 与当前等权 RRF 均为 `0.717` 完整覆盖但恢复不同案例；weighted RRF 权重 2 的
+> fact macro/micro 为 `0.800/0.789`、完整覆盖仍为 `0.717`，页级命中降至 `0.881`；权重 4/8
+> 完整覆盖降为 `0.698`。因此没有改变默认融合，下一步优先处理 candidate recall、邻接块和
+> provenance，而不是继续盲目提高 CE 权重。离线测试达到 61/61；未写 ChromaDB、未调用
+> DeepSeek/RAGAS/Gradio。
+
+> 2026-08-29 Phase 4.0 P1 同小节扩展安全边界：离线对照发现多论文集合中将最匹配 section 的全部
+> 块前置会把通用标题或错误来源推入 top-10，`@10` 完整覆盖降至 `0.698`。现在扩展仅在上下文前
+> `context_k` 块单一来源、目标 section 已有锚点时启用，最多加入 6 个邻接块；多来源集合直接跳过。
+> 单论文网页路径保留，未把该实验宣称为多论文检索收益。离线测试达到 63/63；未写 ChromaDB、
+> 未调用 DeepSeek/RAGAS/Gradio。
+
+> 2026-08-30 Phase 4.1 candidate-k 对照：在相同 alias、Hybrid、cross-encoder 和等权 RRF 条件下，
+> 将候选池从 50 提高到 80。`@10` 完整覆盖仍为 `0.717`，fact macro/micro 为 `0.800/0.789`，
+> 但全局 rerank mean/P95 增至 `4.453/5.231s`，峰值约 `2.685GB`。没有满足默认切换门槛，
+> 保留 candidate-k=50；80 仅作为后续 opt-in 实验。未写 ChromaDB、未调用 DeepSeek/RAGAS/Gradio。
+
 > 2026-08-29 Phase 3 答案完整性基础：新增无模型的 `evaluation/answer_audit.py`，对已保存
 > 的 JSON/JSONL 回答按 required facts 输出 full/partial/zero 和遗漏事实；`evaluate.py` 的
 > 答案事实检查改为复用同一套规范化/别名逻辑。科学问答 Prompt 增加通用多片段互补事实
