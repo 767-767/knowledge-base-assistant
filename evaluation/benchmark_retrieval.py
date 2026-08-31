@@ -28,6 +28,7 @@ if __package__ in {None, ""}:
 from app import (  # noqa: E402
     _header_match_score,
     _is_composite_fact_question,
+    _section_continuation_indices,
     _section_query_terms,
     load_and_split_document,
 )
@@ -44,6 +45,8 @@ from sci_rag_core import (  # noqa: E402
     find_table_cell_in_chunks,
     figure_reference_from_metadata,
     figure_reference_from_question,
+    limitation_evidence_indices,
+    is_limitation_question,
     is_table_question,
     normalize_for_match,
     rerank_table_first,
@@ -336,9 +339,24 @@ def _section_expansion_indices(
             index,
         )
     )
+    continuation_indices: list[int] = []
+    for anchor in anchors:
+        continuation_indices.extend(
+            _section_continuation_indices(
+                anchor,
+                [chunk.metadata for chunk in chunks],
+                [chunk.page_content for chunk in chunks],
+                base_source,
+                MAX_SECTION_EXPANSION_CHUNKS,
+            )
+        )
     ordered: list[int] = []
     seen: set[int] = set()
-    for index in [*expanded[:MAX_SECTION_EXPANSION_CHUNKS], *original]:
+    for index in [
+        *expanded[:MAX_SECTION_EXPANSION_CHUNKS],
+        *continuation_indices,
+        *original,
+    ]:
         if index in seen:
             continue
         seen.add(index)
@@ -472,6 +490,45 @@ def _formula_guard_indices(
         allowed_indices=allowed_formula_indices,
     )
     return list(dict.fromkeys([*formula_indices, *original]))
+
+
+def _limitation_guard_indices(
+    question: str,
+    ranked: list[RankedItem],
+    chunks: list[Chunk],
+    route: DocumentRoute | None = None,
+) -> list[int]:
+    """Promote literal limitation passages for explicit limitation questions."""
+
+    original = [int(item.key) for item in ranked]
+    if not is_limitation_question(question):
+        return original
+    metas = [chunk.metadata for chunk in chunks]
+    source_ids = {
+        str(metadata.get("benchmark_document_id") or metadata.get("source") or "").strip()
+        for metadata in metas
+        if str(metadata.get("benchmark_document_id") or metadata.get("source") or "").strip()
+    }
+    allowed_indices: list[int] | None
+    if route is not None:
+        allowed_indices = [
+            index
+            for index in range(len(chunks))
+            if str(metas[index].get("benchmark_document_id", "")) == route.document_id
+            or str(metas[index].get("source", "")) == route.document_id
+        ]
+    elif len(source_ids) == 1:
+        allowed_indices = list(range(len(chunks)))
+    else:
+        allowed_indices = []
+    limitation_indices = limitation_evidence_indices(
+        question,
+        [chunk.page_content for chunk in chunks],
+        metas,
+        max_results=6,
+        allowed_indices=allowed_indices,
+    )
+    return list(dict.fromkeys([*limitation_indices, *original]))
 
 
 def _adjacent_context_indices(
@@ -1026,6 +1083,7 @@ def evaluate_document(
     structured_table_guard: bool = False,
     structured_figure_guard: bool = False,
     formula_evidence: bool = False,
+    limitation_evidence: bool = False,
     adjacent_context: bool = False,
     parent_window: bool = False,
     document_routing: bool = False,
@@ -1136,6 +1194,17 @@ def evaluate_document(
                 ranked_for_k = [
                     RankedItem(index, score_by_index.get(index, 0.0))
                     for index in _formula_guard_indices(
+                        question,
+                        ranked_for_k,
+                        chunks,
+                        route=route,
+                    )[:top_k]
+                ]
+            if limitation_evidence:
+                score_by_index = {int(item.key): item.score for item in ranked_for_k}
+                ranked_for_k = [
+                    RankedItem(index, score_by_index.get(index, 0.0))
+                    for index in _limitation_guard_indices(
                         question,
                         ranked_for_k,
                         chunks,
@@ -1280,6 +1349,7 @@ def run_diagnostic(
     structured_table_guard: bool = False,
     spatial_figure_evidence: bool = False,
     formula_evidence: bool = False,
+    limitation_evidence: bool = False,
     adjacent_context: bool = False,
     parent_window: bool = False,
     document_routing: bool = False,
@@ -1358,6 +1428,7 @@ def run_diagnostic(
         structured_table_guard=structured_table_guard,
         structured_figure_guard=spatial_figure_evidence,
         formula_evidence=formula_evidence,
+        limitation_evidence=limitation_evidence,
         adjacent_context=adjacent_context,
         parent_window=parent_window,
         document_routing=document_routing,
@@ -1384,6 +1455,7 @@ def run_diagnostic(
                 structured_table_guard=structured_table_guard,
                 structured_figure_guard=spatial_figure_evidence,
                 formula_evidence=formula_evidence,
+                limitation_evidence=limitation_evidence,
                 adjacent_context=adjacent_context,
                 parent_window=parent_window,
                 document_routing=document_routing,
@@ -1394,7 +1466,7 @@ def run_diagnostic(
     if reranker:
         method += "+cross-encoder"
     return {
-        "schema_version": 7,
+        "schema_version": 8,
         "method": method,
         "retriever": retriever,
         "dense_model": dense_model_name if retriever in {"dense", "hybrid"} else None,
@@ -1404,6 +1476,7 @@ def run_diagnostic(
         "structured_table_guard": bool(structured_table_guard),
         "spatial_figure_evidence": bool(spatial_figure_evidence),
         "formula_evidence": bool(formula_evidence),
+        "limitation_evidence": bool(limitation_evidence),
         "adjacent_context": bool(adjacent_context),
         "parent_window": bool(parent_window),
         "reranker": (
@@ -1460,6 +1533,7 @@ def run_diagnostic(
             "adjacent_context is an opt-in bounded control that interleaves same-page text neighbors around the first two ranked anchors without crossing sources, pages, tables, or reference sections.",
             "parent_window is an opt-in effective-context control: it concatenates eligible same-page neighbors inside the first two text anchors without consuming additional top-k slots; window indices and character overhead are recorded per case.",
             "formula_evidence is an opt-in lexical guard for explicit equation/PDE questions: it promotes a small same-source set of formula-bearing text blocks and is not a symbolic solver.",
+            "limitation_evidence is an opt-in lexical guard for explicit limitation/failure questions: it promotes a small same-source set of passages that state the limitation and its example; it is not a semantic truth judge.",
             "document_routing is an opt-in lexical source router: it narrows retrieval only when distinctive ASCII identifiers belong to exactly one source; ambiguous or generic queries use the global index.",
             "query_decomposition is an opt-in deterministic multi-query control: the original question is always retained and bounded punctuation/conjunction clauses are retrieved within the original route scope, then fused with RRF; it does not translate or inject benchmark facts.",
             "No ChromaDB, Gradio, RAGAS, or external API is used; dense-local and hybrid-rrf do use the locally cached embedding model described above.",
@@ -1477,6 +1551,7 @@ def _print_summary(report: dict[str, Any], show_failures: bool = False) -> None:
         f"structured-table-guard={'on' if report.get('structured_table_guard') else 'off'}；"
         f"spatial-figure-evidence={'on' if report.get('spatial_figure_evidence') else 'off'}；"
         f"formula-evidence={'on' if report.get('formula_evidence') else 'off'}；"
+        f"limitation-evidence={'on' if report.get('limitation_evidence') else 'off'}；"
         f"adjacent-context={'on' if report.get('adjacent_context') else 'off'}；"
         f"parent-window={'on' if report.get('parent_window') else 'off'}"
     )
@@ -1644,6 +1719,11 @@ def main() -> int:
         help="对显式公式/PDE问题加入同来源公式文字候选；默认关闭",
     )
     parser.add_argument(
+        "--limitation-evidence",
+        action="store_true",
+        help="对显式限制/失败问题加入同来源限制文字候选；默认关闭",
+    )
+    parser.add_argument(
         "--adjacent-context",
         action="store_true",
         help="围绕前两个文本锚点加入同来源同页相邻块的受控对照；默认关闭",
@@ -1693,6 +1773,7 @@ def main() -> int:
             structured_table_guard=args.structured_table_guard,
             spatial_figure_evidence=args.spatial_figure_evidence,
             formula_evidence=args.formula_evidence,
+            limitation_evidence=args.limitation_evidence,
             adjacent_context=args.adjacent_context,
             parent_window=args.parent_window,
             document_routing=args.document_routing,

@@ -435,6 +435,23 @@ class BenchmarkRetrievalTests(unittest.TestCase):
         )
         self.assertEqual(expanded[:2], [0, 1])
 
+    def test_section_expansion_adds_headerless_text_continuations_until_heading(self):
+        chunks = [
+            Chunk("overview", {"source": "paper.pdf", "headers": "H2: Pipeline", "type": "text", "chunk_index": 10}),
+            Chunk("table noise", {"source": "paper.pdf", "type": "table", "chunk_index": 11}),
+            Chunk("tool=ADMETLab", {"source": "paper.pdf", "type": "text", "chunk_index": 12}),
+            Chunk("similarity > 0.6", {"source": "paper.pdf", "type": "text", "chunk_index": 13}),
+            Chunk("next section", {"source": "paper.pdf", "headers": "H2: Results", "type": "text", "chunk_index": 14}),
+        ]
+        expanded = _section_expansion_indices(
+            "What is the dataset pipeline and its steps?",
+            [RankedItem(0, 1.0)],
+            chunks,
+        )
+        self.assertEqual(expanded[:3], [0, 2, 3])
+        self.assertNotIn(1, expanded[:4])
+        self.assertNotIn(4, expanded[:4])
+
     def test_bm25_prefers_matching_table_and_is_deterministic(self):
         chunks = [
             Chunk("Background about optimization.", {"page": 1, "type": "text"}),

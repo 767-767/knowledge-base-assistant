@@ -27,6 +27,36 @@ class AnswerAuditTests(unittest.TestCase):
         self.assertEqual(partial["answer_fact_status"], "partial")
         self.assertEqual(partial["missing_facts"], ["DeepSeek-R1", "0.6", "ADMETLab"])
         self.assertEqual(zero["answer_fact_status"], "zero")
+        self.assertFalse(full["answer_refusal_detected"])
+        self.assertEqual(full["answer_risk_flags"], [])
+
+    def test_refusal_mentions_are_separate_from_lexical_fact_status(self):
+        case = {
+            "case_id": "mgno-03",
+            "required_facts": ["初始化", "残差"],
+        }
+        answer = "资料未明确提供初始化状态，更新时也未说明残差。"
+        result = audit_answer(case, answer)
+
+        # The lexical status intentionally remains transparent and unchanged;
+        # callers must inspect the independent risk fields before treating it
+        # as a semantically complete answer.
+        self.assertEqual(result["answer_fact_status"], "full")
+        self.assertTrue(result["answer_refusal_detected"])
+        self.assertEqual(result["refused_required_facts"], ["初始化", "残差"])
+        self.assertIn("required_fact_mentioned_in_refusal", result["answer_risk_flags"])
+        self.assertIn("full_coverage_with_refusal", result["answer_risk_flags"])
+
+    def test_caveat_about_other_details_does_not_refuse_answered_fact(self):
+        case = {"case_id": "caveat", "required_facts": ["V-cycle"]}
+        result = audit_answer(
+            case,
+            "论文明确提到 V-cycle。资料未提供另一种循环类型的名称。",
+        )
+        self.assertEqual(result["answer_fact_status"], "full")
+        self.assertTrue(result["answer_refusal_detected"])
+        self.assertEqual(result["refused_required_facts"], [])
+        self.assertNotIn("full_coverage_with_refusal", result["answer_risk_flags"])
 
     def test_audit_answers_requires_all_and_rejects_unknown_ids(self):
         with self.assertRaises(ValueError):
@@ -90,6 +120,7 @@ class AnswerAuditTests(unittest.TestCase):
             require_all=True,
         )
         self.assertEqual(report["summary"]["full_fact_coverage_rate"], 1.0)
+        self.assertEqual(report["summary"]["answer_refusal_case_count"], 0)
 
 
 if __name__ == "__main__":

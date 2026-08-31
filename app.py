@@ -21,10 +21,14 @@ from sci_rag_core import (
     Chunk,
     build_evidence_ledger,
     extract_spatial_figure_chunks,
+    file_sha256,
     formula_evidence_indices,
     find_table_cell_in_chunks,
     figure_reference_from_question,
+    is_formula_question,
+    is_limitation_question,
     is_table_question,
+    limitation_evidence_indices,
     matching_figure_indices,
     matching_table_indices,
     rerank_table_first,
@@ -60,6 +64,7 @@ class RuntimeConfig:
     parent_window: bool = False
     spatial_figure_evidence: bool = False
     formula_evidence: bool = False
+    formula_evidence_auto: bool = True
     answer_validation: bool = False
     hybrid_candidate_k: int = 50
     hybrid_rrf_k: int = 60
@@ -107,6 +112,9 @@ class RuntimeConfig:
         formula_evidence = os.getenv(
             "SCI_RAG_FORMULA_EVIDENCE", "0"
         ).strip().casefold() in {"1", "true", "yes", "on"}
+        formula_evidence_auto = os.getenv(
+            "SCI_RAG_FORMULA_EVIDENCE_AUTO", "1"
+        ).strip().casefold() in {"1", "true", "yes", "on"}
         answer_validation = os.getenv(
             "SCI_RAG_ANSWER_VALIDATION", "0"
         ).strip().casefold() in {"1", "true", "yes", "on"}
@@ -123,6 +131,7 @@ class RuntimeConfig:
             parent_window=parent_window,
             spatial_figure_evidence=spatial_figure_evidence,
             formula_evidence=formula_evidence,
+            formula_evidence_auto=formula_evidence_auto,
             answer_validation=answer_validation,
             hybrid_candidate_k=positive_int(
                 "SCI_RAG_HYBRID_CANDIDATE_K", cls.hybrid_candidate_k
@@ -180,6 +189,15 @@ class Runtime:
 
     def invalidate_lexical_index(self) -> None:
         self._lexical_snapshot = None
+
+
+def formula_evidence_enabled(question: str, config: RuntimeConfig) -> bool:
+    """Return whether the formula evidence path should run for one question."""
+
+    return bool(
+        config.formula_evidence
+        or (config.formula_evidence_auto and is_formula_question(question))
+    )
 
 
 _runtime: Runtime | None = None
@@ -326,21 +344,13 @@ def _metadata_for_chroma(metadata: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in metadata.items() if value is not None}
 
 
-def _sha256(file_path: str) -> str:
-    digest = hashlib.sha256()
-    with open(file_path, "rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def add_document_to_db(file_path: str, runtime: Runtime | None = None) -> str:
     runtime = runtime or get_runtime()
     chunks = load_and_split_document(
         file_path,
         include_spatial_figures=runtime.config.spatial_figure_evidence,
     )
-    document_hash = _sha256(file_path)
+    document_hash = file_sha256(file_path)
     for index, chunk in enumerate(chunks):
         text = chunk.page_content
         metadata = dict(chunk.metadata)
@@ -696,7 +706,9 @@ _SECTION_QUERY_ALIASES = {
     "数据集": ("dataset", "data"),
     "显式推理": ("explicit-reasoning", "reasoning"),
     "推理": ("reasoning",),
-    "强化学习": ("reinforcement", "rl"),
+    # Prefer a self-balanced/multi-granular RL section over a generic
+    # training-settings heading when both share the same broad token.
+    "强化学习": ("reinforcement", "rl", "self-balanced", "multi-granular"),
     "训练": ("training", "train"),
     "实验配置": ("experimental", "setup", "configuration", "configurations"),
     "配置": ("configuration", "configurations", "setup"),
@@ -705,6 +717,61 @@ _SECTION_QUERY_ALIASES = {
 }
 MAX_SECTION_EXPANSION_CHUNKS = 6
 MAX_PARENT_WINDOW_ANCHORS = 2
+
+
+def _section_continuation_indices(
+    anchor_index: int,
+    all_metas: list[Any],
+    all_texts: list[Any],
+    source: str,
+    limit: int,
+) -> list[int]:
+    """Return headerless text chunks contiguous with a section anchor.
+
+    PDF-to-Markdown extraction commonly stores a section header only on its
+    first chunk.  Matching only identical ``headers`` therefore loses the
+    continuation on the next page, even though the next heading has not
+    started yet.  Walk source-local ``chunk_index`` values until the next
+    explicit heading, skip table/figure blocks, and never cross an index gap.
+    """
+
+    if limit <= 0:
+        return []
+    try:
+        anchor_chunk_index = int(all_metas[anchor_index].get("chunk_index"))
+    except (IndexError, AttributeError, TypeError, ValueError):
+        return []
+    source_by_chunk: dict[int, int] = {}
+    for index, raw_meta in enumerate(all_metas):
+        metadata = raw_meta if isinstance(raw_meta, dict) else {}
+        if str(metadata.get("source", "")) != source:
+            continue
+        try:
+            chunk_index = int(metadata.get("chunk_index"))
+        except (TypeError, ValueError):
+            continue
+        source_by_chunk[chunk_index] = index
+
+    continuation: list[int] = []
+    # Section headers are attached to the first chunk by the parser, so only
+    # walk forward. Walking backward from the first chunk could incorrectly
+    # import headerless prose belonging to the preceding section.
+    current = anchor_chunk_index
+    while len(continuation) < limit:
+        current += 1
+        index = source_by_chunk.get(current)
+        if index is None:
+            break
+        metadata = all_metas[index] if isinstance(all_metas[index], dict) else {}
+        if metadata.get("type", "text") != "text":
+            continue
+        if str(metadata.get("headers") or "").strip():
+            break
+        if _is_picture_text_chunk(all_texts[index] if index < len(all_texts) else ""):
+            continue
+        if index not in continuation:
+            continuation.append(index)
+    return continuation[:limit]
 
 
 def _is_picture_text_chunk(text: Any) -> bool:
@@ -851,11 +918,43 @@ def _section_expansion_result(
             index,
         )
     )
+    # A section header is often present only on its first chunk.  Add
+    # contiguous, headerless text continuations before the final context cap;
+    # table/figure blocks and the next explicit heading remain boundaries.
+    continuation_indices: list[int] = []
+    continuation_headers: dict[int, str] = {}
+    for anchor in anchors:
+        anchor_metadata = (
+            all_metas[anchor] if isinstance(all_metas[anchor], dict) else {}
+        )
+        section_header = str(anchor_metadata.get("headers") or "").strip()
+        for index in _section_continuation_indices(
+            anchor,
+            all_metas,
+            all_texts,
+            selected_source,
+            MAX_SECTION_EXPANSION_CHUNKS,
+        ):
+            continuation_indices.append(index)
+            if section_header:
+                continuation_headers.setdefault(index, section_header)
+    selected_indices = [
+        *selected_indices,
+        *[index for index in continuation_indices if index not in selected_indices],
+    ]
     selected_ids: list[str] = []
     selected_docs: list[str] = []
     selected_metas: list[dict[str, Any]] = []
     for index in selected_indices[:MAX_SECTION_EXPANSION_CHUNKS]:
         metadata = all_metas[index] if isinstance(all_metas[index], dict) else {}
+        if index in continuation_headers and not str(metadata.get("headers") or "").strip():
+            # Keep the source metadata's real ``headers`` untouched while
+            # exposing the inherited section used for deterministic evidence
+            # auditing and citations.
+            metadata = {
+                **metadata,
+                "section_context": continuation_headers[index],
+            }
         doc_id = str(all_ids[index])
         selected_ids.append(doc_id)
         selected_docs.append(str(all_texts[index]))
@@ -1043,7 +1142,8 @@ def query_knowledge(
         dense = _cross_encoder_reranked_result(message, dense, runtime)
     section_result = _section_expansion_result(message, dense, runtime, route=route)
     formula_result = None
-    if runtime.config.formula_evidence:
+    use_formula_evidence = formula_evidence_enabled(message, runtime.config)
+    if use_formula_evidence:
         formula_snapshot = _get_lexical_snapshot(runtime)
         source_ids = {
             str(metadata.get("source", "")).strip()
@@ -1080,6 +1180,44 @@ def query_knowledge(
                 "metadatas": [[
                     {**formula_snapshot.metadatas[index], "formula_evidence": True}
                     for index in formula_indices
+                ]],
+            }
+    limitation_result = None
+    if is_limitation_question(message):
+        limitation_snapshot = _get_lexical_snapshot(runtime)
+        source_ids = {
+            str(metadata.get("source", "")).strip()
+            for metadata in limitation_snapshot.metadatas
+            if isinstance(metadata, dict) and str(metadata.get("source", "")).strip()
+        }
+        allowed_limitation_indices: list[int] | None
+        if route is not None:
+            allowed_limitation_indices = [
+                index
+                for index in range(len(limitation_snapshot.texts))
+                if str(limitation_snapshot.metadatas[index].get("source", ""))
+                == route.document_id
+            ]
+        elif len(source_ids) == 1:
+            allowed_limitation_indices = list(range(len(limitation_snapshot.texts)))
+        else:
+            # Keep an unqualified multi-paper query from borrowing a limitation
+            # passage from an unrelated source.
+            allowed_limitation_indices = []
+        limitation_indices = limitation_evidence_indices(
+            message,
+            limitation_snapshot.texts,
+            limitation_snapshot.metadatas,
+            max_results=6,
+            allowed_indices=allowed_limitation_indices,
+        )
+        if limitation_indices:
+            limitation_result = {
+                "ids": [[limitation_snapshot.ids[index] for index in limitation_indices]],
+                "documents": [[limitation_snapshot.texts[index] for index in limitation_indices]],
+                "metadatas": [[
+                    {**limitation_snapshot.metadatas[index], "limitation_evidence": True}
+                    for index in limitation_indices
                 ]],
             }
     figure_result = None
@@ -1128,7 +1266,12 @@ def query_knowledge(
         table_results,
         [
             result
-            for result in (figure_result, formula_result, section_result)
+            for result in (
+                limitation_result,
+                figure_result,
+                formula_result,
+                section_result,
+            )
             if result is not None
         ]
         or None,
@@ -1271,6 +1414,8 @@ def query_knowledge(
             label = f"【片段 {index}】[图形坐标文字]"
         elif metadata.get("formula_evidence"):
             label = f"【片段 {index}】[公式候选]"
+        elif metadata.get("limitation_evidence"):
+            label = f"【片段 {index}】[限制证据]"
         else:
             label = f"【片段 {index}】"
         context_parts.append(f"{label}\n{text}")
@@ -1368,6 +1513,9 @@ SCIENTIFIC_SYSTEM_PROMPT = """你是一个面向科学论文的严谨学术问�
 
 【强制规则 2：趋势判断必须有明确对比依据】
 - 若问题涉及趋势判断，必须确认参考文本有明确对比依据；没有依据时必须回复“资料未提供该趋势的明确依据，无法推测。”
+
+【强制规则 2A：限制问题要区分限制本身与示例现象】
+- 若问题询问模型、方法或数据的局限性，先复述参考片段明确给出的机制性限制及其限定条件（例如 PDB 中的静态结构与溶液中的动力学行为的区别），再说明示例展示的结果；不能只描述示例现象而省略限制本身。若原文给出这种对照关系，必须保留两端，不能用“训练数据限制”等参考片段未出现的机制替代。
 
 【强制规则 3：实验步骤按时间顺序重组】
 - 若回答涉及实验步骤或方法流程，请按“第一、第二、第三”的逻辑重组叙述，不得调换核心操作顺序或省略中间步骤。
@@ -1477,11 +1625,6 @@ def build_demo(runtime: Runtime | None = None) -> Any:
             output = gr.Markdown(label="📋 题目与解析", value="点击上方按钮生成...")
             button.click(lambda: generate_quiz(runtime), inputs=[], outputs=output)
     return demo
-
-
-def chat_respond(message: str, history: Any) -> str:
-    return query_knowledge(message, history, return_contexts=False)
-
 
 if __name__ == "__main__":
     demo = build_demo(create_runtime())

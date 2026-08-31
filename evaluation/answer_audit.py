@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any, Iterable
 
@@ -27,7 +28,78 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from evaluation.context_coverage import aggregate_fact_coverage, case_fact_coverage
+from evaluation.context_coverage import (
+    aggregate_fact_coverage,
+    aliases_for_fact,
+    case_fact_coverage,
+    fact_is_present,
+)
+
+
+_REFUSAL_LANGUAGE_RE = re.compile(
+    r"资料(?:中)?(?:未提供|没有提供|未明确|没有明确|未说明|没有说明)(?!其他)|"
+    r"(?:无法|不能|不可|不确定).{0,24}(?:回答|确认|判断|推断|确定)|"
+    r"(?:not provided|not specified|not available|unclear|cannot answer|"
+    r"unable to answer|insufficient information|cannot determine)",
+    re.IGNORECASE,
+)
+_ANSWER_SEGMENT_RE = re.compile(r"(?<=[。！？!?；;\n])")
+
+
+def _answer_refusal_risks(
+    answer_case: dict[str, Any],
+    answer: str,
+    coverage: dict[str, Any],
+) -> dict[str, Any]:
+    """Detect refusal language without changing lexical fact coverage.
+
+    A model can mention a required fact while saying that the fact is not
+    available.  The lexical audit must remain a transparent string matcher,
+    so this helper emits an independent review signal instead of relabeling a
+    ``full``/``partial`` result as semantically wrong.
+    """
+
+    text = str(answer or "")
+    segments = [segment for segment in _ANSWER_SEGMENT_RE.split(text) if segment]
+    refusal_segments = [
+        (segment, list(_REFUSAL_LANGUAGE_RE.finditer(segment)))
+        for segment in segments
+    ]
+    refusals = [match for _segment, matches in refusal_segments for match in matches]
+    refused_facts: list[str] = []
+    required = [
+        str(fact)
+        for fact in answer_case.get("required_facts") or []
+    ]
+    for segment, segment_refusals in refusal_segments:
+        for match in segment_refusals:
+            # A fact is considered refused only when it follows the refusal
+            # phrase. Facts mentioned earlier in a valid answer should not be
+            # marked merely because the answer adds a caveat about other details.
+            window = segment[match.end() :]
+            if re.search(r"其他|另一种|额外|other|another|additional", window, re.IGNORECASE):
+                continue
+            for fact in required:
+                if fact in refused_facts:
+                    continue
+                if fact_is_present(
+                    fact,
+                    [window],
+                    aliases_for_fact(answer_case, fact)[1:],
+                ):
+                    refused_facts.append(fact)
+    flags: list[str] = []
+    if refusals:
+        flags.append("refusal_language_present")
+    if refused_facts:
+        flags.append("required_fact_mentioned_in_refusal")
+    if refused_facts and coverage.get("fact_coverage_status") == "full":
+        flags.append("full_coverage_with_refusal")
+    return {
+        "answer_refusal_detected": bool(refusals),
+        "refused_required_facts": refused_facts,
+        "answer_risk_flags": flags,
+    }
 
 
 def audit_answer(case: dict[str, Any], answer: str) -> dict[str, Any]:
@@ -48,6 +120,7 @@ def audit_answer(case: dict[str, Any], answer: str) -> dict[str, Any]:
         merged_aliases[str(fact)] = list(dict.fromkeys(merged_aliases[str(fact)]))
     answer_case["required_fact_aliases"] = merged_aliases
     coverage = case_fact_coverage(answer_case, [answer])
+    refusal_risks = _answer_refusal_risks(answer_case, answer, coverage)
     return {
         "id": case.get("id", case.get("case_id")),
         "case_id": case.get("case_id", case.get("id")),
@@ -64,6 +137,7 @@ def audit_answer(case: dict[str, Any], answer: str) -> dict[str, Any]:
         "answer_fact_aliases": case.get("answer_fact_aliases") or {},
         "answer_fact_coverage": coverage["required_fact_coverage"],
         "answer_fact_status": coverage["fact_coverage_status"],
+        **refusal_risks,
         "matched_facts": coverage["matched_required_facts"],
         "missing_facts": coverage["missing_required_facts"],
         # Keep the canonical field names used by context_coverage aggregation
@@ -81,7 +155,27 @@ def audit_answer(case: dict[str, Any], answer: str) -> dict[str, Any]:
 def aggregate_answer_audit(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate answer rows with the same macro/micro semantics as retrieval."""
 
-    return aggregate_fact_coverage(rows)
+    row_list = list(rows)
+    fact_summary = aggregate_fact_coverage(row_list)
+    risk_rows = [row for row in row_list if row.get("answer_risk_flags")]
+    refusal_rows = [row for row in row_list if row.get("answer_refusal_detected")]
+    conflict_rows = [
+        row
+        for row in row_list
+        if "required_fact_mentioned_in_refusal" in (row.get("answer_risk_flags") or [])
+    ]
+    full_refusal_rows = [
+        row
+        for row in row_list
+        if "full_coverage_with_refusal" in (row.get("answer_risk_flags") or [])
+    ]
+    return {
+        **fact_summary,
+        "answer_risk_case_count": len(risk_rows),
+        "answer_refusal_case_count": len(refusal_rows),
+        "required_fact_refusal_conflict_case_count": len(conflict_rows),
+        "full_coverage_with_refusal_case_count": len(full_refusal_rows),
+    }
 
 
 def _load_cases(path: str | Path) -> list[dict[str, Any]]:

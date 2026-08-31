@@ -95,6 +95,7 @@ def runtime_config_trace(runtime: app.Runtime) -> dict[str, Any]:
         "parent_window": bool(config.parent_window),
         "spatial_figure_evidence": bool(config.spatial_figure_evidence),
         "formula_evidence": bool(config.formula_evidence),
+        "formula_evidence_auto": bool(config.formula_evidence_auto),
         "answer_validation": bool(config.answer_validation),
         "reranker_model": config.reranker_model,
         "reranker_revision": config.reranker_revision,
@@ -138,6 +139,7 @@ def build_runtime(
     parent_window: bool,
     spatial_figure_evidence: bool,
     formula_evidence: bool | None = None,
+    formula_evidence_auto: bool | None = None,
     reranker_model: str | None = None,
     reranker_revision: str | None = None,
     reranker_batch_size: int | None = None,
@@ -162,6 +164,7 @@ def build_runtime(
     }
     optional_overrides = {
         "formula_evidence": formula_evidence,
+        "formula_evidence_auto": formula_evidence_auto,
         "reranker_model": reranker_model,
         "reranker_revision": reranker_revision,
         "reranker_batch_size": reranker_batch_size,
@@ -190,6 +193,7 @@ def run_stability(
     parent_window: bool = True,
     spatial_figure_evidence: bool = True,
     formula_evidence: bool | None = None,
+    formula_evidence_auto: bool | None = None,
     reranker_model: str | None = None,
     reranker_revision: str | None = None,
     reranker_batch_size: int | None = None,
@@ -213,6 +217,7 @@ def run_stability(
         parent_window=parent_window,
         spatial_figure_evidence=spatial_figure_evidence,
         formula_evidence=formula_evidence,
+        formula_evidence_auto=formula_evidence_auto,
         reranker_model=reranker_model,
         reranker_revision=reranker_revision,
         reranker_batch_size=reranker_batch_size,
@@ -334,6 +339,12 @@ def main() -> int:
         default=None,
         help="启用显式公式候选通道（默认沿用 .env）",
     )
+    parser.add_argument(
+        "--formula-evidence-auto",
+        action="store_true",
+        default=None,
+        help="对显式公式/算法问题自动启用公式候选通道（默认沿用 .env）",
+    )
     parser.add_argument("--reranker-model")
     parser.add_argument("--reranker-revision")
     parser.add_argument("--reranker-batch-size", type=int)
@@ -355,6 +366,7 @@ def main() -> int:
             parent_window=not args.no_parent_window,
             spatial_figure_evidence=not args.no_spatial_figure_evidence,
             formula_evidence=args.formula_evidence,
+            formula_evidence_auto=args.formula_evidence_auto,
             reranker_model=args.reranker_model,
             reranker_revision=args.reranker_revision,
             reranker_batch_size=args.reranker_batch_size,

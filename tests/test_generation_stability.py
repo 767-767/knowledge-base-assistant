@@ -47,6 +47,7 @@ class GenerationStabilityTests(unittest.TestCase):
         self.assertEqual(trace["hybrid_candidate_k"], 50)
         self.assertEqual(trace["reranker_revision"], "fixed-revision")
         self.assertTrue(trace["formula_evidence"])
+        self.assertTrue(trace["formula_evidence_auto"])
         self.assertNotIn("DEEPSEEK_API_KEY", trace)
         self.assertNotIn("deepseek_base_url", trace)
 
@@ -69,6 +70,7 @@ class GenerationStabilityTests(unittest.TestCase):
                 parent_window=True,
                 spatial_figure_evidence=True,
                 formula_evidence=True,
+                formula_evidence_auto=False,
                 reranker_model="BAAI/bge-reranker-base",
                 reranker_revision="fixed-revision",
                 reranker_batch_size=4,
@@ -86,6 +88,7 @@ class GenerationStabilityTests(unittest.TestCase):
         self.assertEqual(config.reranker_max_length, 256)
         self.assertEqual(config.reranker_rrf_k, 30)
         self.assertTrue(config.formula_evidence)
+        self.assertFalse(config.formula_evidence_auto)
 
 
 if __name__ == "__main__":

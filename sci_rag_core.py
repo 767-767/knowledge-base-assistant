@@ -51,13 +51,38 @@ FORMULA_QUESTION_RE = re.compile(
     r"(?:system|equation).{0,20}(?:form|written|expression)|"
     r"(?:初始化|残差|平滑迭代|更新).{0,32}(?:状态|量|过程|形式|如何|什么|更新|iteration|residual)|"
     r"(?:限制|延拓|restriction|prolongation).{0,48}(?:操作|算子|网格|层级|stride|循环|cycle|如何|改变)|"
-    r"(?:循环|cycle).{0,24}(?:类型|区别|操作|名称|V-cycle|Backslash)",
+    r"(?:循环|cycle).{0,24}(?:类型|区别|操作|名称|V-cycle|Backslash)|"
+    r"(?:PDE|椭圆).{0,40}(?:区域|定义|domain|defined|边界条件|boundary)",
+    re.IGNORECASE,
+)
+LIMITATION_QUESTION_RE = re.compile(
+    r"限制|局限|不足|缺点|失败模式|挑战|"
+    r"\blimitations?\b|\bdrawbacks?\b|\bfailure\s+modes?\b|"
+    r"\b(?:what|which|how)\b.{0,36}\b(?:limitation|challenge|failure)\b",
+    re.IGNORECASE,
+)
+LIMITATION_OPERATOR_RE = re.compile(
+    r"(?:限制|restriction|prolongation).{0,48}(?:操作|算子|网格|层级|stride|循环|cycle|改变|"
+    r"operator|grid|level|how\s+(?:does|do)|change)",
+    re.IGNORECASE,
+)
+UNAMBIGUOUS_LIMITATION_RE = re.compile(
+    r"局限|不足|缺点|失败模式|挑战|"
+    r"\blimitations?\b|\bdrawbacks?\b|\bfailure\s+modes?\b",
     re.IGNORECASE,
 )
 FORMULA_EVIDENCE_RE = re.compile(
     r"(?:\\[A-Za-z]+|[×∗*]|[=≤≥]|∈|ℝ|ℤ|∫|∂|"
     r"\b(?:PDE|equation|formula|kernel|operator|convolution|residual|"
     r"finite[- ]element|FEM)\b)",
+    re.IGNORECASE,
+)
+LIMITATION_EVIDENCE_RE = re.compile(
+    r"\b(?:limitation|limited|static\s+structures?|dynamical\s+behavio(?:u)?r|"
+    r"dynamic(?:al)?\s+(?:state|behaviour|behavior)|solution\s+ensemble|"
+    r"conformation(?:al)?\s+coverage|failure(?:\s+modes?)?|cannot|unable|"
+    r"open|closed|apo|holo)\b|"
+    r"限制|局限|不足|失败|静态结构|动力学行为|溶液|构象|开放|闭合",
     re.IGNORECASE,
 )
 ENTITY_RE = re.compile(r"[A-Za-z0-9_*+\-]+(?:[-\s][A-Za-z0-9_*+\-]+)*")
@@ -349,6 +374,20 @@ def is_formula_question(question: str) -> bool:
     return bool(FORMULA_QUESTION_RE.search(str(question or "")))
 
 
+def is_limitation_question(question: str) -> bool:
+    """Return whether a question explicitly asks about limitations or failures."""
+
+    value = str(question or "")
+    if not LIMITATION_QUESTION_RE.search(value):
+        return False
+    # Chinese “限制” is also the standard name of the multigrid restriction
+    # operator. Do not attach limitation evidence to an explicit operator/grid
+    # question unless an unambiguous failure/shortcoming cue is present.
+    if LIMITATION_OPERATOR_RE.search(value) and not UNAMBIGUOUS_LIMITATION_RE.search(value):
+        return False
+    return True
+
+
 def _formula_query_terms(question: str) -> set[str]:
     """Add generic bilingual terms used to rank formula-bearing passages."""
 
@@ -367,6 +406,7 @@ def _formula_query_terms(question: str) -> set[str]:
         "有限元": ("finite", "element", "FEM"),
         "线性有限元": ("linear", "finite", "element", "FEM"),
         "椭圆": ("elliptic",),
+        "区域": ("domain", "region", "omega"),
         "边界条件": ("boundary", "condition"),
         "残差": ("residual",),
         "初始化": ("initialize", "initialization"),
@@ -375,6 +415,46 @@ def _formula_query_terms(question: str) -> set[str]:
         "限制": ("restriction", "restrict", "coarser", "stride"),
         "延拓": ("prolongation", "prolong", "transpose", "de-convolution"),
         "循环": ("cycle", "v-cycle", "backslash-cycle", "post-smoothing"),
+    }
+    for cue, cue_aliases in aliases.items():
+        if cue.casefold() in normalized:
+            terms.update(alias.casefold() for alias in cue_aliases)
+    return terms
+
+
+def _limitation_query_terms(question: str) -> set[str]:
+    """Add generic bilingual terms used to rank limitation evidence."""
+
+    normalized = normalize_for_match(question)
+    terms = set(re.findall(r"[a-z][a-z0-9-]+", normalized))
+    aliases = {
+        "限制": (
+            "limitation",
+            "limited",
+            "static",
+            "structure",
+            "structures",
+            "dynamical",
+            "dynamic",
+            "behaviour",
+            "behavior",
+            "solution",
+            "conformation",
+            "conformational",
+            "coverage",
+        ),
+        "局限": ("limitation", "limited", "challenge", "drawback"),
+        "不足": ("limitation", "limited", "shortcoming", "lack"),
+        "缺点": ("limitation", "drawback", "weakness"),
+        "失败模式": ("failure", "mode", "modes", "incorrect", "error"),
+        "挑战": ("challenge", "challenging", "limitation"),
+        "分子动力学": ("molecular", "dynamics", "dynamical", "dynamic", "solution"),
+        "动力学": ("dynamical", "dynamic", "behaviour", "behavior", "solution"),
+        "状态": ("state", "states", "conformation", "conformational"),
+        "构象": ("conformation", "conformational", "open", "closed", "coverage"),
+        "示例": ("example",),
+        "apo": ("apo", "open"),
+        "holo": ("holo", "closed"),
     }
     for cue, cue_aliases in aliases.items():
         if cue.casefold() in normalized:
@@ -430,6 +510,55 @@ def formula_evidence_indices(
         if query_hits < 2:
             continue
         score = min(marker_hits, 8) + query_hits * 6
+        rows.append((score, index))
+    rows.sort(key=lambda row: (-row[0], row[1]))
+    return [index for _score, index in rows[:max_results]]
+
+
+def limitation_evidence_indices(
+    question: str,
+    texts: Iterable[str],
+    metadatas: Iterable[dict[str, Any]] | None = None,
+    *,
+    max_results: int = 4,
+    allowed_indices: Iterable[int] | None = None,
+) -> list[int]:
+    """Rank literal limitation/failure passages for an explicit limitation query.
+
+    This is a bounded lexical aid, not a semantic classifier. It keeps the
+    source scope under caller control and promotes passages that explicitly
+    describe a limitation together with the query's state, failure, or example
+    terms (for example a static-versus-dynamical contrast and its illustration).
+    """
+
+    if max_results <= 0 or not is_limitation_question(question):
+        return []
+    text_list = [str(text or "") for text in texts]
+    metadata_list = list(metadatas or [])
+    query_terms = _limitation_query_terms(question)
+    allowed = (
+        {int(index) for index in allowed_indices if int(index) >= 0}
+        if allowed_indices is not None
+        else None
+    )
+    rows: list[tuple[int, int]] = []
+    for index, text in enumerate(text_list):
+        if allowed is not None and index not in allowed:
+            continue
+        metadata = metadata_list[index] if index < len(metadata_list) else {}
+        if isinstance(metadata, dict) and metadata.get("type") in {"figure", "image", "table"}:
+            continue
+        header = str(metadata.get("headers", "")) if isinstance(metadata, dict) else ""
+        if re.search(r"references?|bibliography|参考文献", header, re.IGNORECASE):
+            continue
+        evidence_hits = len(LIMITATION_EVIDENCE_RE.findall(text))
+        if not evidence_hits:
+            continue
+        normalized = normalize_for_match("\n".join((text, header)))
+        query_hits = sum(1 for term in query_terms if term in normalized)
+        if query_hits < 2:
+            continue
+        score = min(evidence_hits, 8) + query_hits * 6
         rows.append((score, index))
     rows.sort(key=lambda row: (-row[0], row[1]))
     return [index for _score, index in rows[:max_results]]
@@ -704,7 +833,11 @@ def build_evidence_ledger(
         _, context_index, _, line = row
         metadata = metadata_list[context_index] if context_index < len(metadata_list) else {}
         source = metadata.get("source") if isinstance(metadata, dict) else None
-        header = metadata.get("headers") if isinstance(metadata, dict) else None
+        header = (
+            metadata.get("headers") or metadata.get("section_context")
+            if isinstance(metadata, dict)
+            else None
+        )
         section = str(header).split(">")[-1].strip() if header else ""
         suffix = f"，{source}" if source else ""
         if section:
@@ -1802,11 +1935,6 @@ def extract_query_entities(question: str) -> list[str]:
             continue
         candidates.append(entity)
     return candidates
-
-
-def _table_row_label(row: str) -> str:
-    cells = _split_markdown_row(row)
-    return cells[0] if cells else row
 
 
 def _row_entity_label(row: str, target: str) -> str | None:

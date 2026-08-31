@@ -32,6 +32,8 @@ class ReviewAnswersTests(unittest.TestCase):
         template = build_review_template(self.cases, self.answers, require_all=True)
         self.assertEqual(len(template), 2)
         self.assertEqual(template[0]["answer_fact_status"], "full")
+        self.assertFalse(template[0]["answer_refusal_detected"])
+        self.assertEqual(template[0]["answer_risk_flags"], [])
         self.assertEqual(template[0]["judgment"], "")
         self.assertEqual(template[0]["table_number"], "")
 

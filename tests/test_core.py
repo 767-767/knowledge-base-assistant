@@ -19,6 +19,8 @@ from sci_rag_core import (
     figure_reference_from_question,
     is_comparative_table_question,
     is_formula_question,
+    is_limitation_question,
+    limitation_evidence_indices,
     is_table_question,
     normalize_for_match,
     rerank_table_first,
@@ -80,6 +82,8 @@ class CoreTests(unittest.TestCase):
     def test_generation_prompt_prevents_contradictory_refusal(self):
         self.assertIn("不得在已经给出具体表格数值后", app.SCIENTIFIC_SYSTEM_PROMPT)
         self.assertIn("逐一检查全部参考片段", app.SCIENTIFIC_SYSTEM_PROMPT)
+        self.assertIn("限制问题要区分限制本身与示例现象", app.SCIENTIFIC_SYSTEM_PROMPT)
+        self.assertIn("不能用“训练数据限制”等参考片段未出现的机制替代", app.SCIENTIFIC_SYSTEM_PROMPT)
 
     def test_generation_prompt_labels_table_number_from_metadata(self):
         class Vector(list):
@@ -176,13 +180,115 @@ class CoreTests(unittest.TestCase):
             [2],
         )
 
-    def test_formula_question_gate_ignores_non_formula_pde_and_architecture_questions(self):
+    def test_limitation_evidence_candidates_preserve_mechanism_and_example(self):
+        question = "AlphaFold 3 对分子动力学状态的建模有什么限制，cereblon 示例展示了什么？"
+        texts = [
+            "The method improves average accuracy on the benchmark.",
+            "A key limitation is that models predict static structures as seen in the PDB, "
+            "not the dynamical behaviour of biomolecular systems in solution.",
+            "Conformation coverage is limited. Ground-truth cereblon is open in apo and "
+            "closed in holo conformations; predictions of both are closed.",
+        ]
+        metas = [{"type": "text"}] * len(texts)
+        self.assertTrue(is_limitation_question(question))
+        selected = limitation_evidence_indices(question, texts, metas)
+        self.assertIn(1, selected)
+        self.assertIn(2, selected)
+        self.assertEqual(
+            limitation_evidence_indices(question, texts, metas, allowed_indices=[0]),
+            [],
+        )
+        self.assertFalse(is_limitation_question("AlphaFold 3 的准确率是多少？"))
+        self.assertFalse(
+            is_limitation_question("MgNO 的限制和延拓操作如何改变网格，论文区分哪两种循环？")
+        )
+
+    def test_limitation_evidence_handles_singular_failure_mode(self):
+        question = "论文指出 AF3 的两类主要立体化学失败模式是什么？"
+        texts = [
+            "The second class is a failure mode; chirality violations remain at 4.4%.",
+            "A generic training detail without a failure marker.",
+        ]
+        metas = [{"type": "text"}, {"type": "text"}]
+        self.assertEqual(limitation_evidence_indices(question, texts, metas), [0])
+
+    def test_limitation_evidence_is_promoted_into_application_context(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        records = [
+            ("generic", "The method improves benchmark accuracy.", {"source": "paper.pdf", "type": "text"}),
+            (
+                "mechanism",
+                "A key limitation is predicting static structures as seen in the PDB, not dynamical behaviour in solution.",
+                {"source": "paper.pdf", "type": "text"},
+            ),
+            (
+                "example",
+                "Cereblon is open in apo and closed in holo conformations; both predictions are closed.",
+                {"source": "paper.pdf", "type": "text"},
+            ),
+        ]
+
+        class Collection:
+            def count(self):
+                return len(records)
+
+            def query(self, **_kwargs):
+                return {
+                    "ids": [[records[0][0]]],
+                    "documents": [[records[0][1]]],
+                    "metadatas": [[records[0][2]]],
+                }
+
+            def get(self, **_kwargs):
+                return {
+                    "ids": [row[0] for row in records],
+                    "documents": [row[1] for row in records],
+                    "metadatas": [row[2] for row in records],
+                }
+
+        class Client:
+            def __init__(self):
+                self.chat = self
+                self.completions = self
+                self.prompt = ""
+
+            def create(self, **kwargs):
+                self.prompt = kwargs["messages"][1]["content"]
+                return type(
+                    "Response",
+                    (),
+                    {"choices": [type("Choice", (), {"message": type("Message", (), {"content": "ok"})()})()]},
+                )()
+
+        client = Client()
+        runtime = app.Runtime(
+            app.RuntimeConfig(retrieval_k=1, context_k=3),
+            client,
+            Embedding(),
+            Collection(),
+        )
+        result = app.query_knowledge(
+            "AlphaFold 3 对分子动力学状态的建模有什么限制，cereblon 示例展示了什么？",
+            runtime=runtime,
+        )
+        self.assertIn("static structures", result["contexts"][0])
+        self.assertTrue(result["context_metadatas"][0]["limitation_evidence"])
+        self.assertIn("[限制证据]", client.prompt)
+
+    def test_formula_question_gate_distinguishes_pde_definition_from_architecture_questions(self):
         self.assertTrue(
             is_formula_question(
                 "线性有限元离散后的椭圆 PDE 系统写成什么形式，卷积核尺寸是多少？"
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             is_formula_question(
                 "MgNO 讨论的二维椭圆 PDE 定义在哪个区域，并考虑哪些边界条件？"
             )
@@ -409,6 +515,102 @@ class CoreTests(unittest.TestCase):
         self.assertIn("ADMETLab", result["contexts"][1])
         self.assertNotIn("Unrelated introduction", result["contexts"])
         self.assertIn("ADMETLab", client.prompt)
+
+    def test_composite_section_expansion_keeps_headerless_text_continuations(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        section = "H3: **4.4 Supervised fine-tuning** > H4: **4.4.1 Explicit Reasoning Dataset**"
+        records = [
+            ("overview", "Dataset overview.", {"source": "paper.pdf", "headers": section, "type": "text", "chunk_index": 53}),
+            ("table", "|Indicator|Target|\n|---|---|\n|DILI|0.8|", {"source": "paper.pdf", "type": "table", "chunk_index": 54}),
+            ("table-2", "|Indicator|Reward|\n|---|---|\n|HLM|Relative|", {"source": "paper.pdf", "type": "table", "chunk_index": 55}),
+            ("bridge", "The pipeline works backward from verified outcomes.", {"source": "paper.pdf", "type": "text", "chunk_index": 56}),
+            ("candidate", "DeepSeek-R1 proposes candidates; ADMETLab evaluates them; similarity > 0.6.", {"source": "paper.pdf", "type": "text", "chunk_index": 57}),
+            ("threshold", "Fingerprint similarity must be greater than 0.6.", {"source": "paper.pdf", "type": "text", "chunk_index": 58}),
+            ("next", "#### **4.4.2 Dataset Statistics**", {"source": "paper.pdf", "headers": "H4: **4.4.2 Dataset Statistics**", "type": "text", "chunk_index": 59}),
+            ("other", "Unrelated introduction.", {"source": "paper.pdf", "headers": "H1: Introduction", "type": "text", "chunk_index": 1}),
+            ("previous-heading", "#### **4.3 Previous Section**", {"source": "paper.pdf", "headers": "H4: **4.3 Previous Section**", "type": "text", "chunk_index": 50}),
+            ("previous-continuation", "Previous section continuation.", {"source": "paper.pdf", "type": "text", "chunk_index": 51}),
+            ("previous-continuation-2", "More previous section content.", {"source": "paper.pdf", "type": "text", "chunk_index": 52}),
+        ]
+
+        class Collection:
+            def count(self):
+                return len(records)
+
+            def query(self, **_kwargs):
+                return {
+                    "ids": [["overview", "other"]],
+                    "documents": [["Dataset overview.", "Unrelated introduction."]],
+                    "metadatas": [[records[0][2], records[-1][2]]],
+                }
+
+            def get(self, **_kwargs):
+                return {
+                    "ids": [row[0] for row in records],
+                    "documents": [row[1] for row in records],
+                    "metadatas": [row[2] for row in records],
+                }
+
+        class Client:
+            def __init__(self):
+                self.chat = self
+                self.completions = self
+
+            def create(self, **_kwargs):
+                return type(
+                    "Response",
+                    (),
+                    {
+                        "choices": [
+                            type(
+                                "Choice",
+                                (),
+                                {
+                                    "message": type(
+                                        "Message",
+                                        (),
+                                        {"content": "数据集包含 4,855 个样本。"},
+                                    )()
+                                },
+                            )()
+                        ]
+                    },
+                )()
+
+        runtime = app.Runtime(
+            app.RuntimeConfig(retrieval_k=2, context_k=6),
+            Client(),
+            Embedding(),
+            Collection(),
+        )
+        result = app.query_knowledge(
+            "显式推理数据集包含多少个样本？标注管道如何构建？",
+            runtime=runtime,
+        )
+        joined = "\n".join(result["contexts"])
+        self.assertIn("ADMETLab", joined)
+        self.assertIn("0.6", joined)
+        self.assertNotIn("Previous section", joined)
+        self.assertIn("ADMETLab", result["contexts"][2])
+        self.assertIn("0.6", result["contexts"][3])
+        self.assertIn("【补充原文核对项】", result["answer"])
+        self.assertIn("ADMETLab", result["answer"])
+        self.assertIn("0.6", result["answer"])
+        self.assertEqual(
+            result["context_metadatas"][2]["section_context"],
+            section,
+        )
+        self.assertEqual(
+            result["context_metadatas"][3]["section_context"],
+            section,
+        )
 
     def test_composite_section_expansion_skips_multi_source_collection(self):
         class Vector(list):
@@ -819,6 +1021,77 @@ class RuntimeContractTests(unittest.TestCase):
             config = app.RuntimeConfig.from_env()
         self.assertFalse(config.formula_evidence)
 
+    def test_runtime_config_formula_evidence_auto_defaults_on_and_is_disableable(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config = app.RuntimeConfig.from_env()
+        self.assertTrue(config.formula_evidence_auto)
+        with patch.dict(
+            os.environ,
+            {"SCI_RAG_FORMULA_EVIDENCE_AUTO": "0"},
+            clear=True,
+        ):
+            config = app.RuntimeConfig.from_env()
+        self.assertFalse(config.formula_evidence_auto)
+
+    def test_formula_evidence_enabled_combines_manual_and_narrow_auto_switches(self):
+        question = "MgNO 多重网格平滑迭代开始时如何初始化状态，更新时使用什么量？"
+        ordinary = "DrugR 的显式推理数据集包含多少个样本？"
+        self.assertTrue(
+            app.formula_evidence_enabled(
+                question, app.RuntimeConfig(formula_evidence_auto=True)
+            )
+        )
+        self.assertFalse(
+            app.formula_evidence_enabled(
+                ordinary, app.RuntimeConfig(formula_evidence_auto=True)
+            )
+        )
+        self.assertFalse(
+            app.formula_evidence_enabled(
+                question, app.RuntimeConfig(formula_evidence_auto=False)
+            )
+        )
+        self.assertTrue(
+            app.formula_evidence_enabled(
+                ordinary, app.RuntimeConfig(formula_evidence=True, formula_evidence_auto=False)
+            )
+        )
+
+    def test_formula_evidence_auto_only_activates_explicit_formula_intent(self):
+        formula_question = "MgNO 多重网格平滑迭代开始时如何初始化状态，更新时使用什么量？"
+        domain_question = "MgNO 讨论的二维椭圆 PDE 定义在哪个区域，并考虑哪些边界条件？"
+        plain_question = "MgNO 论文的主要贡献是什么？"
+        auto = app.RuntimeConfig(formula_evidence_auto=True)
+        disabled = app.RuntimeConfig(formula_evidence_auto=False)
+        self.assertTrue(
+            auto.formula_evidence_auto and is_formula_question(formula_question)
+        )
+        self.assertFalse(
+            auto.formula_evidence_auto and is_formula_question(plain_question)
+        )
+        self.assertTrue(
+            auto.formula_evidence_auto and is_formula_question(domain_question)
+        )
+        self.assertFalse(
+            disabled.formula_evidence_auto and is_formula_question(formula_question)
+        )
+
+    def test_reinforcement_learning_section_alias_prefers_specific_rl_heading(self):
+        question = (
+            "DrugR 的强化学习阶段如何解决多目标训练中的目标主导（objective domination）"
+            "与目标饥饿（starvation）问题？"
+        )
+        terms = app._section_query_terms(question)
+        rl_score = app._header_match_score(
+            "H3: **4.5 Self-balanced Multi-granular Reinforcement Learning**",
+            terms,
+        )
+        generic_score = app._header_match_score(
+            "H3: **4.7 Training Settings**",
+            terms,
+        )
+        self.assertGreater(rl_score, generic_score)
+
     def test_explicit_figure_query_promotes_exact_spatial_evidence(self):
         class Vector(list):
             def tolist(self):
@@ -1043,7 +1316,7 @@ class RuntimeContractTests(unittest.TestCase):
         result = app.query_knowledge(
             "线性有限元离散后的椭圆 PDE 系统写成什么形式，卷积核尺寸是多少？",
             runtime=app.Runtime(
-                app.RuntimeConfig(formula_evidence=True, retrieval_k=1, context_k=1),
+                app.RuntimeConfig(formula_evidence_auto=True, retrieval_k=1, context_k=1),
                 client,
                 Embedding(),
                 Collection(),

@@ -6,10 +6,11 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Sequence
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
+
+from sci_rag_core import file_sha256
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parent / "benchmark"
@@ -18,14 +19,6 @@ DEFAULT_MANIFEST = BENCHMARK_DIR / "manifest.json"
 
 class BenchmarkValidationError(ValueError):
     """Raised when a benchmark manifest or case reference is invalid."""
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -179,7 +172,7 @@ def load_benchmark(
             if path is None:
                 searched = "、".join(str(candidate) for candidate in candidates)
                 raise BenchmarkValidationError(f"找不到论文文件：{searched}")
-            actual = _sha256(path)
+            actual = file_sha256(path)
             if actual != document["sha256"]:
                 raise BenchmarkValidationError(
                     f"SHA-256 不一致：{document['filename']}，清单={document['sha256']}，实际={actual}"

@@ -268,8 +268,8 @@ SCI_RAG_RETRIEVAL_MODE=hybrid ./venv/bin/python app.py
 该模式复用本页同一 BM25/RRF 实现，并在融合后继续执行显式 `Table N` 过滤和确定性
 单元格定位；默认 `dense` 行为不变。设置 `SCI_RAG_RERANKER_MODEL` 和固定 revision 后
 才会额外加载本地 cross-encoder。当前基准已经完成一次 53 题 Dense/Hybrid+Rerank 答案
-采集和 RAGAS 辅助对照；结果与逐题人工复核见项目根目录
-`PHASE5_GENERATION_BENCHMARK_REPORT.md`。上述检索代理和 RAGAS 分数都不能直接解释为
+采集和 RAGAS 辅助对照；阶段结果与逐题复核结论统一记录在项目根目录
+`MODIFICATION_LOG.md`。上述检索代理和 RAGAS 分数都不能直接解释为
 答案正确率。
 
 ## Phase 6.2 实验性 Figure 坐标证据
