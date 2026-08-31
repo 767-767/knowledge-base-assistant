@@ -1,0 +1,53 @@
+{"case_id":"drugr-01","judgment":"correct","table_number":"correct","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"Table 1 行列和值均对应。"}
+{"case_id":"drugr-02","judgment":"correct","table_number":"correct","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"Table 2 DrugR* Overall Optimization Score 正确。"}
+{"case_id":"drugr-03","judgment":"correct","table_number":"correct","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"Table 2 DrugR* Target property F1 正确。"}
+{"case_id":"drugr-04","judgment":"correct","table_number":"correct","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"Table 1 LLaMA3-8B Fingerprint Similarity 正确。"}
+{"case_id":"drugr-05","judgment":"correct","table_number":"correct","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"Table 6 Unique SMILES 三项数值均给出。"}
+{"case_id":"drugr-06","judgment":"correct","table_number":"correct","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"Table 5 目标集合正确。"}
+{"case_id":"drugr-07","judgment":"correct","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"GRPO 全称及算法用途正确。"}
+{"case_id":"drugr-08","judgment":"correct","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"CPT/SFT/RL 三阶段目标基本完整；有少量扩展性表述。"}
+{"case_id":"drugr-09","judgment":"partial","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"4,855 与闭环管道核心正确，但遗漏 fingerprint>0.6、ADMETLab 等细节。"}
+{"case_id":"drugr-10","judgment":"correct","table_number":"correct","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"比较指标和值与 Table 1 一致。"}
+{"case_id":"drugr-11","judgment":"incorrect","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"错误地声称两级自平衡机制未提供。"}
+{"case_id":"scidqa-01","judgment":"correct","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"数据集规模正确。"}
+{"case_id":"scidqa-02","judgment":"correct","table_number":"correct","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"Table 1 两个长度值正确。"}
+{"case_id":"scidqa-03","judgment":"partial","table_number":"uncertain","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"给出 10.9%，但明确保留 Table 2 对应关系，未直接确认题设。"}
+{"case_id":"scidqa-04","judgment":"correct","table_number":"correct","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"Table 2 两个占比均正确。"}
+{"case_id":"scidqa-05","judgment":"partial","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"正确给出 2,937，但未给出 7,000 和 85%。"}
+{"case_id":"scidqa-06","judgment":"incorrect","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"错误地声称阈值和比例未提供。"}
+{"case_id":"scidqa-07","judgment":"incorrect","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"错误地声称四种配置未提供。"}
+{"case_id":"scidqa-08","judgment":"correct","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"同时给出块切分、BM25、top chunks，以及子章节 top-3 补充流程。"}
+{"case_id":"scidqa-09","judgment":"partial","table_number":"correct","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"给出 RAG 46.63，但遗漏 full-text 54.03。"}
+{"case_id":"scidqa-10","judgment":"partial","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"OpenReview 审稿人—作者讨论来源正确，但未回答第三人称改写。"}
+{"case_id":"table-llm-01","judgment":"incorrect","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"列出若干数据集但未回答 WikiTQ/SQA 预训练到 SciGen 微调的顺序。"}
+{"case_id":"table-llm-02","judgment":"incorrect","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"未给出 <R>/<C>/<CAP> 编码。"}
+{"case_id":"table-llm-03","judgment":"incorrect","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"错误地转答为 DrugR 指标，未回答模型架构。"}
+{"case_id":"table-llm-04","judgment":"incorrect","table_number":"correct","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"仅给出 0.10，遗漏 0.08 和 0.78，且行识别不清。"}
+{"case_id":"table-llm-05","judgment":"incorrect","table_number":"correct","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"回答 0.14/0.23/0.85，与金标准 0.15/0.24/0.85 不符。"}
+{"case_id":"table-llm-06","judgment":"incorrect","table_number":"correct","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"给出格式损坏的 0.240.30，未回答 2.30/0.38。"}
+{"case_id":"table-llm-07","judgment":"correct","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"55 篇及三个会议/年份正确。"}
+{"case_id":"table-llm-08","judgment":"correct","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"第一个问题及非对话表格原因均正确。"}
+{"case_id":"table-llm-09","judgment":"incorrect","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"错误地声称 SciGen 微调目标未提供。"}
+{"case_id":"table-llm-10","judgment":"partial","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"四类方向基本覆盖，但“图和公式/更丰富”表达不够精确。"}
+{"case_id":"mgno-01","judgment":"partial","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"正确列出三类边界条件，但遗漏 Ω=(0,1)^2。"}
+{"case_id":"mgno-02","judgment":"correct","table_number":"not_applicable","units":"not_applicable","formula":"correct","citation":"correct","notes":"A*u=f、3×3 核和边界条件说明完整。"}
+{"case_id":"mgno-03","judgment":"incorrect","table_number":"not_applicable","units":"not_applicable","formula":"incorrect","citation":"uncertain","notes":"错误地声称初始化和残差更新未提供。"}
+{"case_id":"mgno-04","judgment":"partial","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"说明粗细网格传递和 V-cycle，但遗漏 stride=2、反卷积并否认 Backslash-cycle。"}
+{"case_id":"mgno-05","judgment":"partial","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"正确说明 W_Mg 无激活，但错误地声称整体 GELU 未提供。"}
+{"case_id":"mgno-06","judgment":"correct","table_number":"not_applicable","units":"not_applicable","formula":"correct","citation":"correct","notes":"复杂度数量级正确。"}
+{"case_id":"mgno-07","judgment":"partial","table_number":"correct","units":"uncertain","formula":"not_applicable","citation":"correct","notes":"数值正确，但未说明表中统一的 ×10^-2 报告单位。"}
+{"case_id":"mgno-08","judgment":"partial","table_number":"correct","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"只回答 Pipe=0.24，遗漏 NS=10.82 和 NS2=1.63。"}
+{"case_id":"mgno-09","judgment":"incorrect","table_number":"uncertain","units":"uncertain","formula":"not_applicable","citation":"uncertain","notes":"错误地声称 Helmholtz 数值未提供。"}
+{"case_id":"mgno-10","judgment":"incorrect","table_number":"correct","units":"uncertain","formula":"not_applicable","citation":"uncertain","notes":"给出 2.10，未回答基线 1.63 与六层 1.47，且数值对应错误。"}
+{"case_id":"mgno-11","judgment":"incorrect","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"错误地声称随机种子重复次数未提供。"}
+{"case_id":"af3-01","judgment":"correct","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"实体类型列表正确。"}
+{"case_id":"af3-02","judgment":"incorrect","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"只说明 diffusion-based 架构，未给出 pairformer 替代 evoformer。"}
+{"case_id":"af3-03","judgment":"correct","table_number":"not_applicable","units":"not_applicable","formula":"correct","citation":"correct","notes":"48、128、384 及表示维度描述正确。"}
+{"case_id":"af3-04","judgment":"partial","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"描述扩散模块和坐标去噪，但未明确随机噪声起点、反复去噪和答案分布。"}
+{"case_id":"af3-05","judgment":"correct","table_number":"not_applicable","units":"correct","formula":"not_applicable","citation":"correct","notes":"428、2021 年后 PDB 和 RMSD<2 Å 均正确。"}
+{"case_id":"af3-06","judgment":"incorrect","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"把三个评估集样本数顺序答成 38、8、25，金标准为 25、38、8。"}
+{"case_id":"af3-07","judgment":"partial","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"交叉蒸馏核心正确，但夹带未经题目要求验证的扩展性断言。"}
+{"case_id":"af3-08","judgment":"correct","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"pLDDT、PAE、PDE 指标正确。"}
+{"case_id":"af3-09","judgment":"correct","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"correct","notes":"20,000 与 60,000 步的局部/界面学习速度正确。"}
+{"case_id":"af3-10","judgment":"incorrect","table_number":"not_applicable","units":"correct","formula":"not_applicable","citation":"uncertain","notes":"错误地声称两类立体化学失败模式未提供。"}
+{"case_id":"af3-11","judgment":"incorrect","table_number":"not_applicable","units":"not_applicable","formula":"not_applicable","citation":"uncertain","notes":"错误地声称静态/动力学限制和 cereblon 示例未提供。"}

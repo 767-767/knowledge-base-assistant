@@ -40,8 +40,15 @@ def _contains_surface(text: str, surface: str) -> bool:
 
     if not surface:
         return False
-    prefix = r"(?<!\w)" if surface[0].isalnum() else ""
-    suffix = r"(?!\w)" if surface[-1].isalnum() else ""
+    # ``\w`` treats CJK characters as word characters, so applying an ASCII
+    # word boundary to a one-character Chinese fact such as ``块`` would fail
+    # inside natural Chinese prose (``相关块并...``). Keep boundaries for
+    # ASCII/numeric surfaces to avoid partial matches such as ``42`` in ``420``;
+    # use substring matching for non-ASCII surfaces.
+    ascii_start = surface[0].isascii() and surface[0].isalnum()
+    ascii_end = surface[-1].isascii() and surface[-1].isalnum()
+    prefix = r"(?<!\w)" if ascii_start else ""
+    suffix = r"(?!\w)" if ascii_end else ""
     return re.search(prefix + re.escape(surface) + suffix, text) is not None
 
 

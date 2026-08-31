@@ -33,7 +33,21 @@ from evaluation.context_coverage import aggregate_fact_coverage, case_fact_cover
 def audit_answer(case: dict[str, Any], answer: str) -> dict[str, Any]:
     """Return one answer-level fact audit row for a benchmark case."""
 
-    coverage = case_fact_coverage(case, [answer])
+    answer_case = dict(case)
+    answer_required = [
+        str(fact)
+        for fact in case.get("answer_required_facts", case.get("required_facts")) or []
+    ]
+    answer_case["required_facts"] = answer_required
+    merged_aliases = {
+        str(fact): [str(value) for value in values]
+        for fact, values in (case.get("required_fact_aliases") or {}).items()
+    }
+    for fact, values in (case.get("answer_fact_aliases") or {}).items():
+        merged_aliases.setdefault(str(fact), []).extend(str(value) for value in values)
+        merged_aliases[str(fact)] = list(dict.fromkeys(merged_aliases[str(fact)]))
+    answer_case["required_fact_aliases"] = merged_aliases
+    coverage = case_fact_coverage(answer_case, [answer])
     return {
         "id": case.get("id", case.get("case_id")),
         "case_id": case.get("case_id", case.get("id")),
@@ -41,8 +55,13 @@ def audit_answer(case: dict[str, Any], answer: str) -> dict[str, Any]:
         "type": case.get("type", "unknown"),
         "question": case.get("question", ""),
         "answer": str(answer),
-        "required_facts": [str(fact) for fact in case.get("required_facts") or []],
-        "required_fact_aliases": case.get("required_fact_aliases") or {},
+        "required_facts": answer_required,
+        "retrieval_required_facts": [
+            str(fact) for fact in case.get("required_facts") or []
+        ],
+        "required_fact_aliases": merged_aliases,
+        "answer_required_facts": answer_required,
+        "answer_fact_aliases": case.get("answer_fact_aliases") or {},
         "answer_fact_coverage": coverage["required_fact_coverage"],
         "answer_fact_status": coverage["fact_coverage_status"],
         "matched_facts": coverage["matched_required_facts"],
@@ -68,22 +87,95 @@ def aggregate_answer_audit(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
 def _load_cases(path: str | Path) -> list[dict[str, Any]]:
     source = Path(path)
     if source.suffix.casefold() == ".jsonl":
-        cases = [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines() if line.strip()]
+        raw_cases = [
+            json.loads(line)
+            for line in source.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        # The multi-paper benchmark stores the 11 DrugR cases as pointers to
+        # the original test set. Resolve the complete manifest here so users
+        # can pass ``evaluation/benchmark/cases.jsonl`` directly to this CLI.
+        if any(
+            isinstance(case, dict)
+            and ("source_testset" in case or "source_case_id" in case)
+            for case in raw_cases
+        ):
+            manifest_path = source.parent / "manifest.json"
+            if not manifest_path.is_file():
+                raise ValueError(
+                    f"指针式 benchmark 用例缺少同目录 manifest.json：{source}"
+                )
+            try:
+                from evaluation.benchmark_loader import load_benchmark
+
+                cases = load_benchmark(manifest_path, verify_files=False)["cases"]
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"无法解析 benchmark 用例指针：{source}: {exc}") from exc
+        else:
+            cases = raw_cases
     else:
         payload = json.loads(source.read_text(encoding="utf-8"))
-        cases = payload.get("test_cases") if isinstance(payload, dict) else payload
-        if cases is None and isinstance(payload, dict):
-            cases = payload.get("cases")
+        if isinstance(payload, dict) and "documents" in payload and "cases_path" in payload:
+            try:
+                from evaluation.benchmark_loader import load_benchmark
+
+                cases = load_benchmark(source, verify_files=False)["cases"]
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"无法解析 benchmark manifest：{source}: {exc}") from exc
+        else:
+            cases = payload.get("test_cases") if isinstance(payload, dict) else payload
+            if cases is None and isinstance(payload, dict):
+                cases = payload.get("cases")
     if not isinstance(cases, list) or not cases:
         raise ValueError(f"测试集必须是非空 JSON 数组或含 test_cases/cases 的对象：{source}")
     normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for case in cases:
         if not isinstance(case, dict):
             raise ValueError(f"测试集中的用例必须是对象：{source}")
         case_id = case.get("case_id", case.get("id"))
         if case_id is None:
             raise ValueError(f"测试用例缺少 id/case_id：{source}")
-        normalized.append({**case, "case_id": str(case_id)})
+        normalized_id = str(case_id)
+        if normalized_id in seen:
+            raise ValueError(f"测试集存在重复 case id：{normalized_id}：{source}")
+        seen.add(normalized_id)
+        retrieval_facts = {
+            str(fact) for fact in case.get("required_facts") or []
+        }
+        answer_required = case.get("answer_required_facts")
+        if answer_required is not None:
+            if (
+                not isinstance(answer_required, list)
+                or not answer_required
+                or not all(isinstance(fact, str) and fact.strip() for fact in answer_required)
+            ):
+                raise ValueError(f"用例 {normalized_id} 的 answer_required_facts 必须是非空字符串数组：{source}")
+            unknown = sorted(set(answer_required) - retrieval_facts)
+            if unknown:
+                raise ValueError(
+                    f"用例 {normalized_id} 的 answer_required_facts 含未声明事实：{', '.join(unknown)}：{source}"
+                )
+        answer_aliases = case.get("answer_fact_aliases")
+        if answer_aliases is not None:
+            if not isinstance(answer_aliases, dict):
+                raise ValueError(f"用例 {normalized_id} 的 answer_fact_aliases 必须是对象：{source}")
+            allowed = set(answer_required or retrieval_facts)
+            unknown = sorted(set(answer_aliases) - allowed)
+            if unknown:
+                raise ValueError(
+                    f"用例 {normalized_id} 的 answer_fact_aliases 含未声明事实：{', '.join(unknown)}：{source}"
+                )
+            for fact, values in answer_aliases.items():
+                if (
+                    not isinstance(values, list)
+                    or not values
+                    or not all(isinstance(value, str) and value.strip() for value in values)
+                ):
+                    raise ValueError(
+                        f"用例 {normalized_id} 的事实 {fact} answer 别名必须是非空字符串数组：{source}"
+                    )
+        normalized.append({**case, "case_id": normalized_id})
     return normalized
 
 

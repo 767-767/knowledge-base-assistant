@@ -148,6 +148,78 @@ Hybrid 还包含弱词法信号保护：如果 CJK 问题在语料中没有命�
 这些不能靠 reranker 单独解决。因此本地 reranker 只应作为受控实验，同时必须保留显式
 表格保护，并另行处理切分/解析或查询扩展问题。该实验结果见下节。
 
+## 可选 document routing 对照
+
+可以在 BM25 或 Hybrid 基准命令中加入 `--document-routing`。路由器只使用每篇论文自身的
+文本和 metadata：当问题中的高信号 ASCII 标识符（例如 `DrugR`、`MgNO`、`SciDQA`）只
+出现在一个来源时，才把候选池限制到该来源；没有唯一标识符、或不同标识符指向不同来源时，
+自动回退全库。它不读取用例的目标 `document_id`，也不改变默认网页检索。
+
+在当前五篇论文/53 题上，BM25 routing 触发 39/53 题且无误路由，整体指标与 BM25 控制组
+相同。Hybrid+CE+等权 RRF routing 的 @10 结果为 fact macro/micro `0.805/0.796`、
+完整覆盖 `0.717`、页级命中 `0.929`、Table N 命中 `0.944`；相对当前控制组
+`0.794/0.782/0.717/0.905/0.944`，只改善事实/页级代理，仍有个别题目回退或退化。
+因此 document routing 目前保留为 opt-in benchmark 控制，不切换网页默认，也不能替代
+更严格的查询意图、页码和答案正确性验证。
+
+## 可选复合问题子查询对照
+
+对于同时询问多个事实的长问题，可以加入 `--query-decomposition` 做离线对照：原问题
+始终保留，并按中文/英文标点及保守的“与/以及/和”规则生成最多三个子查询；各子查询
+在原始 document route 范围内检索，再用 RRF 融合。该过程不翻译问题、不读取
+`required_facts`，也不把金标准注入查询。默认不开启，因为子查询会增加向量查询次数，
+且可能改变页级命中或把不同子句的证据混合。
+
+示例：
+
+```bash
+HF_HUB_OFFLINE=1 ./venv/bin/python evaluation/benchmark_retrieval.py \
+  --papers-dir /Users/qinleqi/Desktop \
+  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
+  --retriever hybrid --document-routing --query-decomposition \
+  --top-k 1,3,5,10 --json-out /tmp/sci_rag_query_decomposition.json
+```
+
+只有在与关闭该开关的同条件报告并列比较、且 `@10` 事实覆盖、目标论文/页级命中和
+Table N 命中均不下降时，才可进入网页 A/B；该代理仍不等于答案正确率或泛化能力。
+
+Phase 6 修复了“只有句末问号不同也生成第二个查询”的问题；没有发生真实子句拆分时，
+现在只运行原问题。需要比较网页实际结构化表格路径时，可增加
+`--structured-table-guard`。该开关会在 normal retrieval/rerank 之后扫描 canonical table
+chunks，并在已存在 document route 时保持同一来源范围；它必须与关闭开关的 raw retrieval
+报告分开解释。
+
+同条件的五论文 @10 对照达到 fact macro/micro/full `0.881/0.871/0.811`、目标论文/页级/
+Table N 命中 `1.000/0.929/1.000`，相对旧查询分解只有 `scidqa-09` 和
+`table-llm-10` 从 zero 变为 full，没有逐题退化。完整命令可在上例基础上增加：
+
+```bash
+--reranker-model BAAI/bge-reranker-base \
+--reranker-revision 2cfc18c9415c912f9d8155881c133215df768a70 \
+--reranker-fusion rrf --document-routing --query-decomposition \
+--structured-table-guard
+```
+
+`--adjacent-context` 仅保留为负对照：它把同来源同页邻块插入前两个锚点之后，虽修复 4 题，
+却使 3 道完整题退化并把页级命中降到 `0.881`，因此没有接入网页。下一步若继续处理 PDF
+段落边界，应测试不占用额外 top-k 槽位的 parent/window context enrichment，而不是直接
+前置邻块。
+
+`--parent-window` 是不挤占 top-k 槽位的后续对照：只在前两个文本锚点的有效 context 内拼接
+同来源、同页相邻正文，并记录 `window_chunk_indices` 与字符开销；表格、参考文献、跨页/
+跨来源和已经入选的邻块均跳过。它与 retrieval ranking 指标的区别是，事实覆盖按生成器实际
+可见的扩展文字计算，而 `top_results` 仍保存原锚点排名。
+
+固定五论文 @10 从 Phase 6.0 的 `0.881/0.871/0.811` 提高到
+`0.936/0.932/0.887`（macro/micro/full），来源页与 Table N 保持 `0.929/1.000`；
+四题改善、零题退化。53 题共增加 62,032 个字符，因此进入默认配置前仍必须做端到端生成和
+延迟 A/B，不能把该词面覆盖提升解释为答案正确率。
+
+答案采集完成后，可直接把本文件的 `cases.jsonl` 作为
+`evaluation/answer_audit.py` 的 `--testset`；审计器会通过同目录 `manifest.json` 展开
+其中的指针式 DrugR 用例，最终按完整 53 题计算答案事实覆盖。答案文件仍应放在仓库外，
+并由人工或网页采集产生。
+
 ## 本地 cross-encoder 重排结果
 
 使用已缓存且固定 revision 的 `BAAI/bge-reranker-base`，对 Hybrid top-50 候选逐题打分。
@@ -195,5 +267,14 @@ SCI_RAG_RETRIEVAL_MODE=hybrid ./venv/bin/python app.py
 
 该模式复用本页同一 BM25/RRF 实现，并在融合后继续执行显式 `Table N` 过滤和确定性
 单元格定位；默认 `dense` 行为不变。设置 `SCI_RAG_RERANKER_MODEL` 和固定 revision 后
-才会额外加载本地 cross-encoder。尚未在本基准上执行答案生成或 RAGAS，因此不能把上述
-检索代理解释为答案正确率。
+才会额外加载本地 cross-encoder。当前基准已经完成一次 53 题 Dense/Hybrid+Rerank 答案
+采集和 RAGAS 辅助对照；结果与逐题人工复核见项目根目录
+`PHASE5_GENERATION_BENCHMARK_REPORT.md`。上述检索代理和 RAGAS 分数都不能直接解释为
+答案正确率。
+
+## Phase 6.2 实验性 Figure 坐标证据
+
+`--spatial-figure-evidence` 会从 born-digital PDF 的文字层抽取 Figure caption 上方的
+短坐标文字，并只对显式 `Figure N`/`图N` 查询注入精确图号证据。普通问题仍排除这些
+图块，以免改变基线候选池。该开关不运行 OCR、不读取图片像素，也不能覆盖没有文字层的图；
+它是与网页 `SCI_RAG_SPATIAL_FIGURE_EVIDENCE=true` 对应的默认关闭对照。

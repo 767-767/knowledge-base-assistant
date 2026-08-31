@@ -14,13 +14,14 @@ import argparse
 import json
 import math
 import os
+from pathlib import Path
 import re
 import sys
 import time
 from datetime import datetime
 from typing import Any
 
-from evaluation.answer_audit import audit_answer
+from evaluation.answer_audit import _load_cases, audit_answer
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +37,14 @@ METRIC_LABELS = {
     "faithfulness": "Answer Faithfulness（答案忠实度）",
     "answer_relevancy": "Answer Relevance（答案相关性）",
 }
+# RAGAS 0.4.3 declares these columns for the three metrics used below. None
+# requires the ``reference``/ground-truth field; it is retained in reports
+# for comparison and for metrics added in the future.
+RAGAS_METRIC_INPUT_COLUMNS = {
+    "nv_context_relevance": ["user_input", "retrieved_contexts"],
+    "faithfulness": ["user_input", "response", "retrieved_contexts"],
+    "answer_relevancy": ["user_input", "response"],
+}
 LOCAL_METRIC_LABELS = {
     "gold_context_recall": "Gold context recall（规范上下文召回）",
     "gold_fact_coverage": "Gold fact coverage（确定性事实覆盖）",
@@ -43,6 +52,11 @@ LOCAL_METRIC_LABELS = {
 
 
 def load_testset(path: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if Path(path).suffix.casefold() == ".jsonl":
+        cases = _load_cases(path)
+        if not cases:
+            raise ValueError(f"测试集为空：{path}")
+        return {"paper": Path(path).stem, "title": "Sci-RAG JSONL benchmark"}, cases
     with open(path, encoding="utf-8") as handle:
         data = json.load(handle)
     cases = data.get("test_cases", [])
@@ -119,6 +133,13 @@ def run_pipeline(cases: list[dict[str, Any]], max_contexts: int, runtime: Any) -
             {
                 "case": case,
                 "answer": answer,
+                # ``query_knowledge(return_contexts=True)`` returns exactly
+                # the ordered contexts joined into the generation prompt.
+                # Preserve that full trace separately from the top-N slice
+                # sent to RAGAS so later audits can compare the two contracts.
+                "generation_contexts": all_contexts,
+                "generation_context_ids": all_ids,
+                "generation_context_metadatas": all_metas,
                 "contexts": contexts,
                 "context_ids": context_ids,
                 "context_metadatas": context_metas,
@@ -244,6 +265,7 @@ def build_report(
     ragas_version: str | None = None,
     judge_model: str = JUDGE_MODEL,
     embedding_model: str = EMBEDDING_MODEL_NAME,
+    generation_model: str | None = None,
 ) -> dict[str, Any]:
     metric_cols = [column for column in METRIC_LABELS if df is not None and column in df.columns]
     per_metric: dict[str, Any] = {}
@@ -272,16 +294,24 @@ def build_report(
         }
         results.append(
             {
-                "id": case.get("id", index),
+                # Multi-paper benchmark cases use ``case_id`` while the
+                # historical 11-question set uses numeric ``id``. Preserve
+                # either stable identifier in the report so preflight can
+                # join results back to the exact test-set rows.
+                "id": case.get("id", case.get("case_id", index)),
                 "type": case.get("type", "unknown"),
                 "question": case["question"],
                 "ground_truth": case["ground_truth"],
                 "answer": record["answer"],
                 "num_retrieved_contexts": record["num_retrieved"],
                 "num_contexts_evaluated": len(record["contexts"]),
+                "generation_contexts": record.get("generation_contexts", []),
+                "generation_context_ids": record.get("generation_context_ids", []),
+                "generation_context_metadatas": record.get("generation_context_metadatas", []),
                 "evaluated_contexts": record["contexts"],
                 "context_ids": record.get("context_ids", []),
                 "context_metadatas": record.get("context_metadatas", []),
+                "reference_contexts": case.get("contexts", []),
                 "gold_context_recall": context_score,
                 "gold_fact_coverage": fact_score,
                 "gold_fact_exact": fact_exact,
@@ -305,10 +335,12 @@ def build_report(
             "ragas_version": ragas_version,
             "judge_model": judge_model,
             "embedding_model": embedding_model,
+            "generation_model": generation_model,
             "num_test_cases": len(cases),
             "max_contexts_per_question": max_contexts,
             "elapsed_seconds": round(elapsed_total, 1),
             "metric_labels": {**METRIC_LABELS, **LOCAL_METRIC_LABELS},
+            "ragas_metric_input_columns": RAGAS_METRIC_INPUT_COLUMNS,
         },
         "summary": per_metric,
         "results": results,
@@ -325,7 +357,7 @@ def write_reports(report: dict[str, Any], json_path: str, md_path: str) -> None:
         "",
         f"- 论文：{metadata['paper_title']}（`{metadata['paper']}`）",
         f"- 生成时间：{metadata['generated_at']}",
-        f"- RAGAS 版本：{metadata['ragas_version']}；评判模型：{metadata['judge_model']}；Embedding：{metadata['embedding_model']}",
+        f"- RAGAS 版本：{metadata['ragas_version']}；评判模型：{metadata['judge_model']}；生成模型：{metadata.get('generation_model') or '未记录'}；Embedding：{metadata['embedding_model']}",
         f"- 测试题数：{metadata['num_test_cases']}；每题参与打分的检索上下文数：{metadata['max_contexts_per_question']}（重排序后 top-N）",
         f"- 总耗时：{metadata['elapsed_seconds']} 秒",
         "",
@@ -392,6 +424,7 @@ def main() -> None:
         ragas_version,
         runtime.config.deepseek_model,
         runtime.config.embedding_model,
+        runtime.config.deepseek_model,
     )
     write_reports(report, args.report_json, args.report_md)
     print("\n评估完成，报告已保存：", args.report_json, args.report_md)

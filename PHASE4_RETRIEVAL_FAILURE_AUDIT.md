@@ -151,6 +151,49 @@ candidate-k=80 没有提升完整覆盖或页级命中，只改善了少量事�
 P95 超过 5 秒。因此不提高默认 candidate-k，保留 50 作为网页控制组；80 仅作为后续 document
 routing 或特定题型的 opt-in 实验。
 
+### Phase 4.2 provenance 诊断
+
+required-fact 的词面命中本身不能证明证据来自正确论文或正确页码。现在每个离线 JSON 报告的
+`overall_case_details[*].provenance[<k>]` 会逐事实保存命中块的位置：`benchmark_document_id`、
+`source`、`page`、`headers`、`chunk_type`，并标记以下风险：
+
+- `wrong_document`：命中块明确属于另一篇论文；
+- `outside_gold_page`：命中块不在该用例人工标注的 `source_pages`；
+- `reference_section`：命中块的 heading 属于 References/Bibliography/参考文献；
+- `figure_or_caption`：块被解析为图或图注；
+- `missing_page`：用例要求页码，但块没有合法页码 metadata。
+
+这些字段是审计信息，不参与排序、不删除上下文，也不会把缺失 metadata 默认为可信。聚合字段同时
+统计 `wrong_document_only_fact_count`、`outside_gold_page_only_fact_count` 和参考文献命中，便于
+把“目标论文内的页码偏差”和“仅在错误论文中出现”分开。一次不带外部模型的 BM25 smoke run
+（`/private/tmp/phase42_provenance_bm25.json`）在 @10 发现 88 个事实词面命中，其中 6 个只落在
+标注页之外、2 个出现在 References heading；该结果用于验证诊断字段，不作为新的检索质量分数。
+在同一 alias 修正后的 Hybrid+CE+等权 RRF 控制组上，@10 共有 115 个事实词面命中，6 个只落在
+标注页之外，未出现“仅在错误论文中命中”或 References-only 的事实；完整诊断保存在
+`/private/tmp/phase42_provenance_hybrid_ce_rrf.json`。这说明当前失败主要仍是候选召回/融合和页级
+证据定位问题，而不是本次 provenance 代码改变了检索排名。
+
+### Phase 4.3 document routing opt-in 对照
+
+在 provenance 之后增加了保守的、离线可选 document routing：只从各来源自身的文本/metadata
+建立 source-level 术语集合；只有问题中的高信号 ASCII 标识符（长度至少 4，或包含数字/特殊
+标记）只属于一个来源时才路由，否则回退全库。路由器不读取 benchmark 的目标 `document_id`，
+也不参与默认网页路径。
+
+在五篇论文、53 道问题上，BM25 routing 触发 `39/53` 题且全部路由正确，指标与 BM25 全库
+控制组相同。Hybrid+CE+等权 RRF routing 触发同样的 `39/53` 题，@10 为：
+
+| 设置 | fact macro | fact micro | 完整覆盖 | 页级命中 | Table N 命中 |
+|---|---:|---:|---:|---:|---:|
+| 当前控制组 | 0.794 | 0.782 | 0.717 | 0.905 | 0.944 |
+| routing opt-in | 0.805 | 0.796 | 0.717 | 0.929 | 0.944 |
+
+虽然聚合代理不下降，但个别题目出现双向变化：`mgno-11`、`scidqa-07`、`table-llm-09`
+得到补回，`af3-08`、`scidqa-09` 等题出现事实覆盖回退。这说明“来源路由正确”不等于“块级
+证据完整”，当前不满足把 routing 设为网页默认的严格提升条件；它暂保留为后续 document
+profile、查询意图和 page-aware 召回实验的控制开关。完整输出为
+`/private/tmp/phase42_document_routing_hybrid_ce_rrf.json`。
+
 ### 1. Gold matcher 有独立缺口
 
 至少 5 个案例包含现行解析文本中确实存在、但当前 required-fact 表面形式没有覆盖的事实：
@@ -187,8 +230,8 @@ routing 或特定题型的 opt-in 实验。
 ### 4. 词法覆盖存在来源假阳性
 
 AlphaFold 3 的 `去噪` 可在参考文献标题中出现，而真正回答 inference 过程的 p3 段落没有进入候选。这说明
-required-fact coverage 只能作为诊断代理；下一阶段需要把 section/source/page 约束纳入人工复核或更严格的
-自动检查。
+required-fact coverage 只能作为诊断代理；Phase 4.2 已把 section/source/page 位置和风险标记写入离线
+报告，但这些标记仍需人工复核或更严格的自动门槛，不能自动改写检索排名。
 
 ## 后续验收门槛
 
@@ -198,7 +241,8 @@ required-fact coverage 只能作为诊断代理；下一阶段需要把 section/
    matcher 变化，不是检索变化。
 2. 为每个 failure 保存 candidate-50、CE-50、final-10 的 chunk ID、页码、section/type，避免只看最终
    `missing_facts`。
-3. 对来源参考文献、图注和正文重复词建立最小的 provenance 检查，至少在人工复核表中隔离假阳性。
+3. 已完成最小 provenance 检查：逐事实保存 source/page/section/type，并隔离跨论文、页码偏差、参考文献、
+   图注和缺失页码风险；该字段只用于审计，不改变检索排名。
 
 ### P1：受控比较融合和候选池
 
@@ -206,8 +250,8 @@ required-fact coverage 只能作为诊断代理；下一阶段需要把 section/
    严格优于当前 RRF”的门槛，不把 CE-only 或 weighted RRF 设为默认。
 2. candidate-k=80 的同条件对照已完成：完整覆盖不变而 P95 达到 `5.231s`，不满足默认切换条件；
    保留 50，并继续记录 CPU 延迟和峰值内存。
-3. 对单来源多事实方法题加入同小节邻接块扩展，但继续保留 Table N 的跨表保护；多来源集合必须先
-   完成 document routing，不能直接开启扩展。
+3. 对单来源多事实方法题加入同小节邻接块扩展，但继续保留 Table N 的跨表保护；多来源集合已有
+   保守 document routing 对照，但由于存在题目级回退，仍不能把 routing 或扩展切换为网页默认。
 
 最低回归门槛（相对 alias 修正后的当前结果不得下降）：
 

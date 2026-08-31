@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import html
 import os
 from pathlib import Path
 import random
@@ -19,16 +20,28 @@ from typing import Any
 from sci_rag_core import (
     Chunk,
     build_evidence_ledger,
+    extract_spatial_figure_chunks,
+    formula_evidence_indices,
     find_table_cell_in_chunks,
+    figure_reference_from_question,
     is_table_question,
+    matching_figure_indices,
     matching_table_indices,
     rerank_table_first,
     split_to_chunks,
     supplement_answer_with_evidence,
     table_number_from_question,
+    validate_answer_against_evidence,
 )
 from sci_rag_reranking import CrossEncoderReranker, reranker_document_text
-from sci_rag_retrieval import BM25Index, RankedItem, reciprocal_rank_fusion, tokenize
+from sci_rag_retrieval import (
+    BM25Index,
+    DocumentRouter,
+    RankedItem,
+    query_variants,
+    reciprocal_rank_fusion,
+    tokenize,
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +55,12 @@ class RuntimeConfig:
     retrieval_k: int = 12
     context_k: int = 10
     retrieval_mode: str = "dense"
+    document_routing: bool = False
+    query_decomposition: bool = False
+    parent_window: bool = False
+    spatial_figure_evidence: bool = False
+    formula_evidence: bool = False
+    answer_validation: bool = False
     hybrid_candidate_k: int = 50
     hybrid_rrf_k: int = 60
     reranker_model: str | None = None
@@ -67,6 +86,30 @@ class RuntimeConfig:
         retrieval_mode = os.getenv("SCI_RAG_RETRIEVAL_MODE", cls.retrieval_mode).strip().casefold()
         if retrieval_mode not in {"dense", "hybrid"}:
             retrieval_mode = cls.retrieval_mode
+        document_routing = os.getenv("SCI_RAG_DOCUMENT_ROUTING", "0").strip().casefold() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        query_decomposition = os.getenv(
+            "SCI_RAG_QUERY_DECOMPOSITION", "0"
+        ).strip().casefold() in {"1", "true", "yes", "on"}
+        parent_window = os.getenv("SCI_RAG_PARENT_WINDOW", "0").strip().casefold() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        spatial_figure_evidence = os.getenv(
+            "SCI_RAG_SPATIAL_FIGURE_EVIDENCE", "0"
+        ).strip().casefold() in {"1", "true", "yes", "on"}
+        formula_evidence = os.getenv(
+            "SCI_RAG_FORMULA_EVIDENCE", "0"
+        ).strip().casefold() in {"1", "true", "yes", "on"}
+        answer_validation = os.getenv(
+            "SCI_RAG_ANSWER_VALIDATION", "0"
+        ).strip().casefold() in {"1", "true", "yes", "on"}
         return cls(
             embedding_model=os.getenv("SCI_RAG_EMBEDDING_MODEL", cls.embedding_model),
             db_path=os.getenv("SCI_RAG_DB_PATH", cls.db_path),
@@ -75,6 +118,12 @@ class RuntimeConfig:
             retrieval_k=positive_int("SCI_RAG_RETRIEVAL_K", cls.retrieval_k),
             context_k=positive_int("SCI_RAG_CONTEXT_K", cls.context_k),
             retrieval_mode=retrieval_mode,
+            document_routing=document_routing,
+            query_decomposition=query_decomposition,
+            parent_window=parent_window,
+            spatial_figure_evidence=spatial_figure_evidence,
+            formula_evidence=formula_evidence,
+            answer_validation=answer_validation,
             hybrid_candidate_k=positive_int(
                 "SCI_RAG_HYBRID_CANDIDATE_K", cls.hybrid_candidate_k
             ),
@@ -99,13 +148,14 @@ class RuntimeConfig:
 
 @dataclass
 class LexicalSnapshot:
-    """Cached collection text used only when hybrid retrieval is enabled."""
+    """Cached collection text used by optional lexical and source routing."""
 
     collection_count: int
     ids: list[str]
     texts: list[str]
     metadatas: list[dict[str, Any]]
     index: BM25Index
+    router: DocumentRouter | None = None
 
 
 class Runtime:
@@ -199,8 +249,16 @@ def _docx_to_markdown(file_path: str) -> str:
     return "\n\n".join(parts)
 
 
-def load_and_split_document(file_path: str) -> list[Chunk]:
-    """Load PDF/TXT/DOCX and return canonical, page-aware chunks."""
+def load_and_split_document(
+    file_path: str,
+    include_spatial_figures: bool = False,
+) -> list[Chunk]:
+    """Load PDF/TXT/DOCX and return canonical, page-aware chunks.
+
+    Spatial figure evidence is experimental and opt-in. It reads coordinates
+    already present in a born-digital PDF text layer; it neither persists nor
+    interprets image pixels.
+    """
 
     source = os.path.basename(file_path)
     suffix = Path(file_path).suffix.lower()
@@ -237,6 +295,17 @@ def load_and_split_document(file_path: str) -> list[Chunk]:
                         )
             else:
                 documents.append(Chunk(str(page_chunks), {"source": source}))
+            if include_spatial_figures:
+                for page_number, page in enumerate(document, start=1):
+                    documents.extend(
+                        extract_spatial_figure_chunks(
+                            page.get_text("blocks", sort=True),
+                            source,
+                            page_number,
+                            float(page.rect.width),
+                            float(page.rect.height),
+                        )
+                    )
         finally:
             document.close()
     elif suffix == ".txt":
@@ -267,7 +336,10 @@ def _sha256(file_path: str) -> str:
 
 def add_document_to_db(file_path: str, runtime: Runtime | None = None) -> str:
     runtime = runtime or get_runtime()
-    chunks = load_and_split_document(file_path)
+    chunks = load_and_split_document(
+        file_path,
+        include_spatial_figures=runtime.config.spatial_figure_evidence,
+    )
     document_hash = _sha256(file_path)
     for index, chunk in enumerate(chunks):
         text = chunk.page_content
@@ -357,8 +429,79 @@ def _lexical_search_text(text: str, metadata: dict[str, Any]) -> str:
     )
 
 
+_TABLE_UNIT_HINT_RE = re.compile(
+    r"(?:[×x]\s*10|%|Å|kcal(?:\s*/\s*mol)?|s\s*/\s*iter|\bunits?\b)",
+    re.IGNORECASE,
+)
+
+
+def _table_caption_unit_note(metadata: dict[str, Any]) -> str:
+    """Return a concise table-note suffix when the caption declares units.
+
+    Deterministic table-cell lookup otherwise returns only the row/column value.
+    Captions are the authoritative place where some scientific tables declare a
+    shared scale (for example ``×10^-2``), so preserve that note without
+    inventing or converting a value.  Captions without an explicit unit hint
+    are intentionally omitted to keep existing concise answers unchanged.
+    """
+
+    caption = str(metadata.get("table_caption", "") or "")
+    if not caption:
+        return ""
+    plain = html.unescape(re.sub(r"<[^>]*>", " ", caption))
+    plain = re.sub(r"\s+", " ", plain).strip()
+    if not plain or not _TABLE_UNIT_HINT_RE.search(plain):
+        return ""
+    body = re.sub(
+        r"^(?:extended\s+data\s+)?table\s*\d+\s*[:.]?\s*",
+        "",
+        plain,
+        flags=re.IGNORECASE,
+    ).strip()
+    return f"（表注：{body or plain}）"
+
+
+def _fuse_dense_results(
+    results: list[dict[str, Any]],
+    limit: int,
+    rrf_k: int,
+) -> dict[str, Any]:
+    """Fuse dense rankings produced for deterministic query variants."""
+
+    if not results:
+        return {"ids": [[]], "documents": [[]], "metadatas": [[]]}
+    id_lists = [
+        [str(value) for value in _flat_result_values(result, "ids")]
+        for result in results
+    ]
+    fused = reciprocal_rank_fusion(id_lists, rrf_k=rrf_k, limit=limit)
+    payloads: dict[str, tuple[str, dict[str, Any]]] = {}
+    for result in results:
+        ids = [str(value) for value in _flat_result_values(result, "ids")]
+        texts = _flat_result_values(result, "documents")
+        metas = _flat_result_values(result, "metadatas")
+        for index, doc_id in enumerate(ids):
+            if doc_id in payloads:
+                continue
+            metadata = metas[index] if index < len(metas) and isinstance(metas[index], dict) else {}
+            text = str(texts[index]) if index < len(texts) else ""
+            payloads[doc_id] = (text, dict(metadata))
+    ids: list[str] = []
+    texts: list[str] = []
+    metadatas: list[dict[str, Any]] = []
+    for item in fused:
+        doc_id = str(item.key)
+        payload = payloads.get(doc_id)
+        if payload is None:
+            continue
+        ids.append(doc_id)
+        texts.append(payload[0])
+        metadatas.append(payload[1])
+    return {"ids": [ids], "documents": [texts], "metadatas": [metadatas]}
+
+
 def _get_lexical_snapshot(runtime: Runtime) -> LexicalSnapshot:
-    """Build or reuse a BM25 snapshot of the current Chroma collection."""
+    """Build or reuse lexical indexes for the current Chroma collection."""
 
     collection_count = runtime.collection.count()
     cached = runtime._lexical_snapshot
@@ -378,12 +521,31 @@ def _get_lexical_snapshot(runtime: Runtime) -> LexicalSnapshot:
     search_documents = [
         _lexical_search_text(text, metadata) for text, metadata in zip(texts, metadatas)
     ]
+    source_profiles: dict[str, list[str]] = {}
+    for text, metadata in zip(texts, metadatas):
+        if (
+            runtime.config.spatial_figure_evidence
+            and metadata.get("type") == "figure"
+        ):
+            continue
+        source = str(metadata.get("source", "")).strip()
+        if source:
+            source_profiles.setdefault(source, []).append(
+                _lexical_search_text(text, metadata)
+            )
+    router = None
+    if len(source_profiles) >= 1:
+        router = DocumentRouter(
+            source_profiles.keys(),
+            ("\n".join(parts) for parts in source_profiles.values()),
+        )
     snapshot = LexicalSnapshot(
         collection_count=collection_count,
         ids=ids,
         texts=texts,
         metadatas=metadatas,
         index=BM25Index(search_documents),
+        router=router,
     )
     runtime._lexical_snapshot = snapshot
     return snapshot
@@ -394,6 +556,8 @@ def _hybrid_fused_result(
     dense: dict[str, Any],
     runtime: Runtime,
     candidate_k: int,
+    source_filter: str | None = None,
+    lexical_queries: list[str] | None = None,
 ) -> dict[str, Any]:
     """Fuse Chroma dense results with a cached lexical ranking using RRF."""
 
@@ -411,12 +575,43 @@ def _hybrid_fused_result(
     }
 
     snapshot = _get_lexical_snapshot(runtime)
-    lexical = (
-        snapshot.index.retrieve(question, candidate_k)
-        if snapshot.index.has_lexical_signal(question)
+    lexical_indices = None
+    if source_filter or runtime.config.spatial_figure_evidence:
+        lexical_indices = [
+            index
+            for index, metadata in enumerate(snapshot.metadatas)
+            if (
+                (not source_filter or str(metadata.get("source", "")) == source_filter)
+                and (
+                    not runtime.config.spatial_figure_evidence
+                    or metadata.get("type") != "figure"
+                )
+            )
+        ]
+    lexical_rankings: list[list[str]] = []
+    for lexical_query in lexical_queries or [question]:
+        if not snapshot.index.has_lexical_signal(lexical_query):
+            continue
+        lexical_rankings.append(
+            [
+                snapshot.ids[int(item.key)]
+                for item in snapshot.index.retrieve(
+                    lexical_query, candidate_k, indices=lexical_indices
+                )
+            ]
+        )
+    lexical_ids = (
+        [
+            str(item.key)
+            for item in reciprocal_rank_fusion(
+                lexical_rankings,
+                rrf_k=runtime.config.hybrid_rrf_k,
+                limit=candidate_k,
+            )
+        ]
+        if lexical_rankings
         else []
     )
-    lexical_ids = [snapshot.ids[int(item.key)] for item in lexical]
     snapshot_by_id = {
         doc_id: (snapshot.texts[index], snapshot.metadatas[index])
         for index, doc_id in enumerate(snapshot.ids)
@@ -481,7 +676,20 @@ def _cross_encoder_reranked_result(
 
 
 _COMPOSITE_FACT_CUE_RE = re.compile(
-    r"多少|哪些|如何|管道|步骤|阶段|以及|并且|同时|与|和|\b(?:what|which|how|and|pipeline|dataset)\b",
+    r"多少|哪些|如何|管道|步骤|阶段|以及|并且|同时|与|和|"
+    r"(?:[一二三四五六七八九十0-9]+种|多个|两种|若干).{0,20}(?:什么|哪些|分别)|"
+    r"\b(?:what|which|how|and|pipeline|dataset)\b",
+    re.IGNORECASE,
+)
+_LISTED_FACT_QUESTION_RE = re.compile(
+    r"(?:[一二三四五六七八九十0-9]+种|多个|两种|若干).{0,20}(?:什么|哪些|分别)",
+    re.IGNORECASE,
+)
+_REFERENCE_HEADER_RE = re.compile(
+    r"(?:references?|bibliography|参考文献)", re.IGNORECASE
+)
+_PICTURE_TEXT_MARKER_RE = re.compile(
+    r"<!--\s*(?:start|end) of picture text\s*-->|<img\b",
     re.IGNORECASE,
 )
 _SECTION_QUERY_ALIASES = {
@@ -490,17 +698,27 @@ _SECTION_QUERY_ALIASES = {
     "推理": ("reasoning",),
     "强化学习": ("reinforcement", "rl"),
     "训练": ("training", "train"),
+    "实验配置": ("experimental", "setup", "configuration", "configurations"),
+    "配置": ("configuration", "configurations", "setup"),
     "奖励": ("reward",),
     "管道": ("pipeline",),
 }
 MAX_SECTION_EXPANSION_CHUNKS = 6
+MAX_PARENT_WINDOW_ANCHORS = 2
+
+
+def _is_picture_text_chunk(text: Any) -> bool:
+    """Identify pymupdf4llm's OCR/image-text blocks for window isolation."""
+
+    return bool(_PICTURE_TEXT_MARKER_RE.search(str(text or "")))
 
 
 def _is_composite_fact_question(question: str) -> bool:
     """Detect questions likely to require evidence from multiple chunks."""
 
-    matches = _COMPOSITE_FACT_CUE_RE.findall(str(question or ""))
-    return len(matches) >= 2
+    text = str(question or "")
+    matches = _COMPOSITE_FACT_CUE_RE.findall(text)
+    return len(matches) >= 2 or bool(_LISTED_FACT_QUESTION_RE.search(text))
 
 
 def _section_query_terms(question: str) -> set[str]:
@@ -529,6 +747,7 @@ def _section_expansion_result(
     question: str,
     base_result: dict[str, Any],
     runtime: Runtime,
+    route: Any | None = None,
 ) -> dict[str, Any] | None:
     """Add same-section chunks for composite questions without cross-paper mixing.
 
@@ -570,7 +789,11 @@ def _section_expansion_result(
         for meta in all_metas
         if isinstance(meta, dict) and meta.get("source")
     }
-    if len(corpus_sources) > 1:
+    route_source = str(getattr(route, "document_id", "") or "").strip()
+    if len(corpus_sources) > 1 and not route_source:
+        return None
+    selected_source = route_source or base_source
+    if selected_source not in corpus_sources:
         return None
     query_terms = _section_query_terms(question)
     if not query_terms:
@@ -581,7 +804,7 @@ def _section_expansion_result(
         metadata = raw_meta if isinstance(raw_meta, dict) else {}
         source = str(metadata.get("source", ""))
         header = str(metadata.get("headers", ""))
-        if source != base_source or not header:
+        if source != selected_source or not header:
             continue
         score = _header_match_score(header, query_terms)
         if score:
@@ -647,6 +870,94 @@ def _section_expansion_result(
     }
 
 
+def _parent_window_contexts(
+    texts: list[str],
+    ids: list[str],
+    metas: list[dict[str, Any]],
+    runtime: Runtime,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Attach same-page neighbors to top text anchors without adding slots.
+
+    Uploaded chunks carry a source-local ``chunk_index``.  The optional parent
+    window uses that stable sequence rather than Collection.get() ordering,
+    skips tables/references and already-selected contexts, and records every
+    contributing chunk ID in returned metadata.  The returned text is therefore
+    exactly what generation receives while citations retain the anchor page.
+    """
+
+    if not runtime.config.parent_window or not texts:
+        return list(texts), [dict(meta) for meta in metas]
+    snapshot = _get_lexical_snapshot(runtime)
+    sequence: dict[tuple[str, int], tuple[str, str, dict[str, Any]]] = {}
+    for doc_id, text, raw_meta in zip(
+        snapshot.ids, snapshot.texts, snapshot.metadatas
+    ):
+        metadata = raw_meta if isinstance(raw_meta, dict) else {}
+        source = str(metadata.get("source", ""))
+        try:
+            chunk_index = int(metadata.get("chunk_index"))
+        except (TypeError, ValueError):
+            continue
+        if source:
+            sequence[(source, chunk_index)] = (doc_id, text, metadata)
+
+    selected_ids = {str(doc_id) for doc_id in ids}
+    effective_texts = list(texts)
+    effective_metas = [dict(meta) for meta in metas]
+    for position in range(min(MAX_PARENT_WINDOW_ANCHORS, len(effective_texts))):
+        metadata = effective_metas[position]
+        if metadata.get("type", "text") != "text":
+            continue
+        # Figure/OCR blocks often contain several unrelated axes and sample
+        # counts.  Expanding them with adjacent prose increases numeric
+        # ambiguity, so retain the ranked block but do not create a window.
+        if _is_picture_text_chunk(effective_texts[position]):
+            continue
+        source = str(metadata.get("source", ""))
+        page = metadata.get("page")
+        header = str(metadata.get("headers", ""))
+        try:
+            anchor_chunk_index = int(metadata.get("chunk_index"))
+        except (TypeError, ValueError):
+            continue
+        if not source or page is None or _REFERENCE_HEADER_RE.search(header):
+            continue
+        anchor_record = sequence.get((source, anchor_chunk_index))
+        if anchor_record is None:
+            continue
+        included = [(anchor_chunk_index, *anchor_record)]
+        for neighbor_index in (anchor_chunk_index - 1, anchor_chunk_index + 1):
+            record = sequence.get((source, neighbor_index))
+            if record is None:
+                continue
+            neighbor_id, neighbor_text, neighbor_meta = record
+            if str(neighbor_id) in selected_ids:
+                continue
+            if neighbor_meta.get("type", "text") != "text":
+                continue
+            if _is_picture_text_chunk(neighbor_text):
+                continue
+            if neighbor_meta.get("page") != page:
+                continue
+            if _REFERENCE_HEADER_RE.search(str(neighbor_meta.get("headers", ""))):
+                continue
+            included.append(
+                (neighbor_index, str(neighbor_id), str(neighbor_text), neighbor_meta)
+            )
+        included.sort(key=lambda row: row[0])
+        if len(included) <= 1:
+            continue
+        effective_texts[position] = "\n\n".join(row[2] for row in included)
+        effective_metas[position]["window_chunk_indices"] = [
+            row[0] for row in included
+        ]
+        effective_metas[position]["window_chunk_ids"] = [row[1] for row in included]
+        effective_metas[position]["window_added_character_count"] = sum(
+            len(row[2]) for row in included if row[1] != str(ids[position])
+        )
+    return effective_texts, effective_metas
+
+
 def query_knowledge(
     message: str,
     history: Any = None,
@@ -669,32 +980,158 @@ def query_knowledge(
         answer = "📚 知识库为空，请先上传文档。"
         return {"answer": answer, "contexts": [], "context_ids": [], "context_metadatas": []} if return_contexts else answer
 
-    question_embedding = runtime.embedding_model.encode(message).tolist()
+    variants = (
+        query_variants(message)
+        if runtime.config.query_decomposition
+        else [message]
+    )
+    if not variants:
+        variants = [message]
     configured_candidate_k = (
         runtime.config.hybrid_candidate_k
         if runtime.config.retrieval_mode == "hybrid"
         else runtime.config.retrieval_k
     )
     candidate_k = min(configured_candidate_k, runtime.collection.count())
-    dense = runtime.collection.query(
-        query_embeddings=[question_embedding],
-        n_results=candidate_k,
-        include=["documents", "metadatas", "distances"],
+    route = None
+    if runtime.config.document_routing:
+        route_snapshot = _get_lexical_snapshot(runtime)
+        route = route_snapshot.router.route(message) if route_snapshot.router else None
+    dense_results: list[dict[str, Any]] = []
+    for variant in variants:
+        question_embedding = runtime.embedding_model.encode(variant).tolist()
+        query_kwargs = {
+            "query_embeddings": [question_embedding],
+            "n_results": candidate_k,
+            "include": ["documents", "metadatas", "distances"],
+        }
+        if runtime.config.spatial_figure_evidence:
+            # Figure blocks are an explicit Figure N evidence channel. Keeping
+            # them out of ordinary dense/Hybrid candidates prevents extra
+            # diagram labels from changing unrelated questions' rankings.
+            query_conditions: list[dict[str, Any]] = [
+                {"type": {"$ne": "figure"}}
+            ]
+            if route is not None:
+                query_conditions.append({"source": {"$eq": route.document_id}})
+            query_kwargs["where"] = (
+                query_conditions[0]
+                if len(query_conditions) == 1
+                else {"$and": query_conditions}
+            )
+        elif route is not None:
+            # ``source`` is written for every uploaded chunk.  The filter is
+            # only applied after the conservative lexical router found one
+            # unique source; ambiguous questions intentionally keep the global
+            # search for every variant.
+            query_kwargs["where"] = {"source": route.document_id}
+        dense_results.append(runtime.collection.query(**query_kwargs))
+    dense = _fuse_dense_results(
+        dense_results,
+        candidate_k,
+        runtime.config.hybrid_rrf_k,
     )
     if runtime.config.retrieval_mode == "hybrid":
-        dense = _hybrid_fused_result(message, dense, runtime, candidate_k)
+        dense = _hybrid_fused_result(
+            message,
+            dense,
+            runtime,
+            candidate_k,
+            source_filter=route.document_id if route is not None else None,
+            lexical_queries=variants,
+        )
         dense = _cross_encoder_reranked_result(message, dense, runtime)
-    section_result = _section_expansion_result(message, dense, runtime)
+    section_result = _section_expansion_result(message, dense, runtime, route=route)
+    formula_result = None
+    if runtime.config.formula_evidence:
+        formula_snapshot = _get_lexical_snapshot(runtime)
+        source_ids = {
+            str(metadata.get("source", "")).strip()
+            for metadata in formula_snapshot.metadatas
+            if isinstance(metadata, dict) and str(metadata.get("source", "")).strip()
+        }
+        allowed_formula_indices: list[int] | None
+        if route is not None:
+            allowed_formula_indices = [
+                index
+                for index in range(len(formula_snapshot.texts))
+                if str(formula_snapshot.metadatas[index].get("source", ""))
+                == route.document_id
+            ]
+        elif len(source_ids) == 1:
+            # A single-source collection is safe for this opt-in lexical aid.
+            allowed_formula_indices = list(range(len(formula_snapshot.texts)))
+        else:
+            # Do not let an unqualified multi-paper question borrow an
+            # equation from an unrelated source. The normal retriever remains
+            # responsible for resolving the ambiguous query.
+            allowed_formula_indices = []
+        formula_indices = formula_evidence_indices(
+            message,
+            formula_snapshot.texts,
+            formula_snapshot.metadatas,
+            max_results=8,
+            allowed_indices=allowed_formula_indices,
+        )
+        if formula_indices:
+            formula_result = {
+                "ids": [[formula_snapshot.ids[index] for index in formula_indices]],
+                "documents": [[formula_snapshot.texts[index] for index in formula_indices]],
+                "metadatas": [[
+                    {**formula_snapshot.metadatas[index], "formula_evidence": True}
+                    for index in formula_indices
+                ]],
+            }
+    figure_result = None
+    explicit_figure_reference = figure_reference_from_question(message)
+    if runtime.config.spatial_figure_evidence and explicit_figure_reference is not None:
+        figure_kind, figure_number = explicit_figure_reference
+        figure_conditions: list[dict[str, Any]] = [
+            {"type": {"$eq": "figure"}},
+            {"figure_kind": {"$eq": figure_kind}},
+            {"figure_number": {"$eq": figure_number}},
+        ]
+        if route is not None:
+            figure_conditions.append({"source": {"$eq": route.document_id}})
+        raw_figure_result = runtime.collection.get(
+            where={"$and": figure_conditions},
+            include=["documents", "metadatas"],
+        )
+        # ``collection.get`` is flat whereas normal query results are nested.
+        # Wrap it so the common merge path can place exact Figure N evidence
+        # before dense candidates without special-casing IDs or metadata.
+        figure_result = {
+            "ids": [raw_figure_result.get("ids") or []],
+            "documents": [raw_figure_result.get("documents") or []],
+            "metadatas": [raw_figure_result.get("metadatas") or []],
+        }
     table_results = None
     if is_table_question(message):
+        table_where: dict[str, Any] = {"type": "table"}
+        if route is not None:
+            # A source route already narrowed the dense/lexical candidate pool.
+            # Keep the deterministic table scan in that same scope; otherwise
+            # Table N from a different uploaded paper could satisfy the same
+            # row/column names before the routed paper is inspected.
+            table_where = {
+                "$and": [
+                    {"type": {"$eq": "table"}},
+                    {"source": {"$eq": route.document_id}},
+                ]
+            }
         table_results = runtime.collection.get(
-            where={"type": "table"},
+            where=table_where,
             include=["documents", "metadatas"],
         )
     retrieved_texts, retrieved_ids, retrieved_metas = _merge_results(
         dense,
         table_results,
-        [section_result] if section_result is not None else None,
+        [
+            result
+            for result in (figure_result, formula_result, section_result)
+            if result is not None
+        ]
+        or None,
     )
     if not retrieved_texts:
         answer = "未找到相关内容，请换个问法。"
@@ -713,6 +1150,30 @@ def query_knowledge(
         return result if return_contexts else answer
 
     order, note, filtered_texts = rerank_table_first(message, retrieved_texts, retrieved_metas)
+    if explicit_figure_reference is not None and runtime.config.spatial_figure_evidence:
+        matching_figures = matching_figure_indices(
+            message,
+            filtered_texts,
+            retrieved_metas,
+        )
+        if matching_figures:
+            matching_set = set(matching_figures)
+            order = matching_figures + [
+                index
+                for index in order
+                if index not in matching_set
+                and retrieved_metas[index].get("type") != "figure"
+                and not _is_picture_text_chunk(filtered_texts[index])
+            ]
+        else:
+            figure_kind, figure_number = explicit_figure_reference
+            label = (
+                f"Extended Data Figure {figure_number}"
+                if figure_kind == "extended_data_figure"
+                else f"Figure {figure_number}"
+            )
+            figure_note = f"未找到 {label} 的坐标化文字证据，已回退普通文本检索。"
+            note = f"{note} {figure_note}".strip()
 
     # A question that names a table, row, and column is a deterministic cell
     # lookup.  Answer it from the parsed table rather than asking a language
@@ -721,7 +1182,21 @@ def query_knowledge(
     if cell_match is not None:
         cell_index, cell = cell_match
         table_number = cell["table_number"] or explicit_table_number or "?"
-        if "values" in cell:
+        if "rows" in cell:
+            row_texts = []
+            for row in cell["rows"]:
+                values = "；".join(
+                    f"{item['column']}={item['value']}"
+                    for item in row.get("values", [])
+                )
+                row_texts.append(f"{row['row']}：{values}")
+            value_text = "；".join(row_texts)
+            cell_context = (
+                f"Table {table_number} 结构化多行：{value_text}\n\n"
+                f"{filtered_texts[cell_index]}"
+            )
+            answer = f"根据 Table {table_number} 中相关行，列值为：{value_text}。"
+        elif "values" in cell:
             value_text = "；".join(
                 f"{item['column']}={item['value']}"
                 for item in cell["values"]
@@ -740,6 +1215,21 @@ def query_knowledge(
                 f"根据 Table {table_number} 中“{cell['row']}”行的“{cell['column']}”列，"
                 f"数值为 **{cell['value']}**。"
             )
+        table_metadata = (
+            retrieved_metas[cell_index]
+            if cell_index < len(retrieved_metas)
+            and isinstance(retrieved_metas[cell_index], dict)
+            else {}
+        )
+        table_caption = str(table_metadata.get("table_caption", "") or "")
+        if table_caption:
+            # Keep the caption beside the structured evidence so a returned
+            # trace retains shared units/scale notes that are not part of a
+            # parsed header (for example a table-wide ×10^-2 footnote).
+            cell_context = f"{table_caption}\n\n{cell_context}"
+        unit_note = _table_caption_unit_note(table_metadata)
+        if unit_note and not _TABLE_UNIT_HINT_RE.search(answer):
+            answer += unit_note
         ordered_texts = [cell_context]
         ordered_ids = [retrieved_ids[cell_index]]
         ordered_metas = [retrieved_metas[cell_index]]
@@ -760,10 +1250,29 @@ def query_knowledge(
     ordered_texts = [filtered_texts[index] for index in order]
     ordered_ids = [retrieved_ids[index] for index in order]
     ordered_metas = [retrieved_metas[index] for index in order]
+    ordered_texts, ordered_metas = _parent_window_contexts(
+        ordered_texts,
+        ordered_ids,
+        ordered_metas,
+        runtime,
+    )
 
     context_parts = []
     for index, (text, metadata) in enumerate(zip(ordered_texts, ordered_metas), start=1):
-        label = f"【片段 {index}】[表格]" if metadata.get("type") == "table" else f"【片段 {index}】"
+        if metadata.get("type") == "table":
+            table_number = metadata.get("table_number")
+            table_label = (
+                f"[表格，Table {table_number}]"
+                if table_number is not None and str(table_number).strip()
+                else "[表格]"
+            )
+            label = f"【片段 {index}】{table_label}"
+        elif metadata.get("type") == "figure":
+            label = f"【片段 {index}】[图形坐标文字]"
+        elif metadata.get("formula_evidence"):
+            label = f"【片段 {index}】[公式候选]"
+        else:
+            label = f"【片段 {index}】"
         context_parts.append(f"{label}\n{text}")
     context = "\n\n---\n\n".join(context_parts)
     evidence_ledger = build_evidence_ledger(
@@ -798,16 +1307,40 @@ def query_knowledge(
     except Exception as exc:
         answer = f"❌ 调用出错：{exc}"
 
-    if _is_composite_fact_question(message) and not is_table_question(message):
+    has_spatial_figure_context = any(
+        metadata.get("type") == "figure" for metadata in ordered_metas
+    )
+    if (
+        _is_composite_fact_question(message)
+        and not is_table_question(message)
+        and not has_spatial_figure_context
+    ):
         answer = supplement_answer_with_evidence(answer, message, evidence_ledger)
 
+    answer_validation = None
+    if runtime.config.answer_validation:
+        answer_validation = validate_answer_against_evidence(
+            message,
+            answer,
+            evidence_ledger,
+        )
+        if answer_validation.get("status") == "review":
+            reasons = "、".join(answer_validation.get("reasons") or [])
+            answer += (
+                "\n\n⚠️ **证据核对提示**：生成答案可能遗漏参考片段中的高信号内容，"
+                f"请人工核对（{reasons or '未分类原因'}）；系统未自动改写或重试。"
+            )
+
     if return_contexts:
-        return {
+        result = {
             "answer": answer,
             "contexts": ordered_texts,
             "context_ids": ordered_ids,
             "context_metadatas": ordered_metas,
         }
+        if answer_validation is not None:
+            result["answer_validation"] = answer_validation
+        return result
     sources = []
     for metadata in ordered_metas:
         source = metadata.get("source", "未知")
@@ -815,6 +1348,8 @@ def query_knowledge(
         suffix = f"，第 {page} 页" if page else ""
         if metadata.get("type") == "table":
             suffix += f"（{metadata.get('table_id', '表格')}）"
+        elif metadata.get("type") == "figure":
+            suffix += f"（{metadata.get('figure_label', '图形坐标文字')}）"
         sources.append(f"- {source}{suffix}")
     unique_sources = list(dict.fromkeys(sources))
     return answer + "\n\n📌 **参考来源：**\n" + "\n".join(unique_sources)
@@ -825,6 +1360,11 @@ SCIENTIFIC_SYSTEM_PROMPT = """你是一个面向科学论文的严谨学术问�
 【强制规则 1：数值必须原样引用并指明出处】
 - 若参考文本中存在具体数值，回答时必须原样引用，不得四舍五入、改写或推算。
 - 引用数值后必须指明出处，格式为：根据参考片段 [X] 所示。
+
+【强制规则 1A：图形坐标文字不得跨视觉组拼接】
+- 标记为“图形坐标文字”的片段只来自 PDF 文字层坐标，不等同于图片识别。
+- 只有标签和值的水平 x 范围重叠时，才可把它们视为同一视觉组；不得把相邻子图、柱或类别中的数值移接到另一标签。
+- 如果图中信息只存在于像素而未出现在文字层，必须说明参考片段不足，不能猜测。
 
 【强制规则 2：趋势判断必须有明确对比依据】
 - 若问题涉及趋势判断，必须确认参考文本有明确对比依据；没有依据时必须回复“资料未提供该趋势的明确依据，无法推测。”
@@ -841,11 +1381,17 @@ SCIENTIFIC_SYSTEM_PROMPT = """你是一个面向科学论文的严谨学术问�
 - 参考资料中若出现“结构化表格单元格”行，该行是从指定表格的真实行列交叉处解析出的证据，必须优先采用其中的值。
 - 不得用其他 Table 的同名行、叙述性段落或相似数值覆盖该单元格证据。
 
+【强制规则 5A：表格证据一致性】
+- 如果参考资料中已经出现与问题直接对应的表格行、列和值，即使该片段没有重复显示完整的表号或题注，也应直接回答已确认的值。
+- 不得在已经给出具体表格数值后，再说“资料未提供”“无法确认”或否认该数值属于用户指定的表格；如果只有部分子项有证据，只对缺失子项单独说明资料不足。
+
 【其他要求】
 - 表格以 Markdown 形式给出，数值问题请直接依据表格行列作答。
-- 若问题涉及图片内容，请说明“该图内容未纳入文本检索范围”。
+- 若问题涉及图片内容：如果参考片段没有标记为“图形坐标文字”的坐标证据，必须说明“该图内容未纳入文本检索范围”；如果存在这类坐标证据，只能依据其中明确出现的标签、数值和坐标范围作答，不能把它当作像素级图片识别。
 - 若问题包含“多少、哪些、如何、管道、步骤”等多个事实维度，先在内部逐项核对问题要求，综合所有互补片段；不得因第一段已有概述就省略后续片段中的专有名词、工具名、阈值、数据规模、筛选条件或生成步骤。
 - 若用户问题包含两个或以上事实维度，优先使用分点回答，并逐项覆盖参考资料中与问题直接相关的数字、阈值、工具/模型名称、实体和操作步骤；“流程概述”不能替代这些具体事实。
+- 在回复“资料未提供相关信息”之前，必须逐一检查全部参考片段（包括后面编号的算法、附录和方法片段）；只要其中存在直接对应的初始化、残差、步长、循环类型、模型名或其他事实，就先回答该事实，不能因为前面的片段没有它而拒答整题。
+- 复合问题中某一子项缺少证据时，回答其余有直接证据的子项，并明确指出仅缺少哪一项；不得把局部缺失扩大为整题拒答，也不得用常识补写未出现的细节。
 - 若参考片段无法回答问题，请如实说明“资料未提供相关信息”，严禁编造。"""
 
 

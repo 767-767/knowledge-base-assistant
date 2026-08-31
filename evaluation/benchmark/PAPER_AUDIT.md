@@ -125,3 +125,21 @@ Hybrid 只让 `drugr-11` 一题下降，而纯重排有 4 题下降；其 table 
 该结果只达到“允许默认关闭地接入应用做人工 A/B”的门槛。53 题中仍有 16 题在 @10 未
 完整覆盖；CPU 平均重排延迟约 2.73 秒、P95 3.31 秒、进程峰值约 2.20 GB，尚未验证并发
 资源、真实五论文 Chroma 或生成答案质量。
+
+## Phase 6.2 坐标图形文字观察（2026-08-30）
+
+默认解析结果仍保持本文前面的表格不变。仅在 `include_spatial_figures=True` 时，解析器
+额外读取 `Page.get_text("blocks", sort=True)` 的
+`(x0, y0, x1, y1, text, block_no, block_type)` 字段，并把 Figure caption 上方的短文字
+按 x 中心排序、以归一化坐标写入 `type=figure` 证据块。五篇论文分别得到 DrugR 5、
+SciDQA 7、Scientific Table LLM 1、MgNO 5、AlphaFold 3 主图 5，共 23 个图块；总语料
+由 479 增至 502 块。
+
+AlphaFold 3 第 2 页 Figure 1 的实际文字层把 `PDB / protein–RNA` 与 `n = 25`、
+`PDB / protein–dsDNA` 与 `n = 38`、`CASP15`/`RNA` 与 `n = 8` 放在相互重叠的 x 区间；
+相邻的 `Glycosylation`/`n = 28` 位于另一 x 区间。原扁平 picture text 丢失了这种空间关系。
+新证据仅在显式图号查询中旁路注入，并移除同一回答中的扁平 picture-text 干扰；普通检索
+候选不包含 figure chunks。
+
+这不是图片理解：PDF 图片仍未持久化，纯扫描页或只存在于像素中的 Extended Data 图不会
+生成坐标证据。当前结果只支持把该功能作为默认关闭的 born-digital PDF 实验路径。
