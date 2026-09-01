@@ -26,6 +26,32 @@ from sci_rag_core import Chunk
 
 
 class BenchmarkRetrievalTests(unittest.TestCase):
+    def test_hybrid_retriever_excludes_formula_blocks_from_bm25_statistics(self):
+        chunks = [
+            Chunk("ordinary prose", {"source": "paper.pdf", "type": "text"}),
+            Chunk("A ∗ u = quantum", {"source": "paper.pdf", "type": "formula"}),
+        ]
+
+        retriever = HybridRetriever(
+            chunks,
+            mode="bm25",
+            excluded_chunk_types=("formula",),
+        )
+
+        self.assertEqual([item.key for item in retriever.retrieve("quantum", 1)], [0])
+
+    def test_parent_window_skips_out_of_band_formula_block(self):
+        chunks = [
+            Chunk("anchor", {"source": "paper.pdf", "page": 1, "type": "text"}),
+            Chunk("A ∗ u = f", {"source": "paper.pdf", "page": 1, "type": "formula"}),
+            Chunk("needed detail", {"source": "paper.pdf", "page": 1, "type": "text"}),
+        ]
+
+        effective, expansions = _parent_window_scoring_chunks([RankedItem(0, 1.0)], chunks)
+
+        self.assertEqual(expansions, {0: (0, 2)})
+        self.assertIn("needed detail", effective[0].page_content)
+
     def test_query_variants_keep_original_and_split_composite_clauses(self):
         variants = query_variants(
             "MgNO 的二维椭圆 PDE 定义在哪个区域，并考虑哪些边界条件？"

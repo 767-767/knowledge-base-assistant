@@ -29,6 +29,7 @@ from sci_rag_core import (
     is_limitation_question,
     is_table_question,
     limitation_evidence_indices,
+    missing_pdf_formula_blocks,
     matching_figure_indices,
     matching_table_indices,
     rerank_table_first,
@@ -164,6 +165,7 @@ class LexicalSnapshot:
     texts: list[str]
     metadatas: list[dict[str, Any]]
     index: BM25Index
+    lexical_indices: list[int]
     router: DocumentRouter | None = None
 
 
@@ -311,6 +313,20 @@ def load_and_split_document(
                                 metadata={"source": source, "page": page_number},
                             )
                         )
+                        for formula_text in missing_pdf_formula_blocks(
+                            text,
+                            document[page_number - 1].get_text("text", sort=True),
+                        ):
+                            documents.append(
+                                Chunk(
+                                    page_content=formula_text,
+                                    metadata={
+                                        "source": source,
+                                        "page": page_number,
+                                        "type": "formula",
+                                    },
+                                )
+                            )
             else:
                 documents.append(Chunk(str(page_chunks), {"source": source}))
             if include_spatial_figures:
@@ -351,18 +367,26 @@ def add_document_to_db(file_path: str, runtime: Runtime | None = None) -> str:
         include_spatial_figures=runtime.config.spatial_figure_evidence,
     )
     document_hash = file_sha256(file_path)
+    normal_chunk_index = 0
     for index, chunk in enumerate(chunks):
         text = chunk.page_content
         metadata = dict(chunk.metadata)
+        is_formula = metadata.get("type") == "formula"
+        stable_index: int | str = f"formula:{index}" if is_formula else normal_chunk_index
         metadata.update(
             {
                 "source": os.path.basename(file_path),
                 "document_sha256": document_hash,
-                "chunk_index": index,
             }
         )
+        if not is_formula:
+            # Formula evidence is intentionally outside the ordinary document
+            # sequence, so it cannot change parent-window neighbors or IDs of
+            # pre-existing prose/table chunks.
+            metadata["chunk_index"] = normal_chunk_index
+            normal_chunk_index += 1
         stable_id = hashlib.sha256(
-            f"{document_hash}:{index}:{metadata.get('type', 'text')}:{text}".encode("utf-8")
+            f"{document_hash}:{stable_index}:{metadata.get('type', 'text')}:{text}".encode("utf-8")
         ).hexdigest()
         metadata["chunk_id"] = stable_id
         embedding = runtime.embedding_model.encode(text).tolist()
@@ -528,14 +552,29 @@ def _get_lexical_snapshot(runtime: Runtime) -> LexicalSnapshot:
         dict(raw_metas[index]) if index < len(raw_metas) and isinstance(raw_metas[index], dict) else {}
         for index in range(len(ids))
     ]
+    lexical_indices = [
+        index
+        for index, metadata in enumerate(metadatas)
+        if (
+            metadata.get("type") != "formula"
+            and (
+                not runtime.config.spatial_figure_evidence
+                or metadata.get("type") != "figure"
+            )
+        )
+    ]
     search_documents = [
-        _lexical_search_text(text, metadata) for text, metadata in zip(texts, metadatas)
+        _lexical_search_text(texts[index], metadatas[index])
+        for index in lexical_indices
     ]
     source_profiles: dict[str, list[str]] = {}
     for text, metadata in zip(texts, metadatas):
         if (
-            runtime.config.spatial_figure_evidence
-            and metadata.get("type") == "figure"
+            metadata.get("type") == "formula"
+            or (
+                runtime.config.spatial_figure_evidence
+                and metadata.get("type") == "figure"
+            )
         ):
             continue
         source = str(metadata.get("source", "")).strip()
@@ -555,6 +594,7 @@ def _get_lexical_snapshot(runtime: Runtime) -> LexicalSnapshot:
         texts=texts,
         metadatas=metadatas,
         index=BM25Index(search_documents),
+        lexical_indices=lexical_indices,
         router=router,
     )
     runtime._lexical_snapshot = snapshot
@@ -585,28 +625,35 @@ def _hybrid_fused_result(
     }
 
     snapshot = _get_lexical_snapshot(runtime)
-    lexical_indices = None
-    if source_filter or runtime.config.spatial_figure_evidence:
-        lexical_indices = [
-            index
-            for index, metadata in enumerate(snapshot.metadatas)
-            if (
-                (not source_filter or str(metadata.get("source", "")) == source_filter)
-                and (
-                    not runtime.config.spatial_figure_evidence
-                    or metadata.get("type") != "figure"
-                )
+    lexical_indices = [
+        index
+        for index, metadata in enumerate(snapshot.metadatas)
+        if (
+            metadata.get("type") != "formula"
+            and (not source_filter or str(metadata.get("source", "")) == source_filter)
+            and (
+                not runtime.config.spatial_figure_evidence
+                or metadata.get("type") != "figure"
             )
-        ]
+        )
+    ]
+    lexical_positions = {
+        index: position for position, index in enumerate(snapshot.lexical_indices)
+    }
+    lexical_positions_for_query = [
+        lexical_positions[index]
+        for index in lexical_indices
+        if index in lexical_positions
+    ]
     lexical_rankings: list[list[str]] = []
     for lexical_query in lexical_queries or [question]:
         if not snapshot.index.has_lexical_signal(lexical_query):
             continue
         lexical_rankings.append(
             [
-                snapshot.ids[int(item.key)]
+                snapshot.ids[snapshot.lexical_indices[int(item.key)]]
                 for item in snapshot.index.retrieve(
-                    lexical_query, candidate_k, indices=lexical_indices
+                    lexical_query, candidate_k, indices=lexical_positions_for_query
                 )
             ]
         )
@@ -1104,26 +1151,24 @@ def query_knowledge(
             "n_results": candidate_k,
             "include": ["documents", "metadatas", "distances"],
         }
+        # Formula blocks are a gated supplementary channel.  Excluding them
+        # from ordinary candidates keeps recovered equations from perturbing
+        # normal prose/table retrieval.  Figure blocks follow the same rule
+        # only when that opt-in channel is enabled.
+        query_conditions: list[dict[str, Any]] = [{"type": {"$ne": "formula"}}]
         if runtime.config.spatial_figure_evidence:
-            # Figure blocks are an explicit Figure N evidence channel. Keeping
-            # them out of ordinary dense/Hybrid candidates prevents extra
-            # diagram labels from changing unrelated questions' rankings.
-            query_conditions: list[dict[str, Any]] = [
-                {"type": {"$ne": "figure"}}
-            ]
-            if route is not None:
-                query_conditions.append({"source": {"$eq": route.document_id}})
-            query_kwargs["where"] = (
-                query_conditions[0]
-                if len(query_conditions) == 1
-                else {"$and": query_conditions}
-            )
-        elif route is not None:
+            query_conditions.append({"type": {"$ne": "figure"}})
+        if route is not None:
             # ``source`` is written for every uploaded chunk.  The filter is
             # only applied after the conservative lexical router found one
             # unique source; ambiguous questions intentionally keep the global
             # search for every variant.
-            query_kwargs["where"] = {"source": route.document_id}
+            query_conditions.append({"source": {"$eq": route.document_id}})
+        query_kwargs["where"] = (
+            query_conditions[0]
+            if len(query_conditions) == 1
+            else {"$and": query_conditions}
+        )
         dense_results.append(runtime.collection.query(**query_kwargs))
     dense = _fuse_dense_results(
         dense_results,
@@ -1459,6 +1504,11 @@ def query_knowledge(
         _is_composite_fact_question(message)
         and not is_table_question(message)
         and not has_spatial_figure_context
+        and re.search(
+            r"管道|流程|步骤|构建|pipeline|process|construct|steps",
+            message,
+            re.IGNORECASE,
+        )
     ):
         answer = supplement_answer_with_evidence(answer, message, evidence_ledger)
 

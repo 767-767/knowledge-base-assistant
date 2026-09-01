@@ -91,19 +91,28 @@ class DenseIndex:
         chunks: Iterable[Chunk],
         model_name: str = "BAAI/bge-small-zh-v1.5",
         model: Any | None = None,
+        indices: Iterable[int] | None = None,
     ):
         # Never allow a benchmark run to turn into an implicit model download.
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
         self.chunks = list(chunks)
         self.model_name = model_name
+        self.indices = (
+            list(range(len(self.chunks)))
+            if indices is None
+            else [int(index) for index in indices if 0 <= int(index) < len(self.chunks)]
+        )
+        self._embedding_positions = {
+            index: position for position, index in enumerate(self.indices)
+        }
         if model is None:
             from sentence_transformers import SentenceTransformer
 
             model = SentenceTransformer(model_name, local_files_only=True)
         self.model = model
         self.embeddings = self.model.encode(
-            [searchable_text(chunk) for chunk in self.chunks],
+            [searchable_text(self.chunks[index]) for index in self.indices],
             normalize_embeddings=True,
             show_progress_bar=False,
         )
@@ -115,9 +124,13 @@ class DenseIndex:
         indices: Iterable[int] | None = None,
     ) -> list[RankedItem]:
         candidate_indices = (
-            list(range(len(self.chunks)))
+            list(self.indices)
             if indices is None
-            else [index for index in indices if 0 <= int(index) < len(self.chunks)]
+            else [
+                int(index)
+                for index in indices
+                if int(index) in self._embedding_positions
+            ]
         )
         limit = max(0, min(int(k), len(candidate_indices)))
         if not candidate_indices or not limit:
@@ -125,7 +138,8 @@ class DenseIndex:
         query_embedding = self.model.encode(
             [question], normalize_embeddings=True, show_progress_bar=False
         )[0]
-        scores = self.embeddings[candidate_indices] @ query_embedding
+        positions = [self._embedding_positions[index] for index in candidate_indices]
+        scores = self.embeddings[positions] @ query_embedding
         ranked = [
             RankedItem(index, float(score))
             for index, score in zip(candidate_indices, scores)
@@ -163,7 +177,12 @@ class HybridRetriever:
             if str(chunk.metadata.get("type", "text")).casefold()
             not in self.excluded_chunk_types
         ]
-        self.bm25 = BM25Index(searchable_text(chunk) for chunk in self.chunks)
+        self._retrieval_positions = {
+            index: position for position, index in enumerate(self._retrieval_indices)
+        }
+        self.bm25 = BM25Index(
+            searchable_text(self.chunks[index]) for index in self._retrieval_indices
+        )
         self.document_routing = bool(document_routing)
         self.document_router: DocumentRouter | None = None
         self._document_indices: dict[str, list[int]] = {}
@@ -185,7 +204,12 @@ class HybridRetriever:
                 ("\n".join(profiles[document_id]) for document_id in document_ids),
             )
         self.dense = (
-            DenseIndex(self.chunks, dense_model_name, model=dense_model)
+            DenseIndex(
+                self.chunks,
+                dense_model_name,
+                model=dense_model,
+                indices=self._retrieval_indices,
+            )
             if mode in {"dense", "hybrid"}
             else None
         )
@@ -199,6 +223,25 @@ class HybridRetriever:
             else None
         )
 
+    def _bm25_retrieve(
+        self,
+        question: str,
+        k: int,
+        indices: Iterable[int] | None = None,
+    ) -> list[RankedItem]:
+        """Search the same eligible corpus used by dense retrieval."""
+
+        candidate_indices = (
+            self._retrieval_indices
+            if indices is None
+            else [int(index) for index in indices if int(index) in self._retrieval_positions]
+        )
+        positions = [self._retrieval_positions[index] for index in candidate_indices]
+        return [
+            RankedItem(self._retrieval_indices[int(item.key)], item.score)
+            for item in self.bm25.retrieve(question, k, indices=positions)
+        ]
+
     def _retrieve_single(
         self,
         question: str,
@@ -208,14 +251,14 @@ class HybridRetriever:
         """Retrieve one query variant within a fixed source scope."""
 
         if self.mode == "bm25":
-            return self.bm25.retrieve(question, k, indices=eligible_indices)
+            return self._bm25_retrieve(question, k, indices=eligible_indices)
         if self.mode == "dense":
             assert self.dense is not None
             return self.dense.retrieve(question, k, indices=eligible_indices)
-        candidate_k = min(len(self.chunks), max(int(k) * 5, 50))
+        candidate_k = min(len(self._retrieval_indices), max(int(k) * 5, 50))
         assert self.dense is not None
         lexical = (
-            self.bm25.retrieve(question, candidate_k, indices=eligible_indices)
+            self._bm25_retrieve(question, candidate_k, indices=eligible_indices)
             if self.bm25.has_lexical_signal(question)
             else []
         )
@@ -531,6 +574,21 @@ def _limitation_guard_indices(
     return list(dict.fromkeys([*limitation_indices, *original]))
 
 
+def _non_formula_neighbor_index(
+    chunks: list[Chunk],
+    index: int,
+    direction: int,
+) -> int | None:
+    """Return the adjacent ordinary block while treating formula evidence as out-of-band."""
+
+    neighbor = index + direction
+    while 0 <= neighbor < len(chunks):
+        if chunks[neighbor].metadata.get("type") != "formula":
+            return neighbor
+        neighbor += direction
+    return None
+
+
 def _adjacent_context_indices(
     ranked: list[RankedItem],
     chunks: list[Chunk],
@@ -567,8 +625,9 @@ def _adjacent_context_indices(
         header = str(metadata.get("headers", ""))
         if not source or page is None or REFERENCE_HEADER_RE.search(header):
             continue
-        for neighbor in (index - 1, index + 1):
-            if not (0 <= neighbor < len(chunks)):
+        for direction in (-1, 1):
+            neighbor = _non_formula_neighbor_index(chunks, index, direction)
+            if neighbor is None:
                 continue
             candidate = chunks[neighbor]
             candidate_meta = (
@@ -622,8 +681,9 @@ def _parent_window_scoring_chunks(
         if not source or page is None or REFERENCE_HEADER_RE.search(header):
             continue
         included = [index]
-        for neighbor in (index - 1, index + 1):
-            if neighbor in selected or not (0 <= neighbor < len(chunks)):
+        for direction in (-1, 1):
+            neighbor = _non_formula_neighbor_index(chunks, index, direction)
+            if neighbor is None or neighbor in selected:
                 continue
             candidate = chunks[neighbor]
             candidate_meta = (
@@ -1101,7 +1161,9 @@ def evaluate_document(
         dense_model=dense_model,
         document_routing=document_routing,
         query_decomposition=query_decomposition,
-        excluded_chunk_types=("figure",) if structured_figure_guard else (),
+        excluded_chunk_types=("formula", "figure")
+        if structured_figure_guard
+        else ("formula",),
     )
     max_k = max(top_k_values, default=0)
     retrieval_k = max(max_k, int(reranker_candidate_k)) if reranker else max_k

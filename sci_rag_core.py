@@ -77,6 +77,9 @@ FORMULA_EVIDENCE_RE = re.compile(
     r"finite[- ]element|FEM)\b)",
     re.IGNORECASE,
 )
+RAW_FORMULA_LINE_RE = re.compile(
+    r"(?=.*[A-Za-zα-ωΑ-ΩΩ])(?=.*[=≤≥∗×∈])",
+)
 LIMITATION_EVIDENCE_RE = re.compile(
     r"\b(?:limitation|limited|static\s+structures?|dynamical\s+behavio(?:u)?r|"
     r"dynamic(?:al)?\s+(?:state|behaviour|behavior)|solution\s+ensemble|"
@@ -372,6 +375,47 @@ def is_formula_question(question: str) -> bool:
     """Return whether a question explicitly asks for equation-like evidence."""
 
     return bool(FORMULA_QUESTION_RE.search(str(question or "")))
+
+
+def missing_pdf_formula_blocks(
+    markdown_text: str,
+    pdf_text: str,
+    *,
+    context_lines: int = 1,
+) -> list[str]:
+    """Recover omitted equation lines as small, separate PDF-text evidence blocks.
+
+    ``pymupdf4llm`` occasionally drops a displayed equation while retaining its
+    surrounding prose.  This compares the raw PDF text layer with Markdown and
+    returns only missing equation neighborhoods, leaving normal Markdown
+    chunks untouched.
+    """
+
+    markdown_normalized = normalize_for_match(markdown_text)
+    raw_lines = [" ".join(line.split()) for line in str(pdf_text or "").splitlines()]
+    raw_lines = [line for line in raw_lines if line]
+    spans: list[tuple[int, int]] = []
+    for index, line in enumerate(raw_lines):
+        normalized_line = normalize_for_match(line)
+        if (
+            len(line) > 500
+            or not RAW_FORMULA_LINE_RE.search(line)
+            or normalized_line in markdown_normalized
+        ):
+            continue
+        spans.append(
+            (max(0, index - context_lines), min(len(raw_lines), index + context_lines + 1))
+        )
+
+    blocks: list[str] = []
+    for start, end in spans:
+        if blocks and start <= previous_end:
+            previous_end = max(previous_end, end)
+            blocks[-1] = "\n".join(raw_lines[previous_start:previous_end])
+            continue
+        previous_start, previous_end = start, end
+        blocks.append("\n".join(raw_lines[start:end]))
+    return blocks
 
 
 def is_limitation_question(question: str) -> bool:
@@ -877,6 +921,13 @@ def supplement_answer_with_evidence(
     ):
         return answer_text
     answer_normalized = normalize_for_match(answer_text)
+    process_question = bool(
+        re.search(
+            r"管道|流程|步骤|构建|pipeline|process|construct|steps",
+            question_normalized,
+            re.IGNORECASE,
+        )
+    )
     query_tokens = _evidence_query_tokens(question)
     section_aliases = {
         "数据集": ("dataset", "data"),
@@ -945,7 +996,10 @@ def supplement_answer_with_evidence(
             )
         ]
         number_hits = len(numbers)
-        markers = [*numbers, *high_signal_entities]
+        # For numeric questions, named entities from neighboring prose are not
+        # reliable omissions. Keep entity completion for process questions,
+        # where tool/model names are part of the requested pipeline.
+        markers = [*numbers, *(high_signal_entities if process_question else [])]
         # A supplement is a last-resort check for omitted quantities,
         # thresholds, or named tools/models.  Entity-only prose is admitted
         # only when it contains at least two high-signal names, which keeps a
@@ -966,6 +1020,17 @@ def supplement_answer_with_evidence(
                 continue
             missing.append(marker)
         if not missing:
+            continue
+        if (
+            not process_question
+            and numbers
+            and not any(
+                normalize_for_match(number) in answer_normalized
+                for number in numbers
+            )
+        ):
+            # A numeric answer should not inherit an unrelated neighboring
+            # line merely because that line contains generic dataset terms.
             continue
         query_hits = sum(1 for token in query_tokens if token in normalize_for_match(content))
         score = (
@@ -1911,7 +1976,7 @@ def split_to_chunks(
     for document in documents:
         base_metadata = dict(document.metadata)
         base_metadata["source"] = source
-        if base_metadata.get("type") == "figure":
+        if base_metadata.get("type") in {"figure", "formula"}:
             if document.page_content.strip():
                 final_chunks.append(
                     Chunk(page_content=document.page_content, metadata=base_metadata)

@@ -1,3 +1,4 @@
+import hashlib
 import os
 import tempfile
 import unittest
@@ -23,6 +24,7 @@ from sci_rag_core import (
     limitation_evidence_indices,
     is_table_question,
     normalize_for_match,
+    missing_pdf_formula_blocks,
     rerank_table_first,
     select_row_entity,
     split_to_chunks,
@@ -355,6 +357,23 @@ class CoreTests(unittest.TestCase):
         )
         self.assertNotIn("training mixture", answer)
         self.assertNotIn("ChemicalQA", answer)
+
+    def test_numeric_answer_supplement_skips_unrelated_neighboring_lines(self):
+        question = "人工标注中审阅了多少个实例，保留多少个问答对，一致率是多少？"
+        ledger = [
+            "【片段 1，paper.pdf，Human Expert Annotation】"
+            "Two annotators reviewed 7,000 instances and identified 2,937 QA pairs; "
+            "the common subset agreement rate was 85%.",
+            "【片段 2，paper.pdf，Related Work】"
+            "QASPER has 40% short answers, while QASA has 52% high-overlap answers.",
+        ]
+        answer = supplement_answer_with_evidence(
+            "共审阅 7,000 个实例，保留 2,937 个问答对，一致率为 85%。",
+            question,
+            ledger,
+        )
+        self.assertNotIn("【补充原文核对项】", answer)
+        self.assertNotIn("QASPER", answer)
 
     def test_evidence_validator_flags_missing_number_without_using_gold(self):
         ledger = [
@@ -744,6 +763,25 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(chunks), 1)
         self.assertEqual(chunks[0].metadata["type"], "figure")
         self.assertEqual(chunks[0].metadata["figure_number"], 2)
+
+    def test_split_preserves_pretyped_formula_chunk(self):
+        formula = Chunk("A ∗ u = f", {"type": "formula", "page": 4})
+
+        chunks = split_to_chunks([formula], "paper.pdf")
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].metadata["type"], "formula")
+        self.assertEqual(chunks[0].page_content, "A ∗ u = f")
+
+    def test_missing_pdf_formula_blocks_keep_normal_markdown_unchanged(self):
+        blocks = missing_pdf_formula_blocks(
+            "The discretized system can be expressed as:\nwhere u and f are vectors.",
+            "The discretized system can be expressed as:\nA ∗ u = f\nwhere u and f are vectors.",
+        )
+
+        self.assertEqual(blocks, [
+            "The discretized system can be expressed as:\nA ∗ u = f\nwhere u and f are vectors."
+        ])
 
     def test_table_spans_are_removed_from_text_chunks(self):
         markdown = f"# Results\n\n**Table 1**\n{TABLE_1}\n\n**Table 2**\n{TABLE_2}\n\nNarrative."
@@ -1293,7 +1331,7 @@ class RuntimeContractTests(unittest.TestCase):
                     ],
                     "metadatas": [
                         {"source": "paper.pdf", "type": "text"},
-                        {"source": "paper.pdf", "type": "text"},
+                        {"source": "paper.pdf", "type": "formula"},
                         {"source": "paper.pdf", "type": "text"},
                     ],
                 }
@@ -1325,6 +1363,66 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(result["context_ids"], ["formula"])
         self.assertTrue(result["context_metadatas"][0]["formula_evidence"])
         self.assertIn("3 × 3", client.prompt)
+
+    def test_hybrid_lexical_path_excludes_formula_chunk(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        class Collection:
+            def count(self):
+                return 2
+
+            def query(self, **_kwargs):
+                return {
+                    "ids": [["normal"]],
+                    "documents": [["ordinary evidence"]],
+                    "metadatas": [[{"source": "paper.pdf", "type": "text"}]],
+                }
+
+            def get(self, **_kwargs):
+                return {
+                    "ids": ["normal", "formula"],
+                    "documents": ["ordinary evidence", "A ∗ u = quantum"],
+                    "metadatas": [
+                        {"source": "paper.pdf", "type": "text"},
+                        {"source": "paper.pdf", "type": "formula"},
+                    ],
+                }
+
+        class Client:
+            chat = completions = None
+
+            def __init__(self):
+                self.chat = self
+                self.completions = self
+
+            def create(self, **_kwargs):
+                return type(
+                    "Response",
+                    (),
+                    {"choices": [type("Choice", (), {"message": type("Message", (), {"content": "ok"})()})()]},
+                )()
+
+        result = app.query_knowledge(
+            "What is quantum?",
+            runtime=app.Runtime(
+                app.RuntimeConfig(
+                    retrieval_mode="hybrid",
+                    hybrid_candidate_k=2,
+                    context_k=1,
+                    formula_evidence_auto=False,
+                ),
+                Client(),
+                Embedding(),
+                Collection(),
+            ),
+        )
+        self.assertEqual(result["context_ids"], ["normal"])
 
     def test_parent_window_does_not_expand_picture_text_blocks(self):
         class Vector(list):
@@ -1722,7 +1820,10 @@ class RuntimeContractTests(unittest.TestCase):
             runtime=runtime,
         )
 
-        self.assertEqual(collection.query_kwargs["where"], {"source": "drugr.pdf"})
+        self.assertEqual(
+            collection.query_kwargs["where"],
+            {"$and": [{"type": {"$ne": "formula"}}, {"source": {"$eq": "drugr.pdf"}}]},
+        )
         self.assertTrue(all("AlphaFold3" not in context for context in result["contexts"]))
         self.assertTrue(
             all(metadata.get("source") == "drugr.pdf" for metadata in result["context_metadatas"])
@@ -1783,7 +1884,7 @@ class RuntimeContractTests(unittest.TestCase):
                 collection,
             ),
         )
-        self.assertNotIn("where", collection.query_kwargs)
+        self.assertEqual(collection.query_kwargs["where"], {"type": {"$ne": "formula"}})
 
     def test_document_routing_scopes_explicit_table_scan_to_selected_source(self):
         class Vector(list):
@@ -1976,6 +2077,51 @@ class RuntimeContractTests(unittest.TestCase):
             ):
                 app.add_document_to_db(handle.name, runtime=runtime)
         self.assertIsNone(runtime._lexical_snapshot)
+
+    def test_formula_storage_keeps_existing_chunk_indices_and_ids(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _text):
+                return Vector([0.1, 0.2])
+
+        class Collection:
+            def __init__(self):
+                self.records = []
+
+            def count(self):
+                return len(self.records)
+
+            def upsert(self, **kwargs):
+                self.records.append(kwargs)
+
+        collection = Collection()
+        runtime = app.Runtime(app.RuntimeConfig(), None, Embedding(), collection)
+        with tempfile.NamedTemporaryFile(suffix=".txt") as handle, patch.object(
+            app,
+            "load_and_split_document",
+            return_value=[
+                Chunk("first", {"type": "text"}),
+                Chunk("A ∗ u = f", {"type": "formula"}),
+                Chunk("second", {"type": "text"}),
+            ],
+        ), patch.object(app, "file_sha256", return_value="document-hash"):
+            app.add_document_to_db(handle.name, runtime=runtime)
+
+        ids = [record["ids"][0] for record in collection.records]
+        metas = [record["metadatas"][0] for record in collection.records]
+        self.assertEqual([metas[0]["chunk_index"], metas[2]["chunk_index"]], [0, 1])
+        self.assertNotIn("chunk_index", metas[1])
+        self.assertEqual(
+            ids[0],
+            hashlib.sha256("document-hash:0:text:first".encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(
+            ids[2],
+            hashlib.sha256("document-hash:1:text:second".encode("utf-8")).hexdigest(),
+        )
 
     def test_query_uses_filtered_contexts_for_generation_and_return(self):
         class Vector(list):
