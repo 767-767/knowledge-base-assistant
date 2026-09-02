@@ -167,6 +167,18 @@ python3 evaluation/validate_benchmark.py \
 扩展清单当前为 6 篇论文、66 题；13 道 THINKNOTE 用例已逐题对照本地 PDF，结果只作为
 额外基准，不覆盖五论文历史报告。
 
+泛化留出清单 `evaluation/benchmark/manifest_generalization.json` 在此基础上加入 TACL 2025
+TANQ 与 Findings of EMNLP 2025 FigEx，共 8 篇论文、82 题；默认关闭，不改变 53/66 题基线。
+PDF 仍保存在仓库外，校验命令为：
+
+```bash
+python3 evaluation/validate_benchmark.py \
+  --manifest evaluation/benchmark/manifest_generalization.json \
+  --papers-dir /Users/qinleqi/Desktop \
+  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
+  --verify-files --require-complete
+```
+
 这些结果测量上下文中的词面事实覆盖和 provenance，不等于答案正确率。详细标注边界见
 `evaluation/benchmark/README.md` 与 `evaluation/benchmark/PAPER_AUDIT.md`。
 
@@ -272,6 +284,11 @@ Answer Relevance 只说明回答与问题相关；Faithfulness 只检查回答�
 - 当前没有图片持久化/OCR、通用工具注册与执行器、图抽取或图数据库。
 - `evaluation/benchmark/manifest_challenge.json` 提供默认关闭的 35 道定向挑战题：10 道
   image-only、20 道 computation、5 道 cross-document；它们只用于采集缺口，不改变默认基准。
+- `evaluation/benchmark/manifest_generalization.json` 提供默认关闭的 16 道留出题，覆盖新论文的
+  表格、图像空间关系和跨文档证据；最终两轮生成 32/32 行成功，16 个 case 的 context 与 provenance
+  均稳定。针对暴露的四类缺口完成通用修复并聚焦复测；人工语义复核记录现为 `16 correct`，详见
+  `evaluation/benchmark/reviews_generalization_16.jsonl`。这不是生产正确率或 RAGAS 结论。表格题的
+  模型/数据集与 setting 消歧、同节续块排序、跨来源共享谓词补证据和空间坐标方向均有回归测试。
 - 多模态至少需要 10 道人工核对的 image-only 失败题；Graph-RAG 至少需要 5 道稳定的
   跨文档多跳失败题；通用工具调用至少需要 20 道真实运算题和 5 道可被本地白名单工具
   稳定修复的失败题。未满足门槛前不增加子系统。

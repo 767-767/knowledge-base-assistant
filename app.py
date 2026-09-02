@@ -835,10 +835,25 @@ _PICTURE_TEXT_MARKER_RE = re.compile(
     r"<!--\s*(?:start|end) of picture text\s*-->|<img\b",
     re.IGNORECASE,
 )
+_SPATIAL_COORDINATE_RE = re.compile(
+    r"\[x\s*=\s*(?P<x0>[-+]?\d+(?:\.\d+)?)\s*-\s*(?P<x1>[-+]?\d+(?:\.\d+)?)%?;\s*"
+    r"y\s*=\s*(?P<y0>[-+]?\d+(?:\.\d+)?)\s*-\s*(?P<y1>[-+]?\d+(?:\.\d+)?)%?\]",
+    re.IGNORECASE,
+)
 _SECTION_QUERY_ALIASES = {
     "数据集": ("dataset", "data"),
+    "规模": ("dataset", "size", "entries", "samples", "statistics"),
+    "条目": ("entries", "dataset", "size"),
+    "平均": ("average", "mean", "statistics", "analysis"),
+    "答案表": ("rows", "columns", "statistics"),
+    "行": ("rows", "row"),
+    "列": ("columns", "column"),
     "显式推理": ("explicit-reasoning", "reasoning"),
     "推理": ("reasoning",),
+    "模型": ("model", "models"),
+    "问题生成": ("question", "generation", "generate"),
+    "切分": ("split", "splitting", "caption", "subcaption"),
+    "证据评估": ("evidence", "evaluation", "supported", "refuted"),
     # Prefer a self-balanced/multi-granular RL section over a generic
     # training-settings heading when both share the same broad token.
     "强化学习": ("reinforcement", "rl", "training", "self-balanced", "multi-granular"),
@@ -863,13 +878,12 @@ def _section_continuation_indices(
     source: str,
     limit: int,
 ) -> list[int]:
-    """Return headerless text chunks contiguous with a section anchor.
+    """Return text chunks contiguous with a section anchor.
 
-    PDF-to-Markdown extraction commonly stores a section header only on its
-    first chunk.  Matching only identical ``headers`` therefore loses the
-    continuation on the next page, even though the next heading has not
-    started yet.  Walk source-local ``chunk_index`` values until the next
-    explicit heading, skip table/figure blocks, and never cross an index gap.
+    PDF-to-Markdown extraction may repeat a section header on adjacent chunks
+    or omit it from continuations. Walk source-local ``chunk_index`` values
+    until the next explicit heading, skip table/figure blocks, and never cross
+    an index gap.
     """
 
     if limit <= 0:
@@ -890,9 +904,8 @@ def _section_continuation_indices(
         source_by_chunk[chunk_index] = index
 
     continuation: list[int] = []
-    # Section headers are attached to the first chunk by the parser, so only
-    # walk forward. Walking backward from the first chunk could incorrectly
-    # import headerless prose belonging to the preceding section.
+    # Only walk forward. Walking backward from the first chunk could import
+    # prose belonging to the preceding section.
     current = anchor_chunk_index
     while len(continuation) < limit:
         current += 1
@@ -902,7 +915,13 @@ def _section_continuation_indices(
         metadata = all_metas[index] if isinstance(all_metas[index], dict) else {}
         if metadata.get("type", "text") != "text":
             continue
-        if str(metadata.get("headers") or "").strip():
+        headers = str(metadata.get("headers") or "").strip()
+        anchor_headers = str(
+            all_metas[anchor_index].get("headers")
+            if isinstance(all_metas[anchor_index], dict)
+            else ""
+        ).strip()
+        if headers and headers != anchor_headers:
             break
         if _is_picture_text_chunk(all_texts[index] if index < len(all_texts) else ""):
             continue
@@ -917,6 +936,23 @@ def _is_picture_text_chunk(text: Any) -> bool:
     return bool(_PICTURE_TEXT_MARKER_RE.search(str(text or "")))
 
 
+def _annotate_spatial_context(text: Any) -> str:
+    """Add a deterministic page-level quadrant to coordinate text evidence."""
+
+    lines: list[str] = []
+    for line in str(text or "").splitlines():
+        match = _SPATIAL_COORDINATE_RE.search(line)
+        if not match or "page-level region" in line.casefold():
+            lines.append(line)
+            continue
+        x_center = (float(match.group("x0")) + float(match.group("x1"))) / 2
+        y_center = (float(match.group("y0")) + float(match.group("y1"))) / 2
+        horizontal = "right" if x_center >= 50 else "left"
+        vertical = "bottom" if y_center >= 50 else "top"
+        lines.append(f"{line} [page-level region: {vertical}-{horizontal}]")
+    return "\n".join(lines)
+
+
 def _is_composite_fact_question(question: str) -> bool:
     """Detect questions likely to require evidence from multiple chunks."""
 
@@ -925,6 +961,7 @@ def _is_composite_fact_question(question: str) -> bool:
     return (
         len(matches) >= 2
         or bool(_LISTED_FACT_QUESTION_RE.search(text))
+        or bool(re.search(r"(?:与|和|以及).{0,60}(?:分别|各自)", text))
         or bool(re.search(r"阶段|管道|步骤", text) and re.search(r"什么|如何|哪些", text))
     )
 
@@ -1096,6 +1133,11 @@ def _section_expansion_result(
     if selected_source not in corpus_sources:
         return None
     query_terms = _section_query_terms(question)
+    if route is not None:
+        query_terms.difference_update(
+            str(token).casefold()
+            for token in getattr(route, "distinctive_tokens", ())
+        )
     if not query_terms:
         return None
 
@@ -1182,8 +1224,13 @@ def _section_expansion_result(
             if section_header:
                 continuation_headers.setdefault(index, section_header)
     selected_indices = [
-        *selected_indices,
-        *[index for index in continuation_indices if index not in selected_indices],
+        *anchors,
+        *continuation_indices,
+        *[
+            index
+            for index in selected_indices
+            if index not in anchors and index not in continuation_indices
+        ],
     ]
     selected_ids: list[str] = []
     selected_docs: list[str] = []
@@ -1398,8 +1445,19 @@ def query_knowledge(
                 str(value) for value in _flat_result_values(variant_result, "ids")[:12]
             )
             if len(routed_sources) > 1:
+                # A source-only clause (for example ``TANQ`` after splitting
+                # ``TANQ 和 FigEx ...``) is useful for routing but carries no
+                # retrieval intent. Reuse the full question for the bounded
+                # source-local evidence fallbacks so the route does not lose
+                # the shared predicate.
+                evidence_question = (
+                    message
+                    if not _is_composite_fact_question(variant)
+                    and _is_composite_fact_question(message)
+                    else variant
+                )
                 variant_section = _section_expansion_result(
-                    variant,
+                    evidence_question,
                     variant_result,
                     runtime,
                     route=variant_route,
@@ -1422,7 +1480,7 @@ def query_knowledge(
                         for value in _flat_result_values(variant_numeric, "ids")
                     )
                 variant_lexical = _lexical_route_evidence_result(
-                    variant,
+                    evidence_question,
                     runtime,
                     variant_route,
                 )
@@ -1723,6 +1781,12 @@ def query_knowledge(
         ordered_metas,
         runtime,
     )
+    ordered_texts = [
+        _annotate_spatial_context(text)
+        if metadata.get("type") == "figure"
+        else text
+        for text, metadata in zip(ordered_texts, ordered_metas)
+    ]
 
     context_parts = []
     for index, (text, metadata) in enumerate(zip(ordered_texts, ordered_metas), start=1):
@@ -1744,6 +1808,12 @@ def query_knowledge(
             label = f"【片段 {index}】"
         context_parts.append(f"{label}\n{text}")
     context = "\n\n---\n\n".join(context_parts)
+    if any(metadata.get("type") == "figure" for metadata in ordered_metas):
+        context = (
+            "【图形坐标约定】图形文字证据使用 PDF 页面坐标：原点在左上角，x 向右增加，"
+            "y 向下增加；因此较大的 y 值位于页面下方。\n\n"
+            + context
+        )
     evidence_ledger = build_evidence_ledger(
         message,
         ordered_texts,

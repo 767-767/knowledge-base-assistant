@@ -8,6 +8,7 @@ retrieval-contract tests can run offline and without a model or API key.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 import hashlib
 import html
 import re
@@ -252,6 +253,13 @@ VALIDATION_PROXIMITY_TERMS = {
 # user may ask for an English table header in Chinese, or abbreviate a header
 # such as "Target property F1 score" to simply "F1 score".
 TABLE_COLUMN_ALIASES = {
+    "all f1": (
+        "all f1",
+        "overall f1",
+        "overall f1 score",
+        "整体 f1",
+        "整体 f1 score",
+    ),
     "overall optimization score": (
         "overall optimization score",
         "overall optimization",
@@ -739,6 +747,8 @@ def extract_spatial_figure_chunks(
             "This is text-layer evidence, not image recognition. Pair a label and value only "
             "when their horizontal x-ranges overlap; do not move values between non-overlapping "
             "visual groups.",
+            "PDF page coordinates use a top-left origin: x increases rightward and y increases "
+            "downward, so a larger y value is lower on the page.",
         ]
         for block in candidates:
             x0_pct = 100.0 * block["x0"] / page_width
@@ -2088,9 +2098,15 @@ def _table_row_group_marker(row: str) -> str | None:
         r"([^)]{1,48})\)",
         flattened,
     )
-    if match is None:
-        return None
-    return match.group(0).casefold()
+    if match is not None:
+        return match.group(0).casefold()
+    # PDF table exporters often flatten a spanning label such as
+    # ``Oracle setting`` into a row whose cells contain only fragments.
+    setting = re.search(
+        r"(?:oracle|closedbook|openbook)setting",
+        flattened,
+    )
+    return setting.group(0).casefold() if setting is not None else None
 
 
 def _table_question_group(question: str) -> str | None:
@@ -2125,13 +2141,253 @@ def _table_data_rows_with_groups(table_content: str) -> list[tuple[str, str | No
         if marker is not None:
             current_group = marker
             continue
+        cells = [display_table_cell(cell) for cell in _split_markdown_row(line)]
+        non_empty = [cell for cell in cells if cell]
+        if len(non_empty) == 1:
+            # Section labels such as ``Skills per question`` are emitted as a
+            # one-cell row by PDF converters; keep them as a bounded row group.
+            current_group = f"section:{_row_entity_key(non_empty[0])}"
+            continue
         rows.append((line, current_group))
     return rows
+
+
+def _table_row_labels(table_content: str) -> list[str]:
+    """Return non-numeric cells that can act as row/entity labels."""
+
+    parsed = parse_markdown_table(table_content)
+    if parsed is None:
+        return []
+    _, rows = parsed
+    labels: list[str] = []
+    for row in rows:
+        row_text = _join_markdown_cells(row)
+        if _table_row_group_marker(row_text) is not None:
+            continue
+        row_cells = _split_markdown_row(row_text)
+        if not any(display_table_cell(cell) for cell in row_cells[1:]):
+            continue
+        for cell in row_cells:
+            display = display_table_cell(cell)
+            display = re.sub(r"^\s*\d+\.\s*", "", display).strip()
+            if display and not _looks_numeric_cell(display) and display not in labels:
+                labels.append(display)
+    return labels
+
+
+def _question_mentions_label(question: str, label: str) -> bool:
+    question_key = normalize_for_match(question)
+    label_key = _row_entity_key(label)
+    if not label_key:
+        return False
+    return bool(
+        re.search(
+            rf"(?<![a-z0-9]){re.escape(label_key)}(?![a-z0-9])",
+            question_key,
+        )
+    )
+
+
+def _question_relation_targets(question: str, labels: Iterable[str]) -> list[str]:
+    """Return labels used as the object before an ``on/在`` qualifier."""
+
+    question_key = normalize_for_match(question)
+    return [
+        label
+        for label in labels
+        if re.search(
+            rf"(?<![a-z0-9]){re.escape(_row_entity_key(label))}(?![a-z0-9])\s*(?:在|on)\b",
+            question_key,
+            re.IGNORECASE,
+        )
+    ]
+
+
+def _question_relation_qualifiers(question: str) -> list[str]:
+    """Return compact ASCII values appearing after ``on/在``."""
+
+    values: list[str] = []
+    for match in re.finditer(
+        r"(?:在|on)\s*([A-Za-z0-9_*+\-]+)",
+        normalize_for_match(question),
+        re.IGNORECASE,
+    ):
+        value = match.group(1)
+        if value.casefold() not in {"oracle", "closed", "open"}:
+            values.append(value)
+    return list(dict.fromkeys(values))
+
+
+def _table_question_entities(question: str, table_content: str) -> list[str]:
+    """Select row labels while separating ``model on dataset`` qualifiers."""
+
+    requested_group = _table_question_group(question)
+    if requested_group and not {
+        group for _, group in _table_data_rows_with_groups(table_content) if group is not None
+    }:
+        return []
+    labels = _table_row_labels(table_content)
+    mentioned = [label for label in labels if _question_mentions_label(question, label)]
+    # Spacing around ``+`` and similar separators is frequently unstable in
+    # PDF Markdown output; keep one label for one logical entity.
+    deduped: list[str] = []
+    seen_keys: set[str] = set()
+    for label in mentioned:
+        key = _row_entity_key(label)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(label)
+    mentioned = deduped
+    relation_targets = _question_relation_targets(question, mentioned)
+    if relation_targets:
+        qualifier_keys = {
+            _row_entity_key(value) for value in _question_relation_qualifiers(question)
+        }
+        return [
+            label
+            for label in mentioned
+            if label in relation_targets or _row_entity_key(label) not in qualifier_keys
+        ]
+    if len(mentioned) > 1:
+        # A question may mention a dataset and a model from the same row. They
+        # are not two requested rows; keep the later (usually model) column.
+        columns: dict[str, set[int]] = {label: set() for label in mentioned}
+        parsed = parse_markdown_table(table_content)
+        if parsed is not None:
+            _, rows = parsed
+            for row in rows:
+                row_text = _join_markdown_cells(row)
+                if _table_row_group_marker(row_text) is not None:
+                    continue
+                for index, cell in enumerate(row):
+                    display = display_table_cell(cell)
+                    for label in mentioned:
+                        if _row_entity_label(display, label) is not None:
+                            columns[label].add(index)
+        distinct_columns = {tuple(sorted(values)) for values in columns.values() if values}
+        if len(distinct_columns) > 1:
+            return [max(mentioned, key=lambda label: max(columns[label], default=-1))]
+    return mentioned
+
+
+def _table_question_group_for_entity(question: str, entity: str) -> str | None:
+    """Return a normalized setting group attached to one queried entity."""
+
+    question_key = normalize_for_match(question)
+    match = re.search(
+        rf"(?<![a-z0-9]){re.escape(_row_entity_key(entity))}(?![a-z0-9])\s*(?:在|on)\s*"
+        r"(?P<group>oracle\s+setting|closed\s+book\s+setting|open\s+book\s+setting|"
+        r"(?:test|dev|validation|evaluation|setting|configuration|split)\s*\([^)]{1,48}\))",
+        question_key,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    return re.sub(r"[\s|]+", "", match.group("group")).casefold()
+
+
+def _dataset_label_matches(value: str, target: str) -> bool:
+    """Match a PDF-exported dataset label, including split-cell typos."""
+
+    left = re.sub(r"[^a-z0-9]", "", normalize_for_match(value))
+    right = re.sub(r"[^a-z0-9]", "", normalize_for_match(target))
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    return min(len(left), len(right)) >= 4 and SequenceMatcher(None, left, right).ratio() >= 0.72
+
+
+def _table_question_dataset_targets(question: str, table_content: str) -> list[str]:
+    """Return dataset qualifiers that can disambiguate repeated table rows."""
+
+    parsed = parse_markdown_table(table_content)
+    if parsed is None:
+        return []
+    headers, rows = parsed
+    dataset_idx = next(
+        (
+            index
+            for index, header in enumerate(headers)
+            if re.search(r"dataset|data\s+set", normalize_for_match(header), re.IGNORECASE)
+        ),
+        None,
+    )
+    if dataset_idx is None:
+        return []
+    relation_targets = _question_relation_qualifiers(question)
+    if relation_targets:
+        return relation_targets
+    candidates = extract_query_entities(question)
+    values = [row[dataset_idx] for row in rows if dataset_idx < len(row)]
+    return [
+        candidate
+        for candidate in candidates
+        if any(_dataset_label_matches(value, candidate) for value in values)
+    ]
+
+
+def _table_data_rows_with_context(
+    question: str,
+    table_content: str,
+) -> list[tuple[str, str | None, str | None]]:
+    """Pair rows with setting and requested dataset context."""
+
+    parsed = parse_markdown_table(table_content)
+    if parsed is None:
+        return []
+    headers, _ = parsed
+    dataset_idx = next(
+        (
+            index
+            for index, header in enumerate(headers)
+            if re.search(r"dataset|data\s+set", normalize_for_match(header), re.IGNORECASE)
+        ),
+        None,
+    )
+    targets = _table_question_dataset_targets(question, table_content)
+    current_dataset: str | None = None
+    result: list[tuple[str, str | None, str | None]] = []
+    for row, group in _table_data_rows_with_groups(table_content):
+        if dataset_idx is not None and targets:
+            cells = _split_markdown_row(row)
+            if dataset_idx < len(cells):
+                value = display_table_cell(cells[dataset_idx])
+                for target in targets:
+                    if _dataset_label_matches(value, target):
+                        current_dataset = target
+                        break
+        result.append((row, group, current_dataset))
+    return result
+
+
+def _best_section_group(
+    entities: Iterable[str],
+    rows: Iterable[tuple[str, str | None, str | None]],
+) -> str | None:
+    """Choose a section that contains the largest complete set of entities."""
+
+    targets = list(entities)
+    coverage: dict[str, set[str]] = {}
+    for row, group, _ in rows:
+        if not group or not group.startswith("section:"):
+            continue
+        for entity in targets:
+            if _row_entity_label(row, entity) is not None:
+                coverage.setdefault(group, set()).add(_row_entity_key(entity))
+    if not coverage:
+        return None
+    best_group, best_entities = max(coverage.items(), key=lambda item: len(item[1]))
+    return best_group if len(best_entities) > 1 else None
 
 
 def select_row_entity(question: str, table_content: str) -> str:
     """Choose the question entity that appears in the applicable table rows."""
 
+    contextual_entities = _table_question_entities(question, table_content)
+    if contextual_entities:
+        return contextual_entities[0]
     grouped_rows = _table_data_rows_with_groups(table_content)
     requested_group = _table_question_group(question)
     known_groups = {group for _, group in grouped_rows if group is not None}
@@ -2296,7 +2552,8 @@ def _requested_table_columns(question: str, headers: list[str]) -> list[int]:
     )
     question_metrics = set(metric_re.findall(normalized_question))
     question_qualifiers = set(qualifier_re.findall(normalized_question.casefold()))
-    requested: list[int] = []
+    direct_requested: list[int] = []
+    fallback_requested: list[int] = []
     for idx, raw_header in enumerate(headers):
         header = normalize_for_match(raw_header)
         clean_header = normalize_for_match(_clean_header_cell(raw_header))
@@ -2318,7 +2575,7 @@ def _requested_table_columns(question: str, headers: list[str]) -> list[int]:
             )
             for candidate in candidates | compact_candidates
         ):
-            requested.append(idx)
+            direct_requested.append(idx)
             continue
 
         # Headers such as ``Darcy rough L2`` contain a dataset qualifier and
@@ -2330,8 +2587,11 @@ def _requested_table_columns(question: str, headers: list[str]) -> list[int]:
         if question_metrics & header_metrics and (
             not header_qualifiers or question_qualifiers & header_qualifiers
         ):
-            requested.append(idx)
-    return requested
+            fallback_requested.append(idx)
+    # Prefer explicitly named semantic aliases (for example ``overall F1`` →
+    # ``all F1``) over the broad metric-token fallback, which would otherwise
+    # return every repeated F1 column in a multi-setting table.
+    return direct_requested or fallback_requested
 
 
 def _select_table_value_for_question(value: Any, question: str) -> str:
@@ -2450,11 +2710,17 @@ def extract_table_cell(
     entity = select_row_entity(question, table_content)
     if not entity:
         return None
-    grouped_rows = _table_data_rows_with_groups(table_content)
+    grouped_rows = _table_data_rows_with_context(question, table_content)
     requested_group = _table_question_group(question)
-    known_groups = {group for _, group in grouped_rows if group is not None}
-    for raw_row, group in grouped_rows:
+    known_groups = {group for _, group, _ in grouped_rows if group is not None}
+    requested_datasets = _table_question_dataset_targets(question, table_content)
+    entity_group = _table_question_group_for_entity(question, entity)
+    for raw_row, group, dataset in grouped_rows:
         if requested_group and known_groups and group != requested_group:
+            continue
+        if entity_group and group != entity_group:
+            continue
+        if requested_datasets and dataset not in requested_datasets:
             continue
         row = _split_markdown_row(raw_row)
         if not row:
@@ -2492,14 +2758,20 @@ def extract_table_row_values(
     if parsed is None:
         return None
     headers, _ = parsed
-    entity = select_row_entity(question, table_content)
-    if not entity:
+    entities = _table_question_entities(question, table_content)
+    if not entities:
+        entity = select_row_entity(question, table_content)
+        entities = [entity] if entity else []
+    if not entities:
         return None
     requested_columns = _requested_table_columns(question, headers)
-    entity_occurrences = len(
-        re.findall(re.escape(_row_entity_key(entity)), _row_entity_key(question))
+    entity_occurrences = max(
+        len(re.findall(re.escape(_row_entity_key(entity)), _row_entity_key(question)))
+        for entity in entities
     )
-    multiple_rows_requested = _question_requests_multiple_rows(question) and entity_occurrences >= 2
+    multiple_rows_requested = len(entities) > 1 or (
+        _question_requests_multiple_rows(question) and entity_occurrences >= 2
+    )
     if len(requested_columns) == 1 and not multiple_rows_requested:
         # A single explicitly named metric is a deterministic cell lookup;
         # returning the whole row would change the public answer contract.
@@ -2510,51 +2782,70 @@ def extract_table_row_values(
         and not multiple_rows_requested
     ):
         return None
-    grouped_rows = _table_data_rows_with_groups(table_content)
+    grouped_rows = _table_data_rows_with_context(question, table_content)
     requested_group = _table_question_group(question)
-    known_groups = {group for _, group in grouped_rows if group is not None}
+    known_groups = {group for _, group, _ in grouped_rows if group is not None}
+    requested_datasets = _table_question_dataset_targets(question, table_content)
+    entity_groups = {
+        _table_question_group_for_entity(question, entity)
+        for entity in entities
+    }
+    section_group = (
+        _best_section_group(entities, grouped_rows)
+        if not requested_group and not any(entity_groups)
+        else None
+    )
     matched_results: list[dict[str, Any]] = []
-    for raw_row, group in grouped_rows:
-        if requested_group and known_groups and group != requested_group:
-            continue
+    for raw_row, group, dataset in grouped_rows:
         row = _split_markdown_row(raw_row)
         if not row:
             continue
-        matched_label = _row_entity_label(_join_markdown_cells(row), entity)
-        if matched_label is None:
-            continue
-        if multiple_rows_requested:
-            # Collect all rows that contain the requested entity as a token.
-            # This handles questions such as “baseline MgNO and six-layer
-            # MgNO” while excluding similarly prefixed rows like MgNO-fno.
-            matched_label = _row_matches_requested_variant(
-                _join_markdown_cells(row), entity, question
-            )
+        row_text = _join_markdown_cells(row)
+        for entity in entities:
+            matched_label = _row_entity_label(row_text, entity)
             if matched_label is None:
                 continue
-        values: list[dict[str, str]] = []
-        column_values = requested_columns or list(range(1, len(row)))
-        for column_idx in column_values:
-            if column_idx >= len(headers):
-                break
-            value = row[column_idx] if column_idx < len(row) else ""
-            values.append(
-                {
-                    "column": display_table_cell(headers[column_idx]),
-                    "value": _select_table_value_for_question(value, question),
-                }
-            )
-        if not values:
-            continue
-        if multiple_rows_requested:
-            matched_results.append({"row": matched_label, "values": values})
-            continue
-        number = table_number_from_metadata(metadata or {})
-        return {
-            "table_number": str(number) if number is not None else "",
-            "row": matched_label,
-            "values": values,
-        }
+            entity_group = _table_question_group_for_entity(question, entity)
+            if requested_group and known_groups and group != requested_group:
+                continue
+            if section_group and group != section_group:
+                continue
+            if entity_group and group != entity_group:
+                continue
+            if requested_datasets and dataset not in requested_datasets:
+                continue
+            if multiple_rows_requested and len(entities) == 1:
+                # Collect all rows that contain the requested entity as a token.
+                # This handles questions such as “baseline MgNO and six-layer
+                # MgNO” while excluding similarly prefixed rows like MgNO-fno.
+                matched_label = _row_matches_requested_variant(
+                    row_text, entity, question
+                )
+                if matched_label is None:
+                    continue
+            values: list[dict[str, str]] = []
+            column_values = requested_columns or list(range(1, len(row)))
+            for column_idx in column_values:
+                if column_idx >= len(headers):
+                    break
+                value = row[column_idx] if column_idx < len(row) else ""
+                values.append(
+                    {
+                        "column": display_table_cell(headers[column_idx]),
+                        "value": _select_table_value_for_question(value, question),
+                    }
+                )
+            if not values:
+                continue
+            if multiple_rows_requested:
+                matched_results.append({"row": matched_label, "values": values})
+                continue
+            number = table_number_from_metadata(metadata or {})
+            return {
+                "table_number": str(number) if number is not None else "",
+                "row": matched_label,
+                "values": values,
+            }
     if multiple_rows_requested and matched_results:
         number = table_number_from_metadata(metadata or {})
         return {
@@ -2684,7 +2975,12 @@ def rerank_table_first(
             # baseline") need the complete table.  Row filtering is reserved
             # for deterministic single-row lookups so baseline evidence is
             # not discarded before generation.
-            if not is_comparative_table_question(question) and not is_derived_value_question(question):
+            if (
+                not is_comparative_table_question(question)
+                and not is_derived_value_question(question)
+                and len(_table_question_entities(question, working_texts[table_idx[0]])) <= 1
+                and not _table_question_dataset_targets(question, working_texts[table_idx[0]])
+            ):
                 for idx in table_idx:
                     entity = select_row_entity(question, working_texts[idx])
                     if entity:
