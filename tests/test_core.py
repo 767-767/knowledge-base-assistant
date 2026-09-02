@@ -82,6 +82,29 @@ TABLE_MULTI_ROW = """|Model Configuration|L2 Error (×10−2)|
 TABLE_CONFIG_VARIANTS = """|Model|RAG|FT|
 |---|---|---|
 |GPT-4o|46.63|54.03|"""
+TABLE_MULTI_DATASET = """|Model|Dataset|BLEU|ROUGE-1|
+|---|---|---|---|
+|Llama-2|MedICaT|0.10|0.20|
+|FigEx-7B||0.11|0.21|
+|Llama-2|BioSci-Fig|0.30|0.40|
+|FigEx-7B||0.72|0.81|"""
+TABLE_MULTI_SETTING = """|Model|all F1|
+|---|---|
+||||Oracle|setting||||
+|Gemini Flash|60.7|
+|Human|73.0|
+||||Closed book|setting||||
+|PaLM-2|47.6|"""
+TABLE_SECTION_GROUPS = """|Question Type|Count|Freq (%)|
+|---|---|---|
+|Skill|||
+|1. No skill|160|14.9|
+|2. Filtering numeric|66|6.1|
+|Skills per question|||
+|1. No skill|300|27.9|
+|2. One skill|657|61.2|
+|3. Two skills|94|8.8|
+|4. Three skills|23|2.1|"""
 
 
 class CoreTests(unittest.TestCase):
@@ -669,6 +692,19 @@ class CoreTests(unittest.TestCase):
             section,
         )
 
+    def test_section_continuation_accepts_repeated_section_headers(self):
+        section = "H3: Dataset Statistics"
+        metadatas = [
+            {"source": "paper.pdf", "headers": section, "type": "text", "chunk_index": 32},
+            {"source": "paper.pdf", "headers": section, "type": "text", "chunk_index": 33},
+            {"source": "paper.pdf", "headers": "H3: Next Section", "type": "text", "chunk_index": 34},
+        ]
+        texts = ["overview", "continuation", "next"]
+        self.assertEqual(
+            app._section_continuation_indices(0, metadatas, texts, "paper.pdf", 2),
+            [1],
+        )
+
     def test_composite_section_expansion_skips_multi_source_collection(self):
         class Vector(list):
             def tolist(self):
@@ -788,6 +824,8 @@ class CoreTests(unittest.TestCase):
         self.assertLess(chunk.page_content.index("n = 25"), chunk.page_content.index("protein–dsDNA"))
         self.assertLess(chunk.page_content.index("RNA / n = 8"), chunk.page_content.index("n = 28"))
         self.assertIn("x=29.9-35.2%", chunk.page_content)
+        self.assertIn("top-left origin", chunk.page_content)
+        self.assertIn("y increases downward", chunk.page_content)
         self.assertNotIn("ignored image", chunk.page_content)
 
     def test_spatial_figure_evidence_separates_collapsed_decimal_labels(self):
@@ -937,6 +975,45 @@ class CoreTests(unittest.TestCase):
                 {"column": "ROUGE-1", "value": "0.10"},
                 {"column": "BertS", "value": "0.78"},
             ],
+        )
+
+    def test_table_lookup_disambiguates_model_and_dataset(self):
+        question = "Table 2 中 FigEx-7B 在 BioSci-Fig 上的 BLEU 和 ROUGE-1 分别是多少？"
+        row = extract_table_row_values(
+            question,
+            TABLE_MULTI_DATASET,
+            {"type": "table", "table_number": 2},
+        )
+        self.assertIsNotNone(row)
+        self.assertEqual(row["row"], "FigEx-7B")
+        self.assertEqual([item["value"] for item in row["values"]], ["0.72", "0.81"])
+
+    def test_table_lookup_returns_named_rows_and_setting_groups(self):
+        question = (
+            "Table 5 中，Gemini Flash 在 oracle setting 的 overall F1、"
+            "Human baseline 的 F1，以及 PaLM-2 在 closed book setting 的 overall F1 分别是多少？"
+        )
+        row = extract_table_row_values(
+            question,
+            TABLE_MULTI_SETTING,
+            {"type": "table", "table_number": 5},
+        )
+        self.assertIsNotNone(row)
+        self.assertEqual(
+            [(item["row"], item["values"][0]["value"]) for item in row["rows"]],
+            [("Gemini Flash", "60.7"), ("Human", "73.0"), ("PaLM-2", "47.6")],
+        )
+
+    def test_table_lookup_selects_section_covering_all_requested_entities(self):
+        row = extract_table_row_values(
+            "Table 4 中，TANQ 的 no skill、one skill、two skills 和 three skills 分别有多少个样本？",
+            TABLE_SECTION_GROUPS,
+            {"type": "table", "table_number": 4},
+        )
+        self.assertIsNotNone(row)
+        self.assertEqual(
+            [item["values"][0]["value"] for item in row["rows"]],
+            ["300", "657", "94", "23"],
         )
 
     def test_table_multi_line_values_select_requested_representation(self):
@@ -1453,6 +1530,15 @@ class RuntimeContractTests(unittest.TestCase):
         )
         self.assertGreater(rl_score, generic_score)
 
+    def test_composite_question_detects_shared_predicate_for_named_sources(self):
+        self.assertTrue(app._is_composite_fact_question("TANQ 和 FigEx 分别报告了多大规模的数据集？"))
+        self.assertIn("entries", app._section_query_terms("TANQ 和 FigEx 分别报告了多大规模的数据集？"))
+        self.assertIn("columns", app._section_query_terms("答案表平均有多少行和列？"))
+
+    def test_spatial_context_adds_page_level_quadrant(self):
+        annotated = app._annotate_spatial_context("[x=70.1-71.0%; y=85.4-86.5%] O")
+        self.assertIn("page-level region: bottom-right", annotated)
+
     def test_explicit_figure_query_promotes_exact_spatial_evidence(self):
         class Vector(list):
             def tolist(self):
@@ -1544,6 +1630,8 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(result["context_ids"], ["figure-1"])
         self.assertEqual(result["context_metadatas"][0]["type"], "figure")
         self.assertIn("RNA / n = 8", client.prompt)
+        self.assertIn("原点在左上角", client.prompt)
+        self.assertIn("y 向下增加", client.prompt)
         self.assertIn("figure_number", str(collection.figure_where))
         self.assertIn("$ne", str(collection.dense_where))
         self.assertNotIn("【补充原文核对项】", result["answer"])

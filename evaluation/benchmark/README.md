@@ -31,6 +31,15 @@ SciDQA、科学表格理解、MgNO 和 AlphaFold 3 四篇论文的独立问题�
 `calculation.expected_result` 不写入 gold context，只作为后续答案/工具审计目标；跨文档题的
 `additional_document_ids` 必须全部命中才算目标文档命中。
 
+`manifest_generalization.json` 继承扩展清单并加入 TACL 2025 TANQ、Findings of EMNLP 2025 FigEx
+及 16 道留出题，共 8 篇论文、82 道题。它默认关闭，只用于换论文后的表格、Figure 空间关系和跨文档
+检索验证；PDF 保存在仓库外，未提交到 Git。
+
+16 道新增题在隔离 904 块数据库上各生成两轮，最终 32/32 次调用成功；16 个 case 的上下文与
+provenance 均稳定。针对 TANQ 续块/跨文档证据和 Figure 空间坐标完成通用修复，并对受影响题目
+聚焦复测；人工复核记录现为 `16 correct`，详情见 `reviews_generalization_16.jsonl`。这仍不能
+外推为生产正确率或通用泛化结论。
+
 `cases.jsonl` 每行一个用例。当前用例使用引用形式：
 
 ```json

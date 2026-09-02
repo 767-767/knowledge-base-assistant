@@ -77,6 +77,24 @@ class BenchmarkLoaderTests(unittest.TestCase):
                 self.assertNotIn(expected, " ".join(case["contexts"]))
                 self.assertTrue(is_derived_value_question(case["question"]))
 
+    def test_generalization_manifest_merges_new_holdout_cases(self):
+        benchmark = load_benchmark("evaluation/benchmark/manifest_generalization.json")
+        summary = benchmark_summary(benchmark)
+        self.assertEqual(summary["documents"], 8)
+        self.assertEqual(summary["cases"], 82)
+        self.assertEqual(summary["cases_per_document"]["tanq-tacl-2025"], 9)
+        self.assertEqual(summary["cases_per_document"]["figex-emnlp-2025"], 7)
+        cross_cases = [
+            case for case in benchmark["cases"] if case.get("challenge_type") == "cross_document"
+        ]
+        self.assertEqual(len(cross_cases), 2)
+        self.assertTrue(all(case.get("additional_document_ids") for case in cross_cases))
+        image_cases = [
+            case for case in benchmark["cases"] if case.get("challenge_type") == "image_only"
+        ]
+        self.assertEqual(len(image_cases), 1)
+        self.assertTrue(all(not unsupported_gold_facts(case) for case in benchmark["cases"]))
+
     def test_loader_rejects_alias_for_an_unknown_required_fact(self):
         with tempfile.TemporaryDirectory() as temp_root:
             root = Path(temp_root)
