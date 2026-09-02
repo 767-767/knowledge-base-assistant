@@ -16,19 +16,23 @@ from sci_rag_core import (
     extract_table_cell,
     extract_table_row_values,
     extract_tables,
+    find_table_cell_in_chunks,
     filter_table_rows_by_entity,
     figure_reference_from_question,
     is_comparative_table_question,
+    is_derived_value_question,
     is_formula_question,
     is_limitation_question,
     limitation_evidence_indices,
     is_table_question,
+    matching_table_indices,
     normalize_for_match,
     missing_pdf_formula_blocks,
     rerank_table_first,
     select_row_entity,
     split_to_chunks,
     supplement_answer_with_evidence,
+    table_numbers_from_question,
     validate_answer_against_evidence,
 )
 
@@ -81,8 +85,42 @@ TABLE_CONFIG_VARIANTS = """|Model|RAG|FT|
 
 
 class CoreTests(unittest.TestCase):
+    def test_routed_numeric_evidence_normalizes_thousands_separator(self):
+        class Collection:
+            def count(self):
+                return 2
+
+            def get(self, **_kwargs):
+                return {
+                    "ids": ["noise", "answer"],
+                    "documents": [
+                        "A nearby result mentions 700.",
+                        "Annotators reviewed 7000 candidate instances.",
+                    ],
+                    "metadatas": [
+                        {"source": "paper.pdf", "type": "text"},
+                        {"source": "paper.pdf", "type": "text"},
+                    ],
+                }
+
+        runtime = app.Runtime(
+            app.RuntimeConfig(document_routing=True),
+            object(),
+            object(),
+            Collection(),
+        )
+        result = app._numeric_route_evidence_result(
+            "SciDQA 审阅了 7,000 个候选实例",
+            runtime,
+            DocumentRoute("paper.pdf", ("scidqa",)),
+        )
+        self.assertEqual(result["ids"], [["answer"]])
+        self.assertTrue(result["metadatas"][0][0]["route_evidence"])
+        self.assertIn("3", app._explicit_number_tokens("top-3 chunks"))
+
     def test_generation_prompt_prevents_contradictory_refusal(self):
         self.assertIn("不得在已经给出具体表格数值后", app.SCIENTIFIC_SYSTEM_PROMPT)
+        self.assertIn("明确要求计算", app.SCIENTIFIC_SYSTEM_PROMPT)
         self.assertIn("逐一检查全部参考片段", app.SCIENTIFIC_SYSTEM_PROMPT)
         self.assertIn("限制问题要区分限制本身与示例现象", app.SCIENTIFIC_SYSTEM_PROMPT)
         self.assertIn("不能用“训练数据限制”等参考片段未出现的机制替代", app.SCIENTIFIC_SYSTEM_PROMPT)
@@ -752,6 +790,42 @@ class CoreTests(unittest.TestCase):
         self.assertIn("x=29.9-35.2%", chunk.page_content)
         self.assertNotIn("ignored image", chunk.page_content)
 
+    def test_spatial_figure_evidence_separates_collapsed_decimal_labels(self):
+        blocks = [
+            (0, 10, 100, 20, "67.4068.80", 0, 0),
+            (0, 30, 100, 50, "Figure 3 | chart", 1, 0),
+        ]
+        chunks = extract_spatial_figure_chunks(
+            blocks,
+            "paper.pdf",
+            7,
+            100,
+            100,
+            max_region_height=100,
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertIn("67.40 / 68.80", chunks[0].page_content)
+
+    def test_spatial_figure_evidence_keeps_side_by_side_captions_independent(self):
+        blocks = [
+            (0, 10, 40, 20, "left evidence", 0, 0),
+            (60, 40, 100, 50, "right evidence", 1, 0),
+            (0, 80, 40, 90, "Figure 1: left", 2, 0),
+            (60, 100, 100, 110, "Figure 2: right", 3, 0),
+        ]
+
+        chunks = extract_spatial_figure_chunks(
+            blocks,
+            "paper.pdf",
+            7,
+            100,
+            120,
+            max_region_height=80,
+        )
+
+        self.assertEqual([chunk.metadata["figure_number"] for chunk in chunks], [1, 2])
+        self.assertIn("right evidence", chunks[1].page_content)
+
     def test_split_preserves_pretyped_figure_chunk(self):
         figure = Chunk(
             "Figure 2 spatial text evidence\n[x=10.0-20.0%] n = 8",
@@ -950,6 +1024,255 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(order, [0])
         self.assertIn("GPT5", filtered[0])
         self.assertIn("DrugR", filtered[0])
+
+    def test_derived_value_intent_has_english_chinese_and_lookup_boundaries(self):
+        self.assertTrue(is_derived_value_question("Table 1 中两项得分相差多少？"))
+        self.assertTrue(is_derived_value_question("Compute the difference between the two scores."))
+        self.assertTrue(is_derived_value_question("Table 1 三项得分的算术平均是多少？"))
+        self.assertTrue(is_derived_value_question("What is the relative increase in percentage?"))
+        self.assertFalse(is_derived_value_question("Table 1 中 DrugR 的 Score 是多少？"))
+        self.assertFalse(is_derived_value_question("What is the value in the Score column?"))
+        self.assertFalse(is_derived_value_question("Table 2 中涉及表格的问题占比是多少？"))
+        self.assertFalse(is_derived_value_question("What is the percentage in the table?"))
+
+    def test_multiple_explicit_table_numbers_are_matched_together(self):
+        question = "按 Table 1 和 Table 2 计算两项指标的提升。"
+        self.assertEqual(table_numbers_from_question(question), (1, 2))
+        self.assertEqual(
+            matching_table_indices(
+                question,
+                [TABLE_1, TABLE_2],
+                [
+                    {"type": "table", "table_number": 1},
+                    {"type": "table", "table_number": 2},
+                ],
+            ),
+            [0, 1],
+        )
+
+    def test_derived_table_question_keeps_full_table_and_skips_cell_lookup(self):
+        question = "Table 1 中 DrugR 的 Score 比 GPT5 高多少？"
+        self.assertIsNone(
+            find_table_cell_in_chunks(
+                question, [TABLE_1], [{"type": "table", "table_number": 1}]
+            )
+        )
+        order, _, filtered = rerank_table_first(
+            question,
+            [TABLE_1],
+            [{"type": "table", "table_number": 1}],
+        )
+        self.assertEqual(order, [0])
+        self.assertEqual(filtered, [TABLE_1])
+
+    def test_derived_table_question_calls_generation_with_full_operands(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        class Collection:
+            def count(self):
+                return 1
+
+            def query(self, **_kwargs):
+                return {
+                    "ids": [["table1"]],
+                    "documents": [[TABLE_1]],
+                    "metadatas": [[{"type": "table", "table_number": 1}]],
+                }
+
+            def get(self, **_kwargs):
+                return {
+                    "ids": ["table1"],
+                    "documents": [TABLE_1],
+                    "metadatas": [{"type": "table", "table_number": 1}],
+                }
+
+        class Client:
+            def __init__(self):
+                self.prompt = None
+                self.chat = self
+                self.completions = self
+
+            def create(self, **kwargs):
+                self.prompt = kwargs["messages"][1]["content"]
+                return type(
+                    "Response",
+                    (),
+                    {
+                        "choices": [
+                            type(
+                                "Choice",
+                                (),
+                                {"message": type("Message", (), {"content": "0.0743"})()},
+                            )
+                        ]
+                    },
+                )()
+
+        client = Client()
+        result = app.query_knowledge(
+            "Table 1 中 DrugR 的 Score 比 GPT5 高多少？",
+            runtime=app.Runtime(
+                app.RuntimeConfig(context_k=1), client, Embedding(), Collection()
+            ),
+        )
+        self.assertEqual(result["answer"], "0.0743")
+        self.assertIsNotNone(client.prompt)
+        self.assertIn("0.2712", client.prompt)
+        self.assertIn("0.1969", client.prompt)
+
+    def test_multi_table_derived_question_keeps_all_named_tables(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        table_one = """|Setting|Model|ROUGE-1|
+|---|---|---|
+|Zero|FlanT5-xl|0.10|"""
+        table_two = """|Setting|Model|ROUGE-1|
+|---|---|---|
+|WikiTQ+SQA+SciGen|FlanT5-xl|0.24|"""
+
+        class Collection:
+            def count(self):
+                return 2
+
+            def query(self, **_kwargs):
+                return {
+                    "ids": [["table1"]],
+                    "documents": [[table_one]],
+                    "metadatas": [[{"type": "table", "table_number": 1}]],
+                }
+
+            def get(self, **_kwargs):
+                return {
+                    "ids": ["table1", "table2"],
+                    "documents": [table_one, table_two],
+                    "metadatas": [
+                        {"type": "table", "table_number": 1},
+                        {"type": "table", "table_number": 2},
+                    ],
+                }
+
+        class Client:
+            def __init__(self):
+                self.prompt = None
+                self.chat = self
+                self.completions = self
+
+            def create(self, **kwargs):
+                self.prompt = kwargs["messages"][1]["content"]
+                return type(
+                    "Response",
+                    (),
+                    {
+                        "choices": [
+                            type(
+                                "Choice",
+                                (),
+                                {"message": type("Message", (), {"content": "0.14"})()},
+                            )
+                        ]
+                    },
+                )()
+
+        client = Client()
+        result = app.query_knowledge(
+            "按 Table 1 和 Table 2，WikiTQ+SQA+SciGen 的 FlanT5-xl ROUGE-1 比零样本提高多少？",
+            runtime=app.Runtime(
+                app.RuntimeConfig(context_k=2), client, Embedding(), Collection()
+            ),
+        )
+        self.assertEqual(result["answer"], "0.14")
+        self.assertIn("0.10", client.prompt)
+        self.assertIn("0.24", client.prompt)
+
+    def test_cross_document_question_keeps_one_context_per_routed_source(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        documents = [
+            "DrugR reinforcement learning uses GRPO.",
+            "DrugR overview.",
+            "MgNO baseline is configured with 5 levels.",
+            "MgNO overview.",
+        ]
+        metadatas = [
+            {"source": "drugr.pdf", "type": "text", "page": 1},
+            {"source": "drugr.pdf", "type": "text", "page": 2},
+            {"source": "mgno.pdf", "type": "text", "page": 1},
+            {"source": "mgno.pdf", "type": "text", "page": 2},
+        ]
+
+        class Collection:
+            def count(self):
+                return len(documents)
+
+            def query(self, **_kwargs):
+                return {
+                    "ids": [["drugr-1", "drugr-2", "mgno-1", "mgno-2"]],
+                    "documents": [documents],
+                    "metadatas": [metadatas],
+                }
+
+            def get(self, **_kwargs):
+                return {
+                    "ids": ["drugr-1", "drugr-2", "mgno-1", "mgno-2"],
+                    "documents": documents,
+                    "metadatas": metadatas,
+                }
+
+        class Client:
+            def __init__(self):
+                self.prompt = None
+                self.chat = self
+                self.completions = self
+
+            def create(self, **kwargs):
+                self.prompt = kwargs["messages"][1]["content"]
+                return type(
+                    "Response",
+                    (),
+                    {"choices": [type("Choice", (), {"message": type("Message", (), {"content": "ok"})()})()]},
+                )()
+
+        client = Client()
+        result = app.query_knowledge(
+            "结合两篇论文：DrugR 强化学习阶段使用什么算法，MgNO 的基线配置有多少个 levels？",
+            runtime=app.Runtime(
+                app.RuntimeConfig(
+                    retrieval_mode="dense",
+                    retrieval_k=4,
+                    context_k=2,
+                    document_routing=True,
+                    query_decomposition=True,
+                ),
+                client,
+                Embedding(),
+                Collection(),
+            ),
+        )
+        self.assertEqual(result["answer"], "ok")
+        self.assertEqual(
+            {metadata["source"] for metadata in result["context_metadatas"]},
+            {"drugr.pdf", "mgno.pdf"},
+        )
+        self.assertIn("GRPO", client.prompt)
+        self.assertIn("5 levels", client.prompt)
 
     def test_caption_detection_does_not_match_stable(self):
         markdown = "Figure 5 stable training dynamics.\n\n|x|y|\n|---|---|\n|0|1|"

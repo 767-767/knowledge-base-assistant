@@ -19,7 +19,7 @@ from sci_rag_core import normalize_for_match
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9*._+\-]*|[\u4e00-\u9fff]")
 CJK_TOKEN_RE = re.compile(r"[\u4e00-\u9fff]")
-_CLAUSE_SEPARATOR_RE = re.compile(r"[，,；;]+")
+_CLAUSE_SEPARATOR_RE = re.compile(r"[，；;]+|(?<!\d),(?!\d)")
 _CONJUNCTION_RE = re.compile(r"\s*(与|以及|和)\s*")
 _QUESTION_CUE_RE = re.compile(r"什么|哪些|多少|如何|是否|分别|配置|指标|问题|条件|下")
 
@@ -71,6 +71,51 @@ def query_variants(question: str, max_variants: int = 4) -> list[str]:
         if len(variants) >= int(max_variants):
             break
     return variants
+
+
+def ensure_source_coverage(
+    order: Iterable[int],
+    metadatas: Iterable[dict[str, Any]],
+    required_sources: Iterable[str],
+    limit: int,
+    preferred_order: Iterable[int] | None = None,
+) -> list[int]:
+    """Promote one candidate per routed source into a bounded context prefix."""
+
+    ordered = list(dict.fromkeys(int(index) for index in order))
+    metas = list(metadatas)
+    sources = tuple(dict.fromkeys(str(source).strip() for source in required_sources if str(source).strip()))
+    preferred = tuple(
+        dict.fromkeys(int(index) for index in (preferred_order or ()) if int(index) in ordered)
+    )
+    prefix_limit = min(max(0, int(limit)), len(ordered))
+    if len(sources) <= 1 or not prefix_limit:
+        return ordered
+
+    def source_for(index: int) -> str:
+        if not 0 <= index < len(metas):
+            return ""
+        metadata = metas[index] if isinstance(metas[index], dict) else {}
+        return str(metadata.get("benchmark_document_id") or metadata.get("source") or "").strip()
+
+    selected: list[int] = []
+    for source in sources:
+        candidate = next(
+            (index for index in preferred if source_for(index) == source),
+            None,
+        )
+        if candidate is None:
+            candidate = next(
+                (index for index in ordered if source_for(index) == source),
+                None,
+            )
+        if candidate is not None and candidate not in selected:
+            selected.append(candidate)
+    prefix = selected[:prefix_limit]
+    prefix.extend(
+        index for index in ordered if index not in prefix and len(prefix) < prefix_limit
+    )
+    return prefix + [index for index in ordered if index not in prefix]
 
 
 @dataclass(frozen=True)

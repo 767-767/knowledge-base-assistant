@@ -4,7 +4,8 @@
 检索、DeepSeek 生成、Gradio UI，以及离线检索/答案审计和可选 RAGAS 评估。
 
 当前定位是研究型可用原型，不是生产系统。默认检索仍为 dense；Hybrid、cross-encoder、
-文档路由和窗口扩展均是可控开关。OCR/VLM、通用工具调用和 Graph-RAG 尚未实现。
+文档路由和窗口扩展均是可控开关；PDF Figure 的 VLM 路径仅作为默认关闭的 opt-in 实验。
+OCR、图片向量索引、通用工具调用和 Graph-RAG 尚未实现。
 
 ## 快速开始
 
@@ -73,6 +74,8 @@ bash scripts/launch_phase1_ui_test.sh --existing
 | `SCI_RAG_RETRIEVAL_K` | `12` | dense 初始候选数 |
 | `SCI_RAG_CONTEXT_K` | `10` | 实际送入生成模型的上下文槽位 |
 | `SCI_RAG_DOCUMENT_ROUTING` | `false` | 唯一高信号标识符命中时限制来源 |
+| `SCI_RAG_VISION_ENABLED` | `false` | PDF Figure 问题的 opt-in 视觉路径；需同时开启文档路由 |
+| `SCI_RAG_VISION_MODEL` | `deepseek-v4-flash-vision-exp` | 视觉路径使用的模型名 |
 | `SCI_RAG_QUERY_DECOMPOSITION` | `false` | 对复合问题生成有界子查询 |
 | `SCI_RAG_PARENT_WINDOW` | `false` | 为前两个正文锚点拼接同页邻块 |
 | `SCI_RAG_SPATIAL_FIGURE_EVIDENCE` | `false` | 读取 PDF 文字层中的 Figure 坐标证据 |
@@ -98,8 +101,14 @@ python3 app.py
 ```
 
 Hybrid 首次查询会从当前 collection 构建内存 BM25 快照；上传文档后快照自动失效。
-路由只在来源唯一时生效，歧义或跨论文问题回退全库。所有实验检索之后仍执行表号保护和
-确定性单元格查找。
+路由只在来源唯一时生效；开启查询分解后，跨论文问题的各子句分别限定到各自来源，并保留有界
+来源内 lexical/同节/数字证据。歧义问题仍回退全库。所有实验检索之后仍执行表号保护和确定性单元格查找。
+
+视觉路径默认关闭。开启 `SCI_RAG_VISION_ENABLED=true` 并同时开启
+`SCI_RAG_DOCUMENT_ROUTING=true` 后，上传的 PDF 会按 SHA-256 保存到
+`<SCI_RAG_DB_PATH>/source_pdfs/`；仅明确包含 Figure/Extended Data Figure 且能唯一定位来源的
+问题会发送完整图和局部图。普通问题、表格问题、来源不明确的问题继续使用文本 RAG。
+该路径目前是 opt-in 实验，尚未达到默认推广标准。
 
 ## 五论文离线基准
 
@@ -143,6 +152,20 @@ HF_HUB_OFFLINE=1 python3 evaluation/benchmark_retrieval.py \
   --structured-table-guard --parent-window --formula-evidence \
   --limitation-evidence --show-failures
 ```
+
+如需将已核对的 THINKNOTE（Findings of EACL 2026）加入对照，可显式使用扩展清单；它通过
+`base_manifest` 继承五论文基线，不改变默认 53 题：
+
+```bash
+python3 evaluation/validate_benchmark.py \
+  --manifest evaluation/benchmark/manifest_expanded.json \
+  --papers-dir /Users/qinleqi/Desktop \
+  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
+  --verify-files --require-complete
+```
+
+扩展清单当前为 6 篇论文、66 题；13 道 THINKNOTE 用例已逐题对照本地 PDF，结果只作为
+额外基准，不覆盖五论文历史报告。
 
 这些结果测量上下文中的词面事实覆盖和 provenance，不等于答案正确率。详细标注边界见
 `evaluation/benchmark/README.md` 与 `evaluation/benchmark/PAPER_AUDIT.md`。
@@ -195,6 +218,18 @@ python3 evaluation/review_answers.py \
 
 答案词面覆盖、拒答风险和证据提示都是诊断信号，不能代替逐题语义复核。
 
+金标准答案审计（不调用模型）：
+
+```bash
+python3 evaluation/ground_truth_audit.py \
+  --testset evaluation/benchmark/cases.jsonl \
+  --answers /tmp/sci_rag_generation_trace.jsonl \
+  --require-all --json-out /tmp/sci_rag_ground_truth_audit.json
+```
+
+该报告分别输出 required-fact 词面覆盖、人工整理上下文召回和规范化文本一致性；只有附带
+`--reviews` 的人工判断才计入语义正确性，不能把任一自动指标直接称为答案正确率。
+
 ## RAGAS 边界
 
 只有明确授权外部调用时才运行：
@@ -235,6 +270,8 @@ Answer Relevance 只说明回答与问题相关；Faithfulness 只检查回答�
 - evidence-only 检查第一轮为 30 `ok`、23 `not_applicable`，第二轮为 29 `ok`、
   23 `not_applicable`、1 `review`；这些诊断与人工复核都不能外推为跨领域泛化或生产可靠性。
 - 当前没有图片持久化/OCR、通用工具注册与执行器、图抽取或图数据库。
+- `evaluation/benchmark/manifest_challenge.json` 提供默认关闭的 35 道定向挑战题：10 道
+  image-only、20 道 computation、5 道 cross-document；它们只用于采集缺口，不改变默认基准。
 - 多模态至少需要 10 道人工核对的 image-only 失败题；Graph-RAG 至少需要 5 道稳定的
   跨文档多跳失败题；通用工具调用至少需要 20 道真实运算题和 5 道可被本地白名单工具
   稳定修复的失败题。未满足门槛前不增加子系统。

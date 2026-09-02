@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-multipaper-v2",
+  "description": "Opt-in expansion of the stable five-paper benchmark with one additional open-access EACL paper.",
+  "base_manifest": "manifest.json",
+  "minimum_documents": 6,
+  "cases_path": "cases_eacl_2026.jsonl",
+  "documents": [
+    {
+      "document_id": "thinknote-eacl-2026",
+      "filename": "2026.findings-eacl.12.pdf",
+      "sha256": "befaff6facc1b9776c9a095b03ecfb0fe78ee5a07d6454201f14de4d55c77b30",
+      "title": "THINKNOTE: Enhancing Knowledge Integration and Utilization of Large Language Models via Constructivist Cognition Modeling",
+      "venue": "Findings of EACL 2026",
+      "year": 2026,
+      "domain": "NLP / retrieval-augmented generation",
+      "layout_tags": ["two-column", "tables", "figures", "formulas", "appendix"],
+      "source_url": "https://aclanthology.org/2026.findings-eacl.12/",
+      "pdf_url": "https://aclanthology.org/2026.findings-eacl.12.pdf",
+      "access": "official free PDF; ACL materials after 2016 are CC BY 4.0",
+      "status": "curated"
+    }
+  ]
+}

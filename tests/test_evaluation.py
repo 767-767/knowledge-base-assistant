@@ -28,6 +28,11 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(gold_context_recall(["alpha beta", "gamma delta"], case), 1.0)
         self.assertEqual(gold_context_recall(["alpha beta"], case), 0.5)
 
+    def test_gold_context_recall_allows_larger_format_shifted_chunks(self):
+        case = {"contexts": ["The dataset contains 10 samples and uses Model-X."]}
+        retrieved = ["Before the sentence. The dataset contains 10 samples; it uses Model-X. After it."]
+        self.assertEqual(gold_context_recall(retrieved, case), 1.0)
+
     def test_build_report_preserves_generation_and_evaluation_traces(self):
         case = {
             "id": "case-1",

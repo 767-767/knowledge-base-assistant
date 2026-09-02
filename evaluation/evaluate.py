@@ -75,6 +75,23 @@ def _normalise_for_evaluation(value: Any) -> str:
     return text.strip()
 
 
+_GOLD_CONTEXT_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9*._+\-]*|[\u3400-\u9fff]")
+
+
+def _gold_context_match(reference: str, candidate: str, threshold: float = 0.6) -> bool:
+    """Match a curated snippet to a larger/format-shifted retrieved chunk."""
+
+    reference_text = _normalise_for_evaluation(reference)
+    candidate_text = _normalise_for_evaluation(candidate)
+    if not reference_text or not candidate_text:
+        return False
+    if reference_text in candidate_text or candidate_text in reference_text:
+        return True
+    reference_tokens = set(_GOLD_CONTEXT_TOKEN_RE.findall(reference_text))
+    candidate_tokens = set(_GOLD_CONTEXT_TOKEN_RE.findall(candidate_text))
+    return bool(reference_tokens) and len(reference_tokens & candidate_tokens) / len(reference_tokens) >= threshold
+
+
 def fact_coverage(answer: str, case: dict[str, Any]) -> tuple[float | None, bool | None]:
     """Check manually declared atomic facts without an LLM.
 
@@ -90,16 +107,18 @@ def fact_coverage(answer: str, case: dict[str, Any]) -> tuple[float | None, bool
 
 
 def gold_context_recall(contexts: list[str], case: dict[str, Any]) -> float | None:
-    """Return the fraction of gold context snippets represented in retrieved text."""
+    """Return the fraction of gold snippets represented in retrieved text.
+
+    Retrieval chunks often add neighboring sentences or change Markdown/table
+    spacing. Exact substring matching alone therefore understates recall.
+    """
 
     gold = case.get("contexts") or []
     if not gold:
         return None
-    retrieved = [_normalise_for_evaluation(context) for context in contexts]
     hits = 0
     for reference in gold:
-        target = _normalise_for_evaluation(reference)
-        if any(target in candidate or candidate in target for candidate in retrieved):
+        if any(_gold_context_match(str(reference), str(candidate)) for candidate in contexts):
             hits += 1
     return hits / len(gold)
 

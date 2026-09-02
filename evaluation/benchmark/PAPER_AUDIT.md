@@ -141,5 +141,13 @@ AlphaFold 3 第 2 页 Figure 1 的实际文字层把 `PDB / protein–RNA` 与 `
 新证据仅在显式图号查询中旁路注入，并移除同一回答中的扁平 picture-text 干扰；普通检索
 候选不包含 figure chunks。
 
+## 扩展清单（默认关闭）
+
+桌面已有的 `2026.findings-eacl.12.pdf` 为 Findings of EACL 2026 的开放获取论文
+THINKNOTE（19 页，SHA-256 为 `befaff6facc1b9776c9a095b03ecfb0fe78ee5a07d6454201f14de4d55c77b30`）。
+`manifest_expanded.json` 通过 `base_manifest` 继承五论文基线，并追加 13 道方法、公式、表格、
+图和限制题；可用 `validate_benchmark.py --manifest ... --verify-files` 复核文件与标注。
+它用于扩大领域覆盖，不改写默认五论文/53 题的历史指标，也不代表已完成生成或语义评估。
+
 这不是图片理解：PDF 图片仍未持久化，纯扫描页或只存在于像素中的 Extended Data 图不会
 生成坐标证据。当前结果只支持把该功能作为默认关闭的 born-digital PDF 实验路径。

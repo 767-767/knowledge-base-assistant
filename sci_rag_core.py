@@ -33,6 +33,21 @@ TABLE_COMPARISON_QUESTION_RE = re.compile(
     r"compare|comparison|baselines?|which\s+metrics?|best|highest|lowest",
     re.IGNORECASE,
 )
+DERIVED_VALUE_QUESTION_RE = re.compile(
+    r"差(?:多少|值)|相差|高(?:出|于)?多少|低(?:出|于)?多少|多多少|少多少|"
+    r"计算|合计|总和|总计|求和|相加|加总|算术平均|求平均|的平均值|"
+    r"(?:比例|占比|百分比|百分之几)(?:[^。！？?]{0,24}(?:计算|保留(?:两|二|三|四|五|\d+)位))|"
+    r"(?:计算|求)[^。！？?]{0,32}(?:比例|占比|百分比|百分之几)|"
+    r"(?:占总数|占全部|占[^。！？?]{0,12}的)[^。！？?]{0,16}(?:比例|占比|百分比|百分之几)|"
+    r"(?:比例|占比|百分比|百分之几)[^。！？?]{0,24}保留(?:两|二|三|四|五|\d+)位|"
+    r"几成|倍数|多少倍|几倍|保留率[^。！？?]{0,32}保留(?:两|二|三|四|五|\d+)位|"
+    r"相对(?:提升|提高|增长|增加|下降|降低)|绝对提升|提升百分比|降低百分比|增幅|降幅|"
+    r"\b(?:calculate|compute|calculation|difference(?:\s+between)?|"
+    r"how\s+much\s+(?:higher|lower|more|less)|sum|total|arithmetic\s+average|"
+    r"mean\s+of|average\s+of|ratio\s+of|percentage\s+of|proportion\s+of|times|relative\s+"
+    r"(?:increase|decrease)|increase\s+percentage|decrease\s+percentage)\b",
+    re.IGNORECASE,
+)
 FIGURE_REFERENCE_RE = re.compile(
     r"(?P<extended>extended\s+data\s+)?(?:fig(?:ure)?\.?|图)\s*"
     r"(?P<number>[1-9]\d*)(?:[A-Za-z])?(?![\dA-Za-z])",
@@ -635,6 +650,14 @@ def extract_spatial_figure_chunks(
     if page_width <= 0 or page_height <= 0:
         return []
 
+    def separate_numeric_labels(value: str) -> str:
+        """Separate adjacent two-decimal chart labels collapsed by PDF extraction."""
+
+        # Some born-digital charts expose neighbouring labels as one token
+        # (for example ``67.4068.80``). Restrict this repair to two-decimal
+        # values so ordinary years, identifiers, and prose are left alone.
+        return re.sub(r"(\d+\.\d{2})(?=\d+\.\d{2})", r"\1 / ", value)
+
     parsed: list[dict[str, Any]] = []
     for raw in blocks:
         if len(raw) < 7:
@@ -649,6 +672,7 @@ def extract_spatial_figure_chunks(
         text = " / ".join(
             line.strip() for line in str(raw[4]).splitlines() if line.strip()
         )
+        text = separate_numeric_labels(text)
         if not text:
             continue
         parsed.append(
@@ -665,15 +689,24 @@ def extract_spatial_figure_chunks(
     captions = [block for block in parsed if block["caption"] is not None]
     captions.sort(key=lambda block: (block["y0"], block["x0"]))
     output: list[Chunk] = []
-    previous_caption_bottom = page_height * 0.05
+    previous_captions: list[dict[str, Any]] = []
     for caption in captions:
         match = caption["caption"]
         assert match is not None
         kind = "extended_data_figure" if match.group("extended") else "figure"
         number = int(match.group("number"))
+        overlapping_caption_bottom = max(
+            (
+                previous["y1"]
+                for previous in previous_captions
+                if min(previous["x1"], caption["x1"])
+                > max(previous["x0"], caption["x0"])
+            ),
+            default=page_height * 0.05,
+        )
         top = max(
             page_height * 0.05,
-            previous_caption_bottom,
+            overlapping_caption_bottom,
             caption["y0"] - min(max_region_height, page_height * 0.55),
         )
         candidates = []
@@ -685,7 +718,7 @@ def extract_spatial_figure_chunks(
             if len(block["text"]) > max_block_characters:
                 continue
             candidates.append(block)
-        previous_caption_bottom = max(previous_caption_bottom, caption["y1"])
+        previous_captions.append(caption)
         if not candidates:
             continue
 
@@ -2190,13 +2223,13 @@ def matching_table_indices(
     """Return canonical table chunks satisfying an explicit Table N filter."""
 
     table_indices = [idx for idx, meta in enumerate(metas) if meta.get("type") == "table"]
-    table_number = table_number_from_question(question)
-    if table_number is None:
+    table_numbers = table_numbers_from_question(question)
+    if not table_numbers:
         return table_indices
     return [
         idx
         for idx in table_indices
-        if table_number_from_metadata(metas[idx]) == int(table_number)
+        if table_number_from_metadata(metas[idx]) in table_numbers
     ]
 
 
@@ -2538,6 +2571,9 @@ def find_table_cell_in_chunks(
 ) -> tuple[int, dict[str, Any]] | None:
     """Find a requested table cell without crossing an explicit table boundary."""
 
+    if is_derived_value_question(question):
+        return None
+
     # Without an explicit table number, the same row/column may legitimately
     # occur in several tables.  Leave that ambiguous case to the normal
     # retrieval/generation path instead of silently choosing the first table.
@@ -2593,6 +2629,12 @@ def is_table_question(question: str) -> bool:
     return bool(TABLE_QUESTION_RE.search(question or ""))
 
 
+def is_derived_value_question(question: str) -> bool:
+    """Whether a question explicitly asks for a value derived from evidence."""
+
+    return bool(DERIVED_VALUE_QUESTION_RE.search(question or ""))
+
+
 def is_comparative_table_question(question: str) -> bool:
     """Whether a table question needs multiple rows for comparison."""
 
@@ -2602,6 +2644,14 @@ def is_comparative_table_question(question: str) -> bool:
 def table_number_from_question(question: str) -> str | None:
     match = TABLE_NUMBER_RE.search(question or "")
     return match.group(1) if match else None
+
+
+def table_numbers_from_question(question: str) -> tuple[int, ...]:
+    """Return distinct explicit table numbers in question order."""
+
+    return tuple(
+        dict.fromkeys(int(match.group(1)) for match in TABLE_NUMBER_RE.finditer(question or ""))
+    )
 
 
 def _table_like_text(text: str) -> bool:
@@ -2634,7 +2684,7 @@ def rerank_table_first(
             # baseline") need the complete table.  Row filtering is reserved
             # for deterministic single-row lookups so baseline evidence is
             # not discarded before generation.
-            if not is_comparative_table_question(question):
+            if not is_comparative_table_question(question) and not is_derived_value_question(question):
                 for idx in table_idx:
                     entity = select_row_entity(question, working_texts[idx])
                     if entity:

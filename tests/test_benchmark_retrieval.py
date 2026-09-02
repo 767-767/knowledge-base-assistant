@@ -19,6 +19,7 @@ from sci_rag_retrieval import (
     DocumentRoute,
     DocumentRouter,
     RankedItem,
+    ensure_source_coverage,
     query_variants,
     reciprocal_rank_fusion,
 )
@@ -26,6 +27,48 @@ from sci_rag_core import Chunk
 
 
 class BenchmarkRetrievalTests(unittest.TestCase):
+    def test_ensure_source_coverage_promotes_missing_routed_source(self):
+        order = ensure_source_coverage(
+            [0, 1, 2],
+            [
+                {"source": "paper-a"},
+                {"source": "paper-a"},
+                {"source": "paper-b"},
+            ],
+            ["paper-a", "paper-b"],
+            2,
+        )
+        self.assertEqual(order[:2], [0, 2])
+
+    def test_ensure_source_coverage_prefers_clause_candidate(self):
+        order = ensure_source_coverage(
+            [0, 1, 2],
+            [
+                {"source": "paper-a"},
+                {"source": "paper-a"},
+                {"source": "paper-b"},
+            ],
+            ["paper-a", "paper-b"],
+            2,
+            preferred_order=[1, 2],
+        )
+        self.assertEqual(order[:2], [1, 2])
+
+    def test_ensure_source_coverage_keeps_each_preferred_source_in_prefix(self):
+        order = ensure_source_coverage(
+            [0, 1, 2, 3],
+            [
+                {"source": "paper-a"},
+                {"source": "paper-a"},
+                {"source": "paper-b"},
+                {"source": "paper-b"},
+            ],
+            ["paper-a", "paper-b"],
+            2,
+            preferred_order=[1, 3],
+        )
+        self.assertEqual(order[:2], [1, 3])
+
     def test_hybrid_retriever_excludes_formula_blocks_from_bm25_statistics(self):
         chunks = [
             Chunk("ordinary prose", {"source": "paper.pdf", "type": "text"}),
@@ -69,6 +112,11 @@ class BenchmarkRetrievalTests(unittest.TestCase):
         question = "论文提出的后续研究方向包括哪些内容？"
         self.assertEqual(query_variants(question), [question])
 
+    def test_query_variants_keep_thousands_separators_inside_a_clause(self):
+        variants = query_variants("MgNO 有 1,280 个样本，SciDQA 审阅了 7,000 个实例？")
+        self.assertIn("MgNO 有 1,280 个样本", variants)
+        self.assertIn("SciDQA 审阅了 7,000 个实例", variants)
+
     def test_query_decomposition_fuses_variant_rankings_with_fixed_route(self):
         chunks = [
             Chunk("DrugR overview", {"source": "drugr.pdf"}),
@@ -83,6 +131,38 @@ class BenchmarkRetrievalTests(unittest.TestCase):
         )
         result = retriever.retrieve("DrugR dataset samples, pipeline", 2)
         self.assertEqual([item.key for item in result], [1, 0])
+
+    def test_query_decomposition_scopes_each_routed_clause(self):
+        class RecordingRetriever(HybridRetriever):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.calls = []
+
+            def _retrieve_single(self, question, k, eligible_indices=None):
+                self.calls.append((question, list(eligible_indices or [])))
+                return super()._retrieve_single(question, k, eligible_indices)
+
+        retriever = RecordingRetriever(
+            [
+                Chunk("DrugR uses GRPO.", {"source": "drugr.pdf"}),
+                Chunk("MgNO has 5 multigrid levels.", {"source": "mgno.pdf"}),
+            ],
+            mode="bm25",
+            document_routing=True,
+            query_decomposition=True,
+        )
+        retriever.retrieve(
+            "结合两篇论文：DrugR 使用什么算法，MgNO 有多少 multigrid levels？",
+            2,
+        )
+        scoped_calls = [
+            (question, indices)
+            for question, indices in retriever.calls
+            if question != "结合两篇论文：DrugR 使用什么算法，MgNO 有多少 multigrid levels？"
+        ]
+        self.assertEqual(len(scoped_calls), 2)
+        self.assertEqual(scoped_calls[0][1], [0])
+        self.assertEqual(scoped_calls[1][1], [1])
 
     def test_structured_table_guard_uses_exact_cell_inside_existing_route(self):
         other_table = """|Model|RAG|FT|
@@ -698,6 +778,44 @@ class BenchmarkRetrievalTests(unittest.TestCase):
         self.assertEqual(top_two["wrong_document_only_fact_count"], 0)
         self.assertEqual(top_two["target_document_fact_count"], 1)
         self.assertEqual(top_two["gold_page_fact_count"], 1)
+
+    def test_cross_document_case_requires_all_target_sources(self):
+        chunks = [
+            Chunk(
+                "DrugR uses GRPO.",
+                {"benchmark_document_id": "drugr", "page": 1},
+            ),
+            Chunk(
+                "MgNO baseline has 5 levels.",
+                {"benchmark_document_id": "mgno", "page": 2},
+            ),
+            Chunk(
+                "Unrelated paper.",
+                {"benchmark_document_id": "other", "page": 3},
+            ),
+        ]
+        case = {
+            "case_id": "cross",
+            "document_id": "drugr",
+            "additional_document_ids": ["mgno"],
+            "question": "Which sources provide the two facts?",
+            "required_facts": ["GRPO", "5 levels"],
+            "contexts": ["DrugR uses GRPO.", "MgNO baseline has 5 levels."],
+        }
+
+        report = evaluate_document(
+            "all-documents",
+            [case],
+            chunks,
+            [1, 2, 3],
+        )
+
+        self.assertFalse(report["cases_detail"][0]["metrics"]["1"]["target_document_hit"])
+        self.assertTrue(report["cases_detail"][0]["metrics"]["2"]["target_document_hit"])
+        self.assertEqual(
+            report["cases_detail"][0]["metrics"]["2"]["matched_required_facts"],
+            ["GRPO", "5 levels"],
+        )
 
     def test_multifact_coverage_improves_from_partial_to_full_with_larger_k(self):
         chunks = [

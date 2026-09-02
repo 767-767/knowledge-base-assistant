@@ -1,6 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Offline loader and validator for the multi-paper benchmark manifest."""
+"""Offline loader and validator for the multi-paper benchmark manifest.
+
+An opt-in manifest may name ``base_manifest`` to extend a stable benchmark
+without rewriting its cases; duplicate document and case IDs are rejected.
+"""
 
 from __future__ import annotations
 
@@ -139,12 +143,30 @@ def load_benchmark(
     manifest_path = Path(manifest_path).resolve()
     manifest = _load_json(manifest_path)
     benchmark_dir = manifest_path.parent
+    base_manifest_name = manifest.get("base_manifest")
+    base_benchmark = None
+    if base_manifest_name:
+        base_path = (benchmark_dir / str(base_manifest_name)).resolve()
+        if base_path == manifest_path:
+            raise BenchmarkValidationError("manifest.base_manifest 不能指向自身")
+        if not base_path.is_file():
+            raise BenchmarkValidationError(f"找不到基础 manifest：{base_path}")
+        base_benchmark = load_benchmark(
+            base_path,
+            papers_dir=papers_dir,
+            verify_files=verify_files,
+        )
     documents = manifest.get("documents")
-    if not isinstance(documents, list) or not documents:
-        raise BenchmarkValidationError("manifest.documents 必须是非空数组")
+    if not isinstance(documents, list) or (not documents and base_benchmark is None):
+        raise BenchmarkValidationError("manifest.documents 必须是数组；无 base_manifest 时不能为空")
 
     document_ids: set[str] = set()
     normalized_documents: list[dict[str, Any]] = []
+    if base_benchmark is not None:
+        for document in base_benchmark["documents"]:
+            document_id = str(document["document_id"])
+            document_ids.add(document_id)
+            normalized_documents.append(dict(document))
     for document in documents:
         if not isinstance(document, dict):
             raise BenchmarkValidationError("manifest.documents 中每项必须是对象")
@@ -188,6 +210,11 @@ def load_benchmark(
 
     case_ids: set[str] = set()
     cases: list[dict[str, Any]] = []
+    if base_benchmark is not None:
+        for base_case in base_benchmark["cases"]:
+            case_id = _case_id(base_case["case_id"])
+            case_ids.add(case_id)
+            cases.append(dict(base_case))
     for pointer in pointers:
         if "case_id" not in pointer or "document_id" not in pointer:
             raise BenchmarkValidationError("每个 benchmark 用例必须包含 case_id 和 document_id")
@@ -200,6 +227,28 @@ def load_benchmark(
         case_ids.add(case_id)
         resolved = _resolve_source_case(pointer, cases_path)
         _validate_resolved_case(resolved, case_id)
+        additional_documents = resolved.get("additional_document_ids", [])
+        if additional_documents is None:
+            additional_documents = []
+        if (
+            not isinstance(additional_documents, list)
+            or not all(isinstance(value, str) and value.strip() for value in additional_documents)
+        ):
+            raise BenchmarkValidationError(
+                f"用例 {case_id} 的 additional_document_ids 必须是字符串数组"
+            )
+        additional_documents = [str(value) for value in additional_documents]
+        if str(document_id) in additional_documents or len(set(additional_documents)) != len(additional_documents):
+            raise BenchmarkValidationError(
+                f"用例 {case_id} 的 additional_document_ids 不能重复主文档或彼此重复"
+            )
+        unknown_documents = sorted(set(additional_documents) - document_ids)
+        if unknown_documents:
+            raise BenchmarkValidationError(
+                f"用例 {case_id} 引用了未知 additional_document_ids：{', '.join(unknown_documents)}"
+            )
+        if additional_documents:
+            resolved["additional_document_ids"] = additional_documents
         resolved["case_id"] = case_id
         resolved["document_id"] = document_id
         cases.append(resolved)

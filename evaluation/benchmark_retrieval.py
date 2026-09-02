@@ -58,6 +58,7 @@ from sci_rag_retrieval import (  # noqa: E402
     DocumentRoute,
     DocumentRouter,
     RankedItem,
+    ensure_source_coverage,
     query_variants,
     reciprocal_rank_fusion,
 )
@@ -280,11 +281,33 @@ class HybridRetriever:
         variants = query_variants(question)
         if len(variants) <= 1:
             return self._retrieve_single(question, k, eligible_indices)
-        rankings = [
-            self._retrieve_single(variant, k, eligible_indices)
-            for variant in variants
-        ]
-        return reciprocal_rank_fusion(rankings, rrf_k=self.rrf_k, limit=k)
+        rankings = []
+        routed_sources: list[str] = []
+        preferred_indices: list[int] = []
+        for variant in variants:
+            variant_route = self.route(variant)
+            variant_indices = (
+                self._document_indices.get(variant_route.document_id, [])
+                if variant_route is not None
+                else eligible_indices
+            )
+            ranking = self._retrieve_single(variant, k, variant_indices)
+            rankings.append(ranking)
+            if variant_route is not None:
+                routed_sources.append(variant_route.document_id)
+                preferred_indices.extend(int(item.key) for item in ranking[:12])
+        fused = reciprocal_rank_fusion(rankings, rrf_k=self.rrf_k, limit=len(self._retrieval_indices))
+        if len(set(routed_sources)) <= 1:
+            return fused[:k]
+        balanced = ensure_source_coverage(
+            [int(item.key) for item in fused],
+            [chunk.metadata for chunk in self.chunks],
+            routed_sources,
+            k,
+            preferred_order=preferred_indices,
+        )
+        scores = {int(item.key): item.score for item in fused}
+        return [RankedItem(index, scores.get(index, 0.0)) for index in balanced[:k]]
 
 
 def _section_expansion_indices(
@@ -353,9 +376,23 @@ def _section_expansion_indices(
     if not header_rows:
         return [int(item.key) for item in ranked]
 
-    best_score = max(row[0] for row in header_rows)
-    selected_headers = {(row[2], row[3]) for row in header_rows if row[0] == best_score}
     original = [int(item.key) for item in ranked]
+    anchor_headers = {
+        (
+            str(chunks[int(item.key)].metadata.get("source", "")),
+            str(chunks[int(item.key)].metadata.get("headers", "")),
+        )
+        for item in anchor_items
+        if 0 <= int(item.key) < len(chunks)
+        and chunks[int(item.key)].metadata.get("headers")
+    }
+    scored_headers = [
+        row for row in header_rows if (row[2], row[3]) in anchor_headers
+    ] or header_rows
+    best_score = max(row[0] for row in scored_headers)
+    selected_headers = {
+        (row[2], row[3]) for row in scored_headers if row[0] == best_score
+    }
     anchors = [
         index
         for item in anchor_items
@@ -743,15 +780,18 @@ def _target_ranked_chunks(
     ``benchmark_document_id`` is attached by :func:`run_diagnostic`.
     """
 
-    target_document = case.get("document_id")
+    target_documents = {
+        str(case["document_id"]),
+        *(str(value) for value in case.get("additional_document_ids", [])),
+    } if case.get("document_id") else set()
     selected = [chunks[int(result.key)] for result in ranked]
-    if not target_document:
+    if not target_documents:
         return selected
     marked = [
         chunk
         for chunk in selected
         if chunk.metadata.get("benchmark_document_id") is None
-        or chunk.metadata.get("benchmark_document_id") == target_document
+        or chunk.metadata.get("benchmark_document_id") in target_documents
     ]
     return marked
 
@@ -776,13 +816,18 @@ def _case_page_hit(case: dict[str, Any], chunks: list[Chunk], ranked: list[Ranke
 
 
 def _case_document_hit(case: dict[str, Any], chunks: list[Chunk], ranked: list[RankedItem]) -> bool | None:
-    target_document = case.get("document_id")
-    if not target_document:
+    target_documents = {
+        str(case["document_id"]),
+        *(str(value) for value in case.get("additional_document_ids", [])),
+    } if case.get("document_id") else set()
+    if not target_documents:
         return None
-    return any(
-        chunks[int(result.key)].metadata.get("benchmark_document_id") == target_document
+    retrieved_documents = {
+        str(chunks[int(result.key)].metadata.get("benchmark_document_id"))
         for result in ranked
-    )
+        if chunks[int(result.key)].metadata.get("benchmark_document_id") is not None
+    }
+    return target_documents <= retrieved_documents
 
 
 def _case_table_hit(case: dict[str, Any], chunks: list[Chunk], ranked: list[RankedItem]) -> bool | None:
@@ -828,11 +873,14 @@ def _provenance_location(
     """
 
     metadata = chunk.metadata if isinstance(chunk.metadata, dict) else {}
-    target_document = str(case.get("document_id") or "")
+    target_documents = {
+        str(case["document_id"]),
+        *(str(value) for value in case.get("additional_document_ids", [])),
+    } if case.get("document_id") else set()
     actual_document = metadata.get("benchmark_document_id")
-    if target_document and actual_document is not None:
+    if target_documents and actual_document is not None:
         document_status = (
-            "target" if str(actual_document) == target_document else "other"
+            "target" if str(actual_document) in target_documents else "other"
         )
     else:
         document_status = "unknown"
@@ -1174,6 +1222,14 @@ def evaluate_document(
         total_started = perf_counter()
         retrieval_started = perf_counter()
         route = index.route(question)
+        routed_sources = list(
+            dict.fromkeys(
+                candidate.document_id
+                for variant in query_variants(question)
+                for candidate in [index.route(variant)]
+                if candidate is not None
+            )
+        ) if document_routing else []
         candidates = index.retrieve(question, retrieval_k)
         retrieval_seconds = perf_counter() - retrieval_started
         initial_scores = {candidate.key: candidate.score for candidate in candidates}
@@ -1211,7 +1267,19 @@ def evaluate_document(
         ) -> tuple[list[RankedItem], list[Chunk], dict[int, tuple[int, ...]]]:
             """Apply optional post-ranking controls independently for one k."""
 
-            ranked_for_k = list(base_ranked[:top_k])
+            if len(routed_sources) > 1:
+                score_by_index = {int(item.key): item.score for item in base_ranked}
+                ranked_for_k = [
+                    RankedItem(index, score_by_index.get(index, 0.0))
+                    for index in ensure_source_coverage(
+                        [int(item.key) for item in base_ranked],
+                        [chunk.metadata for chunk in chunks],
+                        routed_sources,
+                        top_k,
+                    )[:top_k]
+                ]
+            else:
+                ranked_for_k = list(base_ranked[:top_k])
             if section_expansion:
                 ranked_for_k = [
                     RankedItem(index, 0.0)
@@ -1313,6 +1381,7 @@ def evaluate_document(
             {
                 "case_id": case["case_id"],
                 "document_id": case.get("document_id", document_id),
+                "additional_document_ids": case.get("additional_document_ids", []),
                 "question": case["question"],
                 "type": case.get("type", ""),
                 "required_facts": case.get("required_facts", []),

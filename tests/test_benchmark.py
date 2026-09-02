@@ -10,6 +10,7 @@ from evaluation.benchmark_loader import (
     load_benchmark,
 )
 from evaluation.context_coverage import unsupported_gold_facts
+from sci_rag_core import is_derived_value_question
 
 
 class BenchmarkLoaderTests(unittest.TestCase):
@@ -28,6 +29,53 @@ class BenchmarkLoaderTests(unittest.TestCase):
         self.assertEqual(case["required_facts"], ["pLDDT", "PAE", "PDE"])
         self.assertTrue(all(case.get("required_facts") for case in benchmark["cases"]))
         self.assertTrue(all(not unsupported_gold_facts(case) for case in benchmark["cases"]))
+
+    def test_expanded_manifest_merges_base_benchmark_without_changing_default(self):
+        base = load_benchmark("evaluation/benchmark/manifest.json")
+        expanded = load_benchmark("evaluation/benchmark/manifest_expanded.json")
+        self.assertEqual(benchmark_summary(base)["documents"], 5)
+        self.assertEqual(benchmark_summary(base)["cases"], 53)
+        self.assertEqual(benchmark_summary(expanded)["documents"], 6)
+        self.assertEqual(benchmark_summary(expanded)["cases"], 66)
+        self.assertEqual(
+            benchmark_summary(expanded)["cases_per_document"]["thinknote-eacl-2026"],
+            13,
+        )
+        self.assertTrue(
+            all(not unsupported_gold_facts(case) for case in expanded["cases"])
+        )
+
+    def test_challenge_manifest_adds_targeted_missing_case_types(self):
+        challenge = load_benchmark("evaluation/benchmark/manifest_challenge.json")
+        summary = benchmark_summary(challenge)
+        self.assertEqual(summary["documents"], 6)
+        self.assertEqual(summary["cases"], 101)
+        self.assertEqual(
+            sum(case.get("challenge_type") == "image_only" for case in challenge["cases"]),
+            10,
+        )
+        self.assertEqual(
+            sum(case.get("challenge_type") == "computation" for case in challenge["cases"]),
+            20,
+        )
+        cross_cases = [
+            case for case in challenge["cases"] if case.get("challenge_type") == "cross_document"
+        ]
+        self.assertEqual(len(cross_cases), 5)
+        self.assertTrue(all(case.get("additional_document_ids") for case in cross_cases))
+        self.assertTrue(all(not unsupported_gold_facts(case) for case in challenge["cases"]))
+        drugr = next(case for case in challenge["cases"] if case["case_id"] == "calc-drugr-04")
+        self.assertEqual(drugr["calculation"]["operation"], "3863 - 1117")
+        self.assertEqual(drugr["calculation"]["expected_result"], "2,746")
+        self.assertNotIn("2,746", " ".join(drugr["contexts"]))
+        scidqa = next(case for case in challenge["cases"] if case["case_id"] == "calc-scidqa-04")
+        self.assertIn("保留两位小数", scidqa["question"])
+        self.assertEqual(scidqa["ground_truth"], "41.96%。")
+        for case in challenge["cases"]:
+            if case.get("challenge_type") == "computation":
+                expected = case["calculation"]["expected_result"]
+                self.assertNotIn(expected, " ".join(case["contexts"]))
+                self.assertTrue(is_derived_value_question(case["question"]))
 
     def test_loader_rejects_alias_for_an_unknown_required_fact(self):
         with tempfile.TemporaryDirectory() as temp_root:

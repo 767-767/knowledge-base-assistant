@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import random
 import re
+import shutil
 from typing import Any
 
 from sci_rag_core import (
@@ -43,10 +44,12 @@ from sci_rag_retrieval import (
     BM25Index,
     DocumentRouter,
     RankedItem,
+    ensure_source_coverage,
     query_variants,
     reciprocal_rank_fusion,
     tokenize,
 )
+from sci_rag_vision import complete_vision, render_figure, vision_messages
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,8 @@ class RuntimeConfig:
     reranker_max_length: int = 512
     reranker_device: str = "cpu"
     reranker_rrf_k: int = 60
+    vision_enabled: bool = False
+    vision_model: str = "deepseek-v4-flash-vision-exp"
 
     @classmethod
     def from_env(cls) -> "RuntimeConfig":
@@ -119,6 +124,9 @@ class RuntimeConfig:
         answer_validation = os.getenv(
             "SCI_RAG_ANSWER_VALIDATION", "0"
         ).strip().casefold() in {"1", "true", "yes", "on"}
+        vision_enabled = os.getenv(
+            "SCI_RAG_VISION_ENABLED", "0"
+        ).strip().casefold() in {"1", "true", "yes", "on"}
         return cls(
             embedding_model=os.getenv("SCI_RAG_EMBEDDING_MODEL", cls.embedding_model),
             db_path=os.getenv("SCI_RAG_DB_PATH", cls.db_path),
@@ -153,6 +161,9 @@ class RuntimeConfig:
             reranker_rrf_k=positive_int(
                 "SCI_RAG_RERANKER_RRF_K", cls.reranker_rrf_k
             ),
+            vision_enabled=vision_enabled,
+            vision_model=os.getenv("SCI_RAG_VISION_MODEL", cls.vision_model).strip()
+            or cls.vision_model,
         )
 
 
@@ -367,6 +378,12 @@ def add_document_to_db(file_path: str, runtime: Runtime | None = None) -> str:
         include_spatial_figures=runtime.config.spatial_figure_evidence,
     )
     document_hash = file_sha256(file_path)
+    if runtime.config.vision_enabled and Path(file_path).suffix.lower() == ".pdf":
+        source_dir = Path(runtime.config.db_path) / "source_pdfs"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        source_pdf = source_dir / f"{document_hash}.pdf"
+        if not source_pdf.exists():
+            shutil.copyfile(file_path, source_pdf)
     normal_chunk_index = 0
     for index, chunk in enumerate(chunks):
         text = chunk.page_content
@@ -404,6 +421,75 @@ def upload_file(file: Any, runtime: Runtime | None = None) -> str:
     if file is None:
         return "请选择一个文件"
     return add_document_to_db(file.name, runtime=runtime)
+
+
+def _vision_pdf_for_question(
+    message: str,
+    runtime: Runtime,
+) -> tuple[Path, str] | None:
+    """Resolve one persisted PDF for a routed, explicit figure question."""
+
+    if (
+        not runtime.config.vision_enabled
+        or not runtime.config.document_routing
+        or figure_reference_from_question(message) is None
+        or is_table_question(message)
+    ):
+        return None
+    snapshot = _get_lexical_snapshot(runtime)
+    route = snapshot.router.route(message) if snapshot.router else None
+    if route is None or not route.document_id.casefold().endswith(".pdf"):
+        return None
+    hashes = {
+        str(metadata.get("document_sha256", "")).strip()
+        for metadata in snapshot.metadatas
+        if str(metadata.get("source", "")).strip() == route.document_id
+        and str(metadata.get("document_sha256", "")).strip()
+    }
+    if len(hashes) != 1:
+        return None
+    source_pdf = Path(runtime.config.db_path) / "source_pdfs" / f"{next(iter(hashes))}.pdf"
+    return (source_pdf, route.document_id)
+
+
+def _vision_answer(
+    message: str,
+    runtime: Runtime,
+) -> tuple[str | None, str | None, dict[str, Any] | None]:
+    """Try one full+detail figure request without changing text retrieval."""
+
+    selected = _vision_pdf_for_question(message, runtime)
+    if selected is None:
+        return None, None, None
+    source_pdf, source = selected
+    if not source_pdf.is_file():
+        return None, "视觉源 PDF 不存在，已回退文本检索。", None
+    reference = figure_reference_from_question(message)
+    assert reference is not None
+    try:
+        image = render_figure(source_pdf, reference, include_detail=True)
+        detail = image.get("detail")
+        answer = complete_vision(
+            runtime.client,
+            runtime.config.vision_model,
+            vision_messages(
+                message,
+                str(image["data_url"]),
+                str(detail["data_url"]) if isinstance(detail, dict) else None,
+            ),
+        )
+    except Exception as exc:
+        return None, f"视觉问答不可用，已回退文本检索（{type(exc).__name__}）。", None
+    label = (
+        f"Extended Data Figure {reference[1]}"
+        if reference[0] == "extended_data_figure"
+        else f"Figure {reference[1]}"
+    )
+    page = image.get("page")
+    page_text = f"，第 {page} 页" if page else ""
+    answer += f"\n\n📌 **参考来源：**\n- {source}{page_text}（{label}）"
+    metadata = {"source": source, "page": page, "type": "vision", "figure_label": label}
+    return answer, None, metadata
 
 
 def _merge_results(
@@ -755,13 +841,17 @@ _SECTION_QUERY_ALIASES = {
     "推理": ("reasoning",),
     # Prefer a self-balanced/multi-granular RL section over a generic
     # training-settings heading when both share the same broad token.
-    "强化学习": ("reinforcement", "rl", "self-balanced", "multi-granular"),
+    "强化学习": ("reinforcement", "rl", "training", "self-balanced", "multi-granular"),
     "训练": ("training", "train"),
     "实验配置": ("experimental", "setup", "configuration", "configurations"),
     "配置": ("configuration", "configurations", "setup"),
+    "基线": ("baseline", "configured"),
     "奖励": ("reward",),
     "管道": ("pipeline",),
 }
+_EXPLICIT_NUMBER_RE = re.compile(
+    r"(?<![\w])(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)(?![\w])"
+)
 MAX_SECTION_EXPANSION_CHUNKS = 6
 MAX_PARENT_WINDOW_ANCHORS = 2
 
@@ -832,7 +922,11 @@ def _is_composite_fact_question(question: str) -> bool:
 
     text = str(question or "")
     matches = _COMPOSITE_FACT_CUE_RE.findall(text)
-    return len(matches) >= 2 or bool(_LISTED_FACT_QUESTION_RE.search(text))
+    return (
+        len(matches) >= 2
+        or bool(_LISTED_FACT_QUESTION_RE.search(text))
+        or bool(re.search(r"阶段|管道|步骤", text) and re.search(r"什么|如何|哪些", text))
+    )
 
 
 def _section_query_terms(question: str) -> set[str]:
@@ -842,6 +936,98 @@ def _section_query_terms(question: str) -> set[str]:
         if phrase in normalized:
             terms.update(aliases)
     return terms
+
+
+def _explicit_number_tokens(value: Any) -> set[str]:
+    """Return normalized, non-trivial numbers for a routed evidence fallback."""
+
+    tokens = set()
+    for token in _EXPLICIT_NUMBER_RE.findall(str(value or "")):
+        normalized = token.replace(",", "")
+        try:
+            significant = float(normalized)
+        except ValueError:
+            continue
+        nearby_rank = bool(
+            re.search(
+                rf"(?:top|bottom|k)\s*[-_ ]?{re.escape(token)}\b",
+                str(value or ""),
+                re.IGNORECASE,
+            )
+        )
+        if "," in token or "." in token or significant >= 10 or nearby_rank:
+            tokens.add(normalized)
+    return tokens
+
+
+def _numeric_route_evidence_result(
+    question: str,
+    runtime: Runtime,
+    route: Any | None,
+) -> dict[str, Any] | None:
+    """Recover explicit numeric facts that fall outside a dense top-k."""
+
+    source = str(getattr(route, "document_id", "") or "").strip()
+    query_numbers = _explicit_number_tokens(question)
+    if not source or not query_numbers:
+        return None
+    snapshot = _get_lexical_snapshot(runtime)
+    candidates: list[tuple[int, int, int]] = []
+    query_terms = set(tokenize(question))
+    for index, (text, metadata) in enumerate(zip(snapshot.texts, snapshot.metadatas)):
+        if str(metadata.get("source", "")).strip() != source:
+            continue
+        if metadata.get("type") in {"formula", "figure"}:
+            continue
+        matched = query_numbers & _explicit_number_tokens(text)
+        if not matched:
+            continue
+        overlap = len(query_terms & set(tokenize(_lexical_search_text(text, metadata))))
+        candidates.append((-len(matched), -overlap, index))
+    if not candidates:
+        return None
+    indices = [row[2] for row in sorted(candidates)[:4]]
+    return {
+        "ids": [[snapshot.ids[index] for index in indices]],
+        "documents": [[snapshot.texts[index] for index in indices]],
+        "metadatas": [[
+            {**snapshot.metadatas[index], "route_evidence": True}
+            for index in indices
+        ]],
+    }
+
+
+def _lexical_route_evidence_result(
+    question: str,
+    runtime: Runtime,
+    route: Any | None,
+) -> dict[str, Any] | None:
+    """Add a small source-scoped lexical fallback to dense route results."""
+
+    source = str(getattr(route, "document_id", "") or "").strip()
+    if not source:
+        return None
+    snapshot = _get_lexical_snapshot(runtime)
+    positions = {
+        position: index
+        for position, index in enumerate(snapshot.lexical_indices)
+        if str(snapshot.metadatas[index].get("source", "")).strip() == source
+    }
+    if not positions:
+        return None
+    expanded_question = " ".join([question, *_section_query_terms(question)])
+    ranking = snapshot.index.retrieve(expanded_question, 6, indices=positions)
+    indices = [positions[int(item.key)] for item in ranking]
+    if not indices:
+        return None
+    return {
+        "ids": [[snapshot.ids[index] for index in indices]],
+        "documents": [[snapshot.texts[index] for index in indices]],
+        "metadatas": [[
+            {**snapshot.metadatas[index], "route_evidence": True}
+            for index in indices
+        ]],
+    }
 
 
 def _header_match_score(header: str, query_terms: set[str]) -> int:
@@ -926,8 +1112,18 @@ def _section_expansion_result(
     if not header_rows:
         return None
 
-    best_score = max(row[0] for row in header_rows)
-    selected_headers = {(row[2], row[3]) for row in header_rows if row[0] == best_score}
+    anchor_headers = {
+        (str(meta.get("source", "")), str(meta.get("headers", "")))
+        for meta in anchor_metas
+        if isinstance(meta, dict) and meta.get("headers")
+    }
+    scored_headers = [
+        row for row in header_rows if (row[2], row[3]) in anchor_headers
+    ] or header_rows
+    best_score = max(row[0] for row in scored_headers)
+    selected_headers = {
+        (row[2], row[3]) for row in scored_headers if row[0] == best_score
+    }
     all_ids = _flat_result_values(all_result, "ids")
     all_id_to_index = {str(doc_id): index for index, doc_id in enumerate(all_ids)}
     anchors = [
@@ -1126,6 +1322,16 @@ def query_knowledge(
         answer = "📚 知识库为空，请先上传文档。"
         return {"answer": answer, "contexts": [], "context_ids": [], "context_metadatas": []} if return_contexts else answer
 
+    vision_answer, vision_error, vision_metadata = _vision_answer(message, runtime)
+    if vision_answer is not None:
+        result = {
+            "answer": vision_answer,
+            "contexts": [],
+            "context_ids": [],
+            "context_metadatas": [vision_metadata] if vision_metadata else [],
+        }
+        return result if return_contexts else vision_answer
+
     variants = (
         query_variants(message)
         if runtime.config.query_decomposition
@@ -1140,9 +1346,22 @@ def query_knowledge(
     )
     candidate_k = min(configured_candidate_k, runtime.collection.count())
     route = None
+    routed_sources: list[str] = []
+    routed_variant_ids: list[str] = []
+    routed_evidence_ids: list[str] = []
+    routed_evidence_results: list[dict[str, Any]] = []
     if runtime.config.document_routing:
         route_snapshot = _get_lexical_snapshot(runtime)
         route = route_snapshot.router.route(message) if route_snapshot.router else None
+        if route_snapshot.router:
+            routed_sources = list(
+                dict.fromkeys(
+                    candidate.document_id
+                    for variant in variants
+                    for candidate in [route_snapshot.router.route(variant)]
+                    if candidate is not None
+                )
+            )
     dense_results: list[dict[str, Any]] = []
     for variant in variants:
         question_embedding = runtime.embedding_model.encode(variant).tolist()
@@ -1158,18 +1377,61 @@ def query_knowledge(
         query_conditions: list[dict[str, Any]] = [{"type": {"$ne": "formula"}}]
         if runtime.config.spatial_figure_evidence:
             query_conditions.append({"type": {"$ne": "figure"}})
-        if route is not None:
+        variant_route = route
+        if len(routed_sources) > 1 and route_snapshot.router:
+            variant_route = route_snapshot.router.route(variant)
+        if variant_route is not None:
             # ``source`` is written for every uploaded chunk.  The filter is
             # only applied after the conservative lexical router found one
             # unique source; ambiguous questions intentionally keep the global
             # search for every variant.
-            query_conditions.append({"source": {"$eq": route.document_id}})
+            query_conditions.append({"source": {"$eq": variant_route.document_id}})
         query_kwargs["where"] = (
             query_conditions[0]
             if len(query_conditions) == 1
             else {"$and": query_conditions}
         )
-        dense_results.append(runtime.collection.query(**query_kwargs))
+        variant_result = runtime.collection.query(**query_kwargs)
+        dense_results.append(variant_result)
+        if variant_route is not None:
+            routed_variant_ids.extend(
+                str(value) for value in _flat_result_values(variant_result, "ids")[:12]
+            )
+            if len(routed_sources) > 1:
+                variant_section = _section_expansion_result(
+                    variant,
+                    variant_result,
+                    runtime,
+                    route=variant_route,
+                )
+                if variant_section is not None:
+                    routed_evidence_results.append(variant_section)
+                    routed_evidence_ids.extend(
+                        str(value)
+                        for value in _flat_result_values(variant_section, "ids")
+                    )
+                variant_numeric = _numeric_route_evidence_result(
+                    variant,
+                    runtime,
+                    variant_route,
+                )
+                if variant_numeric is not None:
+                    routed_evidence_results.append(variant_numeric)
+                    routed_evidence_ids.extend(
+                        str(value)
+                        for value in _flat_result_values(variant_numeric, "ids")
+                    )
+                variant_lexical = _lexical_route_evidence_result(
+                    variant,
+                    runtime,
+                    variant_route,
+                )
+                if variant_lexical is not None:
+                    routed_evidence_results.append(variant_lexical)
+                    routed_evidence_ids.extend(
+                        str(value)
+                        for value in _flat_result_values(variant_lexical, "ids")
+                    )
     dense = _fuse_dense_results(
         dense_results,
         candidate_k,
@@ -1316,6 +1578,7 @@ def query_knowledge(
                 figure_result,
                 formula_result,
                 section_result,
+                *routed_evidence_results,
             )
             if result is not None
         ]
@@ -1323,6 +1586,8 @@ def query_knowledge(
     )
     if not retrieved_texts:
         answer = "未找到相关内容，请换个问法。"
+        if vision_error:
+            answer += f"\n\n⚠️ {vision_error}"
         return {"answer": answer, "contexts": [], "context_ids": [], "context_metadatas": []} if return_contexts else answer
 
     explicit_table_number = table_number_from_question(message)
@@ -1362,6 +1627,20 @@ def query_knowledge(
             )
             figure_note = f"未找到 {label} 的坐标化文字证据，已回退普通文本检索。"
             note = f"{note} {figure_note}".strip()
+
+    if len(routed_sources) > 1:
+        id_to_index = {str(doc_id): index for index, doc_id in enumerate(retrieved_ids)}
+        order = ensure_source_coverage(
+            order,
+            retrieved_metas,
+            routed_sources,
+            runtime.config.context_k,
+            preferred_order=[
+                id_to_index[doc_id]
+                for doc_id in [*routed_evidence_ids, *routed_variant_ids]
+                if doc_id in id_to_index
+            ],
+        )
 
     # A question that names a table, row, and column is a deterministic cell
     # lookup.  Answer it from the parsed table rather than asking a language
@@ -1481,6 +1760,8 @@ def query_knowledge(
         )
     if note:
         context = f"【检索提示】{note}\n\n{context}"
+    if vision_error:
+        context = f"【检索提示】{vision_error}\n\n{context}"
     user_prompt = f"{ledger_text}【参考资料】\n{context}\n\n【问题】\n{message}"
 
     try:
@@ -1496,6 +1777,8 @@ def query_knowledge(
         answer = response.choices[0].message.content
     except Exception as exc:
         answer = f"❌ 调用出错：{exc}"
+    if vision_error:
+        answer += f"\n\n⚠️ {vision_error}"
 
     has_spatial_figure_context = any(
         metadata.get("type") == "figure" for metadata in ordered_metas
@@ -1555,6 +1838,7 @@ SCIENTIFIC_SYSTEM_PROMPT = """你是一个面向科学论文的严谨学术问�
 【强制规则 1：数值必须原样引用并指明出处】
 - 若参考文本中存在具体数值，回答时必须原样引用，不得四舍五入、改写或推算。
 - 引用数值后必须指明出处，格式为：根据参考片段 [X] 所示。
+- 如果问题明确要求计算（如求差、合计、平均、比例、倍数或相对提升/降低），允许且必须只用参考片段中的原始操作数列式计算，并遵守问题指定的精度；不得引入参考片段之外的数值。普通数值引用仍须原样保留。
 
 【强制规则 1A：图形坐标文字不得跨视觉组拼接】
 - 标记为“图形坐标文字”的片段只来自 PDF 文字层坐标，不等同于图片识别。
@@ -1662,7 +1946,12 @@ def build_demo(runtime: Runtime | None = None) -> Any:
                 title="📖 基于文档的问答",
                 description="输入问题，AI会从已上传的文档中检索答案。",
                 chatbot=gr.Chatbot(height=450),
-                textbox=gr.Textbox(placeholder="例如：这篇论文的核心创新点是什么？", scale=7),
+                textbox=gr.Textbox(
+                    placeholder="例如：这篇论文的核心创新点是什么？",
+                    scale=7,
+                    submit_btn=True,
+                    stop_btn=True,
+                ),
             )
         with gr.Tab("🧠 生成学习大纲"):
             gr.Markdown("### 一键生成层级学习大纲（自动转为脑图结构）")

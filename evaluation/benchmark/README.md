@@ -21,6 +21,16 @@ SciDQA、科学表格理解、MgNO 和 AlphaFold 3 四篇论文的独立问题�
 - `cases_path`：相对于本目录的 JSONL 用例文件；
 - `minimum_documents`：进入多论文基线的最低文档数。
 
+`manifest_expanded.json` 是一个默认关闭的扩展清单，使用 `base_manifest` 继承稳定的
+`manifest.json`，并追加已核对的 Findings of EACL 2026 THINKNOTE 及 13 道题；它不会改变
+默认五论文/53 题基线。
+
+`manifest_challenge.json` 继续继承扩展清单，但只追加用于方向门控的 35 道挑战题：10 道
+需要图像像素或空间关系的 `image_only` 题、20 道要求根据已召回数值执行计算的
+`computation` 题，以及 5 道要求同时召回两篇论文的 `cross_document` 题。计算题的
+`calculation.expected_result` 不写入 gold context，只作为后续答案/工具审计目标；跨文档题的
+`additional_document_ids` 必须全部命中才算目标文档命中。
+
 `cases.jsonl` 每行一个用例。当前用例使用引用形式：
 
 ```json
@@ -68,6 +78,46 @@ gold contexts。事实等价性不由 embedding 或模型裁判。
 ```
 
 原始论文不应复制到项目目录或提交到 Git。
+
+扩展清单校验：
+
+```bash
+./venv/bin/python evaluation/validate_benchmark.py \
+  --manifest evaluation/benchmark/manifest_expanded.json \
+  --papers-dir /Users/qinleqi/Desktop \
+  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
+  --verify-files --require-complete
+```
+
+挑战清单校验与离线检索：
+
+```bash
+./venv/bin/python evaluation/validate_benchmark.py \
+  --manifest evaluation/benchmark/manifest_challenge.json \
+  --papers-dir /Users/qinleqi/Desktop \
+  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
+  --verify-files --require-complete
+
+./venv/bin/python evaluation/benchmark_retrieval.py \
+  --manifest evaluation/benchmark/manifest_challenge.json \
+  --papers-dir /Users/qinleqi/Desktop \
+  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
+  --retriever hybrid --top-k 10,50 --show-failures
+```
+
+2026-09-01 的挑战集首轮 Hybrid 对照（证据 guard、路由、查询分解和 parent-window 开启）显示：
+`image_only` 在文字层为 `0/10` 完整覆盖，`computation` 的输入事实在 @50 为 `18/20` 完整，
+`cross_document` 在 @10 为 `4/5` 完整、@50 为 `5/5` 完整。它们是方向门控的检索/证据信号，
+尚未证明图片理解、计算答案正确性或 Graph-RAG 必要性。
+
+2026-09-01 的派生数值路由复测使用隔离 577 块数据库和 hybrid、文档路由、查询分解、parent-window
+及空间图证据：20 道 computation 题两轮共 40 次调用全部成功；逐题复核每轮 `18/20` 正确、`2/20`
+因多表题未召回第二张表而缺少操作数，实际完整操作数 `36/40`。无稳定纯算术/生成失败（`0`），
+因此未达到计算器门槛；两道缺口另计为 routing/row-selection 问题，下一步转 image-only 实验。
+
+2026-09-01 的只读 Hybrid 对照（路由、查询分解、结构化表格/图/公式/限制证据及
+parent-window 开启）在扩展清单 @50 达到 fact macro/micro `0.968/0.973`、完整覆盖 `62/66`；
+这只是检索代理，不代表 13 道新增题的生成或答案语义正确率。
 
 ## 离线检索基线
 
@@ -278,3 +328,65 @@ SCI_RAG_RETRIEVAL_MODE=hybrid ./venv/bin/python app.py
 短坐标文字，并只对显式 `Figure N`/`图N` 查询注入精确图号证据。普通问题仍排除这些
 图块，以免改变基线候选池。该开关不运行 OCR、不读取图片像素，也不能覆盖没有文字层的图；
 它是与网页 `SCI_RAG_SPATIAL_FIGURE_EVIDENCE=true` 对应的默认关闭对照。
+
+## Phase 6.3 最小 image-only vision 实验
+
+`evaluation/vision_experiment.py` 仅运行 `manifest_challenge.json` 中的 10 道
+`requires_image=true` 题。它按题目解析的 Figure 编号定位 PDF 题注，裁剪整页宽度的图区，
+并把临时 PNG 以内存 data URL 发送给 `deepseek-v4-flash-vision-exp`；不接入网页或运行时，
+也不做 OCR、图片持久化、Graph-RAG 或工具执行。
+
+2026-09-01 完成 20/20 次调用（两轮各 10 题），人工复核每轮为 `7 correct / 0 partial /
+3 incorrect`，低于预设每轮至少 8 题正确的门槛。失败类型为复杂化学结构图、DockQ 矩阵图的
+空答案，以及一轮 SCIDQA 流程图空答案；因此本步停止在实验记录，不进入 UI/默认运行时集成。
+
+随后进行了一个限定的裁剪 A/B：full+detail 模式在同一条消息中发送完整图裁剪和统一规则
+生成的下半部居中 detail crop（左右各收缩 10%、从完整裁剪区域的 35% 高度开始）。10 道题
+各重复两轮，得到 9/10 和 8/10 正确；相同条件下已有单图基线为 7/10、7/10。
+因此该输入策略达到本实验门槛，但仍只作为 opt-in 实验，不接入网页默认路径；剩余失败是
+SciDQA Figure 6(a) 的上下半部判断（两轮）及一次 DrugR 复杂结构图空答。该结果不能证明
+通用视觉问答能力，后续若集成仍需 UI 回归和更多论文验证。
+
+## Phase 6.4 opt-in PDF Figure 视觉路径
+
+`SCI_RAG_VISION_ENABLED` 默认关闭，且需要同时开启 `SCI_RAG_DOCUMENT_ROUTING`。开启后，上传 PDF
+会按 SHA-256 保存到数据库目录的 `source_pdfs/`；只有明确的 Figure/Extended Data Figure 问题被路由器
+唯一定位到一个 PDF 来源且 hash 文件存在时，才发送 full+detail 两张图。普通问题、表格问题、非 PDF、
+来源不明确和旧 DB 缺 PDF 时继续走文本 RAG；视觉 API 异常会回退文本路径并提示原因。
+
+当前实现是受控 opt-in 实验，不改变默认网页行为，也不代表已证明通用视觉问答能力；未接入 OCR、图片
+向量、图片索引、Graph-RAG 或工具执行。
+
+2026-09-02 复测修正后的 Figure 页定位，并为视觉 API 空内容增加一次有界重试。10 道题各重复两轮，
+20/20 次调用返回非空答案；人工复核第一轮 `10/10 correct`、第二轮 `9/10 correct + 1 partial`，
+10/10 个来源页与基准一致。该结果仍仅作为 opt-in 门控证据。
+
+## Phase 6.5 多表派生数值题复测
+
+多表题此前可能只按问题中的第一张表筛选，导致第二个操作数在生成前丢失。修复后，`Table N` 集合按问题中全部显式表号匹配；派生数值题继续跳过单元格快捷回答并保留完整表格证据。
+
+六论文挑战集离线检索中，`calc-table-02` 与 `calc-table-04` 在 @10/@50 均达到两项操作数全覆盖；20 道 computation 题在 @50 为 `20/20` 完整覆盖。两道目标题各进行两次真实生成烟测，答案分别稳定为 `0.14` 与 `0.07`，每次均返回 Table 1、Table 2。该结果是定向修复证据，不代表全部生成答案已证明正确。
+
+交叉核对原 PDF 时发现 `cross-04` 的初始标注把 MgNO Darcy rough 的 `1,280` 个训练样本误写成 `1,000`；现已更正为 `7,000 / 1,280 ≈ 5.5` 倍，并同步更新 gold facts、contexts 和 calculation 元数据。该题此前的拒答是对矛盾证据的合理反应，不计入 Graph-RAG 失败样本。
+
+## Phase 6.6 跨论文来源证据补全
+
+多来源查询开启 `SCI_RAG_DOCUMENT_ROUTING=true` 与
+`SCI_RAG_QUERY_DECOMPOSITION=true` 时，应用现在对每个路由来源保留一个有界的
+lexical/同节/显式数字证据候选，并一次性构造来源覆盖前缀；这修复了“后插入来源挤掉先插入来源”
+以及 dense top-k 漏掉远端数字或算法段落的问题。默认 dense、单来源问题和网页默认配置不变。
+
+离线挑战检索的 `cross_document` 在 @50 为 `5/5` 完整覆盖。六论文 696 块隔离库上的真实生成复测
+覆盖 5 道题、每题两轮（10/10 调用成功、10/10 人工复核正确），上下文和运行配置两轮 100% 稳定；
+这证明了当前路由补全在该挑战集上的效果，不等同于跨论文泛化，也不构成 Graph-RAG 或工具执行器的
+必要性证据。
+
+## Phase 6.7 computation 全量生成门禁
+
+在同一 696 块隔离库上，20 道 computation 题各重复两轮，40/40 次调用成功；19 道题两轮均正确，
+`calc-af3-02` 两轮拒答。该题所需的 Figure 3(a) 两个指标只在图像像素中，文字/坐标证据没有
+`87.7` 和 `86.9`，所以应归入 image-only 证据边界，而不是算术执行失败。上下文、metadata 和
+运行配置在 20 个重复 case 上均稳定，不能据此宣称 20 题的通用答案正确率。
+
+因此当前没有 5 道可由本地白名单工具稳定修复的真实运算失败，calculator/tool executor 仍按门槛
+暂缓；图像证据继续由默认关闭的 opt-in vision 路径单独验证。
