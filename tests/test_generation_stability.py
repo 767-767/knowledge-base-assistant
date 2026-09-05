@@ -5,6 +5,7 @@ import app
 from evaluation.generation_stability import (
     answer_signature,
     build_runtime,
+    completed_keys,
     runtime_config_trace,
     select_cases,
     source_fingerprint,
@@ -27,6 +28,25 @@ class GenerationStabilityTests(unittest.TestCase):
 
     def test_answer_signature_only_collapses_superficial_whitespace(self):
         self.assertEqual(answer_signature("  n = 25\n\n n = 38  "), "n = 25 n = 38")
+
+    def test_completed_keys_rejects_legacy_rows_without_source_filter(self):
+        sources = {"case-1": ["paper.pdf"]}
+        rows = [
+            {"repeat": 1, "case_id": "case-1", "error": False},
+            {
+                "repeat": 2,
+                "case_id": "case-1",
+                "error": False,
+                "source_filter": ["paper.pdf"],
+            },
+        ]
+        self.assertEqual(completed_keys(rows, sources), {(2, "case-1")})
+
+    def test_completed_keys_accepts_no_source_filter_trace(self):
+        rows = [
+            {"repeat": 1, "case_id": "case-1", "error": False, "source_filter": None},
+        ]
+        self.assertEqual(completed_keys(rows, {"case-1": None}), {(1, "case-1")})
 
     def test_runtime_trace_contains_model_and_retrieval_settings_but_no_secret(self):
         config = app.RuntimeConfig(

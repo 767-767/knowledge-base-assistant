@@ -71,6 +71,25 @@ def answer_signature(answer: Any) -> str:
     return " ".join(str(answer or "").split())
 
 
+def completed_keys(
+    rows: Iterable[dict[str, Any]],
+    case_sources: dict[str, list[str] | None],
+) -> set[tuple[int, str]]:
+    """Return successful rows that match the current source isolation."""
+
+    return {
+        (int(row.get("repeat", 0)), str(row.get("case_id")))
+        for row in rows
+        if (
+            row.get("repeat")
+            and row.get("case_id")
+            and not row.get("error")
+            and row.get("source_filter")
+            == case_sources.get(str(row.get("case_id")))
+        )
+    }
+
+
 def runtime_config_trace(runtime: app.Runtime) -> dict[str, Any]:
     """Return reproducibility metadata without secrets or live clients.
 
@@ -201,6 +220,7 @@ def run_stability(
     reranker_device: str | None = None,
     reranker_rrf_k: int | None = None,
     expected_chunks: int | None = None,
+    use_source_filter: bool = True,
 ) -> dict[str, Any]:
     """Run repeated generations and return a small execution summary."""
 
@@ -209,6 +229,24 @@ def run_stability(
     output = Path(output_path).expanduser().resolve()
     benchmark = load_benchmark(manifest_path, verify_files=False)
     cases = select_cases(benchmark["cases"], case_ids)
+    filenames = {
+        str(document["document_id"]): str(document["filename"])
+        for document in benchmark["documents"]
+    }
+    case_sources = {
+        str(case["case_id"]): (
+            [
+                filenames[str(document_id)]
+                for document_id in [
+                    str(case["document_id"]),
+                    *(str(value) for value in case.get("additional_document_ids", [])),
+                ]
+            ]
+            if use_source_filter
+            else None
+        )
+        for case in cases
+    }
     runtime = build_runtime(
         db_path,
         retrieval_mode=retrieval_mode,
@@ -241,11 +279,7 @@ def run_stability(
         for row in existing
         if row.get("repeat") and row.get("case_id")
     }
-    completed = {
-        (int(row.get("repeat", 0)), str(row.get("case_id")))
-        for row in existing
-        if row.get("repeat") and row.get("case_id") and not row.get("error")
-    }
+    completed = completed_keys(existing, case_sources)
     requested_total = repeats * len(cases)
     attempted = len(existing)
     errors = 0
@@ -262,6 +296,7 @@ def run_stability(
                     str(case["question"]),
                     return_contexts=True,
                     runtime=runtime,
+                    source_filter=case_sources[case_id],
                 )
                 if not str(result.get("answer", "")).startswith("❌ 调用出错："):
                     break
@@ -275,6 +310,7 @@ def run_stability(
                 "case_number": case_number,
                 "case_id": case_id,
                 "document_id": str(case.get("document_id", "")),
+                "source_filter": case_sources[case_id],
                 "question": str(case["question"]),
                 "answer": answer,
                 "answer_signature": answer_signature(answer),
@@ -286,6 +322,7 @@ def run_stability(
                 "query_decomposition": bool(query_decomposition),
                 "parent_window": bool(parent_window),
                 "spatial_figure_evidence": bool(spatial_figure_evidence),
+                "use_source_filter": bool(use_source_filter),
                 "attempts": attempts,
                 "error": is_error,
                 "latency_seconds": time.perf_counter() - started,
@@ -334,6 +371,11 @@ def main() -> int:
     parser.add_argument("--no-parent-window", action="store_true")
     parser.add_argument("--no-spatial-figure-evidence", action="store_true")
     parser.add_argument(
+        "--no-source-filter",
+        action="store_true",
+        help="不传入测试集目标来源，测试真实文档路由（默认使用来源隔离）",
+    )
+    parser.add_argument(
         "--formula-evidence",
         action="store_true",
         default=None,
@@ -365,6 +407,7 @@ def main() -> int:
             query_decomposition=not args.no_query_decomposition,
             parent_window=not args.no_parent_window,
             spatial_figure_evidence=not args.no_spatial_figure_evidence,
+            use_source_filter=not args.no_source_filter,
             formula_evidence=args.formula_evidence,
             formula_evidence_auto=args.formula_evidence_auto,
             reranker_model=args.reranker_model,

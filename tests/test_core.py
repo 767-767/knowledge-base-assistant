@@ -27,11 +27,14 @@ from sci_rag_core import (
     is_table_question,
     matching_table_indices,
     normalize_for_match,
+    parse_markdown_table,
     missing_pdf_formula_blocks,
+    repair_latex_json_escapes,
     rerank_table_first,
     select_row_entity,
     split_to_chunks,
     supplement_answer_with_evidence,
+    supplement_formula_with_evidence,
     table_numbers_from_question,
     validate_answer_against_evidence,
 )
@@ -71,6 +74,22 @@ TABLE_GROUPED = """|Setting|Model|METEOR|ROUGE-1|BertS|
 |WikiTQ+ SQA + SciGen|FlanT5-xl|0.15|0.24|0.85|
 ||**Test(Othe**|**r)**|||
 |WikiTQ + SQA + SciGen|FlanT5-xl|0.14|0.23|0.85|"""
+TABLE_SETTING_QUALIFIER = """|Setting|Model|METEOR|ROUGE-1|BertS|
+|---|---|---|---|---|
+||**Test(C&L**|**)**|||
+||FlanT5-xl|0.14(+0.06)|0.23(+0.13)|0.85(+0.07)|
+|WikiTQ|FlanT5-xl|0.08|0.12(+0.02)|0.81(+0.03)|
+|WikiTQ + SQA|FlanT5-xl|0.08|0.10|0.79(+0.01)|
+|WikiTQ + SQA + SciGen|FlanT5-xl|0.15(+0.07)|0.24(+0.14)|0.85(+0.07)|
+||**Test(Othe**|**r)**|||
+||FlanT5-xl|0.13(+0.05)|0.23(+0.14)|0.85(+0.07)|"""
+TABLE_SPLIT_MULTI_HEADER = """|**Mthd**|**H**|**as-Ans**|**wer**|**M**|**iss-Ans**|**wer**|**Inter**|**nal Kno**|**wledge**|
+|---|---|---|---|---|---|---|---|---|---|
+|**eo**|PopQA|NQ|TriviaQA|PopQA|NQ|TriviaQA|PopQA|NQ|TriviaQA|
+|**Llama-3-Ins-8B**||||||||||
+|THINKNOTE|90.1|80.4|97.0|8.3|25.8|36.0|99.2|92.9|97.3|
+|**Llama-3-Ins-70**|**B**|||||||||
+|THINKNOTE|95.9|88.3|97.5|12.2|33.3|54.0|93.6|94.1|98.0|"""
 TABLE_QUALIFIED_METRICS = """|Model|Darcy smooth L2|Darcy smooth H1|Darcy rough L2|Darcy rough H1|
 |---|---|---|---|---|
 |MgNO|0.176|0.576|0.339|1.380|"""
@@ -243,6 +262,103 @@ class CoreTests(unittest.TestCase):
             [2],
         )
 
+    def test_formula_evidence_uses_explicit_symbol_for_isolated_formula_chunk(self):
+        question = "Thought Accommodation 阶段的最终输出 y 如何定义？"
+        texts = [
+            "The final output is produced as: y = M (Ita, q, T, R).",
+            "A separate equation describes an unrelated score.",
+        ]
+        metas = [{"type": "formula"}, {"type": "formula"}]
+
+        self.assertEqual(formula_evidence_indices(question, texts, metas), [0])
+
+    def test_formula_evidence_prefers_requested_variable_on_left_hand_side(self):
+        texts = [
+            "y = M (Ita, q, T, R)",
+            "T = M (Ika, q, D)",
+        ]
+        metas = [{"type": "formula"}, {"type": "formula"}]
+
+        self.assertEqual(
+            formula_evidence_indices(
+                "Knowledge Assimilation 阶段的形式化输出 T 如何定义？",
+                texts,
+                metas,
+            )[0],
+            1,
+        )
+
+    def test_formula_output_restores_json_control_character_escapes(self):
+        corrupted = "若 j " + "\n" + "otin V_i，则屏蔽。"
+        self.assertEqual(
+            repair_latex_json_escapes(corrupted),
+            "若 j \\notin V_i，则屏蔽。",
+        )
+
+    def test_formula_escape_repair_does_not_rewrite_ordinary_words(self):
+        answer = "说明：\nequation (1) defines the score."
+        self.assertEqual(repair_latex_json_escapes(answer), answer)
+
+    def test_formula_supplement_leaves_non_formula_newlines_untouched(self):
+        answer = "第一段。\nequation (1) defines the score."
+        self.assertEqual(
+            supplement_formula_with_evidence(
+                "这篇论文的主要贡献是什么？",
+                answer,
+                [],
+            ),
+            answer,
+        )
+
+    def test_formula_supplement_quotes_missing_explicit_operator_line(self):
+        answer = supplement_formula_with_evidence(
+            "NaviRAG 如何决定展开还是吸收当前节点的摘要？",
+            "中间节点继续展开，叶节点吸收当前摘要。",
+            ["π(n) ∈ {absorb, expand} based on similarity."],
+            [{"type": "formula", "formula_evidence": True}],
+        )
+        self.assertIn("【公式原文核对项】", answer)
+        self.assertIn("π(n) ∈ {absorb, expand}", answer)
+
+    def test_formula_supplement_skips_unrelated_formula_prose(self):
+        answer = supplement_formula_with_evidence(
+            "NaviRAG 最终上下文集合 C 由哪三部分组成？",
+            "C = Cvec ∪ Csum ∪ Craw。",
+            [
+                "and NaviRAG, we set top-k = 5",
+                "C = Cvec ∪ Csum ∪ Craw",
+            ],
+            [{"type": "formula", "formula_evidence": True}] * 2,
+        )
+        self.assertNotIn("top-k", answer)
+        self.assertNotIn("【公式原文核对项】", answer)
+
+    def test_pdf_formula_text_recovery_merges_adjacent_spans_and_parentheses(self):
+        class Page:
+            def get_text(self, kind, sort=True):
+                self.kind = kind
+                return {
+                    "blocks": [
+                        {
+                            "type": 0,
+                            "lines": [
+                                {
+                                    "bbox": (10, 10, 20, 20),
+                                    "spans": [{"text": "u = B *"}],
+                                },
+                                {
+                                    "bbox": (21, 11, 50, 20),
+                                    "spans": [{"text": chr(16) + "f - A * u" + chr(17)}],
+                                },
+                            ],
+                        }
+                    ]
+                }
+
+        recovered = app._pdf_text_layer_for_formula_recovery(Page())
+
+        self.assertEqual(recovered, "u = B *(f - A * u)")
+
     def test_limitation_evidence_candidates_preserve_mechanism_and_example(self):
         question = "AlphaFold 3 对分子动力学状态的建模有什么限制，cereblon 示例展示了什么？"
         texts = [
@@ -356,7 +472,7 @@ class CoreTests(unittest.TestCase):
                 "MgNO 讨论的二维椭圆 PDE 定义在哪个区域，并考虑哪些边界条件？"
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             is_formula_question(
                 "MgNO 的非线性激活函数是什么，W_Mg 多通道线性算子本身是否包含非线性激活？"
             )
@@ -367,9 +483,19 @@ class CoreTests(unittest.TestCase):
             )
         )
         self.assertTrue(
+            is_formula_question("Knowledge Assimilation 阶段的形式化输出 T 如何定义？")
+        )
+        self.assertTrue(
+            is_formula_question("Thought Accommodation 阶段的最终输出 y 如何定义？")
+        )
+        self.assertTrue(
             is_formula_question(
                 "MgNO 的限制和延拓操作如何改变网格，论文区分哪两种循环？"
             )
+        )
+        self.assertTrue(is_formula_question("NaviRAG 最终上下文集合 C 由哪三部分组成？"))
+        self.assertTrue(
+            is_formula_question("NaviRAG 如何决定展开还是吸收当前节点的摘要？")
         )
 
     def test_answer_supplement_quotes_missing_high_signal_evidence(self):
@@ -907,6 +1033,26 @@ class CoreTests(unittest.TestCase):
             any(chunk.metadata.get("type") == "text" and "|---|---|" in chunk.page_content for chunk in chunks)
         )
 
+    def test_after_table_captions_are_not_reused_for_the_next_table(self):
+        markdown = (
+            "|Metric|Value|\n|---|---|\n|A|1|\n\n"
+            "Table 2: first\n\n"
+            "|Metric|Value|\n|---|---|\n|B|2|\n\n"
+            "Table 3: second\n"
+        )
+        tables, _body = extract_tables(markdown, "paper.pdf")
+        self.assertEqual([table.metadata["table_number"] for table in tables], [2, 3])
+
+    def test_wrapped_group_headers_are_repaired_before_lookup(self):
+        markdown = (
+            "|**Method**|**Formul**<br>validity|**ation design**<br>success rate|\n"
+            "|---|---|---|\n|Qwen|75.5|68.3|"
+        )
+        tables, _body = extract_tables(markdown, "paper.pdf")
+        headers, _rows = parse_markdown_table(tables[0].page_content)
+        self.assertIn("Formulation design validity", headers)
+        self.assertIn("Formulation design success rate", headers)
+
     def test_row_entity_ignores_column_name_and_normalizes_sup(self):
         question = "Table 2 中 DrugR* 的 Target property F1 score 是多少？"
         entity = select_row_entity(question, TABLE_2)
@@ -977,6 +1123,43 @@ class CoreTests(unittest.TestCase):
             ],
         )
 
+    def test_table_entity_matches_pdf_dropped_model_punctuation(self):
+        question = "Table 1 中 ChatGPT-4o-Mini 使用 THINKNOTE 在 PopQA 和 NQ 上的 accuracy 分别是多少？"
+        table = """|Method|LLM|PopQA|NQ|
+|---|---|---|---|
+|THINKNOTE|Llama-3-Ins-70B|69.8|68.4|
+||ChatGPT-4oMINI|69.8|71.0|"""
+        self.assertEqual(select_row_entity(question, table), "ChatGPT-4oMINI")
+        row = extract_table_row_values(question, table, {"type": "table", "table_number": 1})
+        self.assertIsNotNone(row)
+        self.assertEqual([item["value"] for item in row["values"]], ["69.8", "71.0"])
+
+    def test_table_entity_lookup_matches_named_columns_with_metric_suffix(self):
+        question = "Table 1 中 ChatGPT-4o-Mini 使用 THINKNOTE 在 PopQA 和 NQ 上的 accuracy 分别是多少？"
+        table = """|Method|LLM|PopQA<br>(_acc_)|NQ<br>(_acc_)|
+|---|---|---|---|
+|THINKNOTE|ChatGPT-4oMINI|69.8|71.0|"""
+        row = extract_table_row_values(question, table, {"type": "table", "table_number": 1})
+        self.assertIsNotNone(row)
+        self.assertEqual([item["value"] for item in row["values"]], ["69.8", "71.0"])
+
+    def test_usage_qualified_table_lookup_keeps_inherited_method_group(self):
+        question = "Table 1 中 ChatGPT-4o-Mini 使用 THINKNOTE 在 PopQA 和 NQ 上的 accuracy 分别是多少？"
+        table = """|Method|LLM|PopQA|NQ|
+|---|---|---|---|
+|Direct QA|ChatGPT-4oMINI|32.6|51.0|
+|THINKNOTE|Llama-3-Ins-70B|69.8|68.4|
+||ChatGPT-4oMINI|69.8|71.0|"""
+        _order, _note, filtered = rerank_table_first(
+            question, [table], [{"type": "table", "table_number": 1}]
+        )
+        self.assertIn("|THINKNOTE|Llama-3-Ins-70B|69.8|68.4|", filtered[0])
+        row = extract_table_row_values(
+            question, filtered[0], {"type": "table", "table_number": 1}
+        )
+        self.assertIsNotNone(row)
+        self.assertEqual([item["value"] for item in row["values"]], ["69.8", "71.0"])
+
     def test_table_lookup_disambiguates_model_and_dataset(self):
         question = "Table 2 中 FigEx-7B 在 BioSci-Fig 上的 BLEU 和 ROUGE-1 分别是多少？"
         row = extract_table_row_values(
@@ -1046,6 +1229,76 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(row["values"][0]["value"], "0.14")
         self.assertEqual(row["values"][1]["value"], "0.23")
         self.assertEqual(row["values"][2]["value"], "0.85")
+
+    def test_setting_column_qualifier_selects_composite_dataset_row(self):
+        question = (
+            "Table 2 的 Test (C&L) 中，WikiTQ+SQA+SciGen 的 FlanT5-xl "
+            "得分是多少？"
+        )
+        tables, _ = extract_tables(TABLE_SETTING_QUALIFIER, "paper.pdf")
+        row = extract_table_row_values(
+            question,
+            tables[0].page_content,
+            tables[0].metadata,
+        )
+        self.assertIsNotNone(row)
+        self.assertEqual(
+            [item["value"] for item in row["values"][-3:]],
+            ["0.15(+0.07)", "0.24(+0.14)", "0.85(+0.07)"],
+        )
+
+    def test_split_multi_header_and_wrapped_section_select_correct_row(self):
+        question = (
+            "Table 3 中 Llama-3-Ins-70B 的 THINKNOTE 在 Miss-Answer 场景的 "
+            "PopQA、NQ 和 TriviaQA 数值分别是多少？"
+        )
+        tables, _ = extract_tables(TABLE_SPLIT_MULTI_HEADER, "paper.pdf")
+        row = extract_table_row_values(
+            question,
+            tables[0].page_content,
+            tables[0].metadata,
+        )
+        self.assertIsNotNone(row)
+        self.assertEqual(
+            [item["value"] for item in row["values"]],
+            ["12.2", "33.3", "54.0"],
+        )
+
+    def test_split_model_section_is_not_treated_as_first_repeated_row(self):
+        question = (
+            "Table 3 中 Llama-3-Ins-70B 的 THINKNOTE 在 Miss-Answer 场景的 "
+            "PopQA、NQ 和 TriviaQA 数值分别是多少？"
+        )
+        content = (
+            "|Mthd|Miss-Answer PopQA|Miss-Answer NQ|Miss-Answer TriviaQA|\n"
+            "|---|---:|---:|---:|\n"
+            "|**Llama-3-Ins-8B**||||\n"
+            "|THINKNOTE|8.3|25.8|36.0|\n"
+            "|**Llama-3-Ins-70**|**B**|||\n"
+            "|THINKNOTE|12.2|33.3|54.0|"
+        )
+        row = extract_table_row_values(
+            question,
+            content,
+            {"type": "table", "table_number": 3},
+        )
+        self.assertIsNotNone(row)
+        self.assertEqual(
+            [item["value"] for item in row["values"]],
+            ["12.2", "33.3", "54.0"],
+        )
+        filtered = filter_table_rows_by_entity(content, "THINKNOTE")
+        self.assertIsNotNone(filtered)
+        self.assertIn("Llama-3-Ins-70", filtered)
+        filtered_row = extract_table_row_values(
+            question,
+            filtered,
+            {"type": "table", "table_number": 3},
+        )
+        self.assertEqual(
+            [item["value"] for item in filtered_row["values"]],
+            ["12.2", "33.3", "54.0"],
+        )
 
     def test_explicit_group_does_not_match_ungrouped_table(self):
         question = "Table 2 的 Test (C&L) 中，DrugR* 的 Target property F1 score 是多少？"
@@ -1712,6 +1965,71 @@ class RuntimeContractTests(unittest.TestCase):
             ["detail", "anchor"],
         )
 
+    def test_parent_window_joins_cross_page_sentence_continuation(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        class Collection:
+            def count(self):
+                return 3
+
+            def query(self, **_kwargs):
+                return {
+                    "ids": [["anchor"]],
+                    "documents": [["Answer tables have 6.7 rows and"]],
+                    "metadatas": [[
+                        {"source": "paper.pdf", "page": 6, "type": "text", "chunk_index": 2}
+                    ]],
+                }
+
+            def get(self, **_kwargs):
+                return {
+                    "ids": ["anchor", "continuation", "unrelated"],
+                    "documents": [
+                        "Answer tables have 6.7 rows and",
+                        "4 columns.",
+                        "An unrelated next-page paragraph.",
+                    ],
+                    "metadatas": [
+                        {"source": "paper.pdf", "page": 6, "type": "text", "chunk_index": 2},
+                        {"source": "paper.pdf", "page": 7, "type": "text", "chunk_index": 3},
+                        {"source": "paper.pdf", "page": 7, "type": "text", "chunk_index": 4},
+                    ],
+                }
+
+        class Client:
+            def __init__(self):
+                self.chat = self
+                self.completions = self
+
+            def create(self, **_kwargs):
+                return type(
+                    "Response",
+                    (),
+                    {"choices": [type("Choice", (), {"message": type("Message", (), {"content": "ok"})()})()]},
+                )()
+
+        result = app.query_knowledge(
+            "How many rows and columns do the answer tables have?",
+            runtime=app.Runtime(
+                app.RuntimeConfig(parent_window=True, retrieval_k=1, context_k=1),
+                Client(),
+                Embedding(),
+                Collection(),
+            ),
+        )
+
+        self.assertIn("6.7 rows and\n\n4 columns.", result["contexts"][0])
+        self.assertEqual(
+            result["context_metadatas"][0]["window_chunk_ids"],
+            ["anchor", "continuation"],
+        )
+
     def test_formula_evidence_promotes_same_source_formula_candidate(self):
         class Vector(list):
             def tolist(self):
@@ -1774,6 +2092,147 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(result["context_ids"], ["formula"])
         self.assertTrue(result["context_metadatas"][0]["formula_evidence"])
         self.assertIn("3 × 3", client.prompt)
+
+    def test_composite_formula_variant_keeps_its_routed_source(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        class Collection:
+            def count(self):
+                return 4
+
+            def query(self, **kwargs):
+                where = str(kwargs.get("where", {}))
+                if "2026.findings-eacl.12.pdf" in where:
+                    return {
+                        "ids": [["thinknote-text"]],
+                        "documents": [["THINKNOTE knowledge assimilation evidence"]],
+                        "metadatas": [[
+                            {"source": "2026.findings-eacl.12.pdf", "type": "text"}
+                        ]],
+                    }
+                return {
+                    "ids": [["drugr-text"]],
+                    "documents": [["DrugR explicit reasoning dataset evidence"]],
+                    "metadatas": [[{"source": "2602.08213v1.pdf", "type": "text"}]],
+                }
+
+            def get(self, **_kwargs):
+                return {
+                    "ids": ["drugr-text", "thinknote-text", "thinknote-formula", "drugr-formula"],
+                    "documents": [
+                        "DrugR explicit reasoning dataset evidence",
+                        "THINKNOTE knowledge assimilation evidence",
+                        "(1) T = M (Ika, q, D)",
+                        "(1) unrelated DrugR equation",
+                    ],
+                    "metadatas": [
+                        {"source": "2602.08213v1.pdf", "type": "text"},
+                        {"source": "2026.findings-eacl.12.pdf", "type": "text"},
+                        {"source": "2026.findings-eacl.12.pdf", "type": "formula"},
+                        {"source": "2602.08213v1.pdf", "type": "formula"},
+                    ],
+                }
+
+        class Client:
+            def __init__(self):
+                self.prompt = ""
+                self.chat = self
+                self.completions = self
+
+            def create(self, **kwargs):
+                self.prompt = kwargs["messages"][1]["content"]
+                return type(
+                    "Response",
+                    (),
+                    {"choices": [type("Choice", (), {"message": type("Message", (), {"content": "ok"})()})()]},
+                )()
+
+        client = Client()
+        result = app.query_knowledge(
+            "DrugR 的显式推理数据集包含多少个样本？同时，THINKNOTE 的知识同化模块输出 T 的形式化定义是什么？",
+            runtime=app.Runtime(
+                app.RuntimeConfig(
+                    document_routing=True,
+                    query_decomposition=True,
+                    retrieval_k=2,
+                    context_k=3,
+                ),
+                client,
+                Embedding(),
+                Collection(),
+            ),
+        )
+        self.assertIn("thinknote-formula", result["context_ids"])
+        formula_index = result["context_ids"].index("thinknote-formula")
+        self.assertTrue(result["context_metadatas"][formula_index]["formula_evidence"])
+        self.assertIn("T = M (Ika, q, D)", client.prompt)
+
+    def test_source_local_fallback_uses_decomposed_question_clause(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        class Collection:
+            def count(self):
+                return 1
+
+            def query(self, **_kwargs):
+                return {
+                    "ids": [["dense"]],
+                    "documents": [["dense evidence"]],
+                    "metadatas": [[{"source": "paper.pdf", "type": "text"}]],
+                }
+
+            def get(self, **_kwargs):
+                return {
+                    "ids": ["dense"],
+                    "documents": ["dense evidence"],
+                    "metadatas": [{"source": "paper.pdf", "type": "text"}],
+                }
+
+        class Client:
+            def __init__(self):
+                self.chat = self
+                self.completions = self
+
+            def create(self, **_kwargs):
+                return type(
+                    "Response",
+                    (),
+                    {"choices": [type("Choice", (), {"message": type("Message", (), {"content": "ok"})()})()]},
+                )()
+
+        question = "SciDQA 的问题和答案主要从什么材料中产生，之后如何降低第一人称偏差？"
+        seen: list[str] = []
+
+        def lexical(question_text, _runtime, _route):
+            seen.append(question_text)
+            return None
+
+        with patch.object(app, "_lexical_route_evidence_result", side_effect=lexical):
+            app.query_knowledge(
+                question,
+                runtime=app.Runtime(
+                    app.RuntimeConfig(query_decomposition=True, retrieval_k=1),
+                    Client(),
+                    Embedding(),
+                    Collection(),
+                ),
+                source_filter="paper.pdf",
+            )
+
+        self.assertIn("SciDQA 的问题和答案主要从什么材料中产生", seen)
+        self.assertIn("之后如何降低第一人称偏差", seen)
 
     def test_hybrid_lexical_path_excludes_formula_chunk(self):
         class Vector(list):
@@ -2241,6 +2700,261 @@ class RuntimeContractTests(unittest.TestCase):
         )
         self.assertIn("ADMETLab", "\n".join(result["contexts"]))
         self.assertNotIn("AlphaFold3", client.prompt)
+
+    def test_explicit_source_filter_isolates_benchmark_contexts(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        class Collection:
+            def __init__(self):
+                self.query_kwargs = None
+
+            def count(self):
+                return 2
+
+            def query(self, **kwargs):
+                self.query_kwargs = kwargs
+                return {
+                    "ids": [["target", "other"]],
+                    "documents": [["Target evidence.", "Other paper evidence."]],
+                    "metadatas": [[
+                        {"source": "target.pdf", "type": "text"},
+                        {"source": "other.pdf", "type": "text"},
+                    ]],
+                }
+
+            def get(self, **_kwargs):
+                return {
+                    "ids": ["target", "other"],
+                    "documents": ["Target evidence.", "Other paper evidence."],
+                    "metadatas": [
+                        {"source": "target.pdf", "type": "text"},
+                        {"source": "other.pdf", "type": "text"},
+                    ],
+                }
+
+        class Client:
+            def __init__(self):
+                self.chat = self
+                self.completions = self
+                self.prompt = ""
+
+            def create(self, **kwargs):
+                self.prompt = kwargs["messages"][1]["content"]
+                return type(
+                    "Response",
+                    (),
+                    {"choices": [type("Choice", (), {"message": type("Message", (), {"content": "ok"})()})()]},
+                )()
+
+        collection = Collection()
+        client = Client()
+        result = app.query_knowledge(
+            "What is the target evidence?",
+            runtime=app.Runtime(
+                app.RuntimeConfig(context_k=2),
+                client,
+                Embedding(),
+                collection,
+            ),
+            source_filter="target.pdf",
+        )
+
+        self.assertEqual(
+            collection.query_kwargs["where"],
+            {"$and": [{"type": {"$ne": "formula"}}, {"source": {"$eq": "target.pdf"}}]},
+        )
+        self.assertEqual(result["context_metadatas"][0]["source"], "target.pdf")
+        self.assertEqual(result["context_metadatas"][0]["type"], "text")
+        self.assertNotIn("Other paper evidence", client.prompt)
+
+    def test_source_filter_adds_source_local_lexical_evidence_without_router_token(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        class Collection:
+            def count(self):
+                return 3
+
+            def query(self, **_kwargs):
+                return {
+                    "ids": [["anchor"]],
+                    "documents": [["Paper overview."]],
+                    "metadatas": [[
+                        {"source": "target.pdf", "type": "text", "headers": "H2: Overview"}
+                    ]],
+                }
+
+            def get(self, **_kwargs):
+                return {
+                    "ids": ["anchor", "evidence", "other"],
+                    "documents": [
+                        "Paper overview.",
+                        "The answer uses at least 80% unigram overlap and 25% of answers exceed it.",
+                        "Other paper evidence about unrelated results.",
+                    ],
+                    "metadatas": [
+                        {"source": "target.pdf", "type": "text", "headers": "H2: Overview"},
+                        {"source": "target.pdf", "type": "text", "headers": "H2: Fuzzy Search"},
+                        {"source": "other.pdf", "type": "text", "headers": "H2: Results"},
+                    ],
+                }
+
+        class Client:
+            def __init__(self):
+                self.chat = self
+                self.completions = self
+
+            def create(self, **_kwargs):
+                return type(
+                    "Response",
+                    (),
+                    {"choices": [type("Choice", (), {"message": type("Message", (), {"content": "ok"})()})()]},
+                )()
+
+        result = app.query_knowledge(
+            "作者用什么阈值寻找答案与论文段落的重叠，多少比例的答案超过该重叠阈值？",
+            runtime=app.Runtime(
+                app.RuntimeConfig(retrieval_mode="hybrid", hybrid_candidate_k=1, context_k=2),
+                Client(),
+                Embedding(),
+                Collection(),
+            ),
+            source_filter="target.pdf",
+        )
+
+        joined = "\n".join(result["contexts"])
+        self.assertIn("80% unigram overlap", joined)
+        self.assertTrue(all(meta.get("source") == "target.pdf" for meta in result["context_metadatas"]))
+
+    def test_section_aliases_cover_source_local_method_terms(self):
+        terms = app._section_query_terms(
+            "作者用什么阈值寻找答案与论文段落的重叠，多少比例的答案超过该重叠阈值？"
+        )
+        for term in ("threshold", "overlap", "unigram"):
+            self.assertIn(term, terms)
+        retrieval_terms = app._section_query_terms("RAG 如何切分和检索论文？")
+        for term in ("BM25", "retrieval", "ranker"):
+            self.assertIn(term, retrieval_terms)
+        perspective_terms = app._section_query_terms("如何降低第一人称偏差？")
+        for term in ("third-person", "rewrite"):
+            self.assertIn(term, perspective_terms)
+        self.assertTrue(app._source_local_evidence_requested("RAG 如何切分和检索论文？"))
+        self.assertFalse(app._source_local_evidence_requested("同行评审实验使用多少篇论文？"))
+        annotation_terms = app._section_query_terms("人工标注审阅了多少候选实例，一致率是多少？")
+        for term in ("agreement", "instances", "annotators"):
+            self.assertIn(term, annotation_terms)
+        architecture_terms = app._section_query_terms(
+            "AlphaFold 3 相比 AlphaFold 2 在主干结构和结构模块上做了什么替换？"
+        )
+        for term in ("trunk", "structure module", "replace"):
+            self.assertIn(term, architecture_terms)
+        efficiency_terms = app._section_query_terms(
+            "SciDC 的效率代价包括 token 长度、再生成次数和实际时间成本吗？"
+        )
+        for term in ("efficiency", "tokens", "regeneration", "time", "cost"):
+            self.assertIn(term, efficiency_terms)
+        self.assertTrue(app._source_local_evidence_requested("效率代价是多少？"))
+
+    def test_explicit_figure_query_keeps_same_page_explanatory_text(self):
+        self.assertIsNone(
+            app._figure_page_text_result(
+                "Figure 3 的 Top-K retrieval accuracy 是多少？",
+                {"metadatas": [[{"source": "target.pdf", "page": 7}]]},
+                None,
+            )
+        )
+
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        class Collection:
+            def count(self):
+                return 2
+
+            def query(self, **_kwargs):
+                return {
+                    "ids": [["figure"]],
+                    "documents": [["Figure 2 labels." ]],
+                    "metadatas": [[
+                        {"source": "target.pdf", "type": "text", "page": 7}
+                    ]],
+                }
+
+            def get(self, **kwargs):
+                where = str(kwargs.get("where", ""))
+                if "figure_number" in where and "figure_kind" in where:
+                    return {
+                        "ids": ["figure"],
+                        "documents": ["Figure 2 labels."],
+                        "metadatas": [{
+                            "source": "target.pdf",
+                            "type": "figure",
+                            "page": 7,
+                            "figure_kind": "figure",
+                            "figure_number": 2,
+                        }],
+                    }
+                return {
+                    "ids": ["figure", "prose"],
+                    "documents": [
+                        "Figure 2 labels.",
+                        "The correct answer is Jackie Robinson.",
+                    ],
+                    "metadatas": [
+                        {"source": "target.pdf", "type": "figure", "page": 7,
+                         "figure_kind": "figure", "figure_number": 2},
+                        # Some PDF two-column continuations are conservatively
+                        # classified as formula blocks; the helper must still
+                        # recover their explanatory prose.
+                        {"source": "target.pdf", "type": "formula", "page": 7},
+                    ],
+                }
+
+        class Client:
+            def __init__(self):
+                self.chat = self
+                self.completions = self
+
+            def create(self, **_kwargs):
+                return type(
+                    "Response",
+                    (),
+                    {"choices": [type("Choice", (), {"message": type("Message", (), {"content": "ok"})()})()]},
+                )()
+
+        result = app.query_knowledge(
+            "Figure 2 的信息流分析示例中，问题的正确答案是什么？",
+            runtime=app.Runtime(
+                app.RuntimeConfig(
+                    retrieval_mode="hybrid",
+                    spatial_figure_evidence=True,
+                    hybrid_candidate_k=1,
+                    context_k=2,
+                ),
+                Client(),
+                Embedding(),
+                Collection(),
+            ),
+            source_filter="target.pdf",
+        )
+
+        self.assertIn("Jackie Robinson", "\n".join(result["contexts"]))
 
     def test_document_routing_leaves_ambiguous_question_unfiltered(self):
         class Vector(list):
