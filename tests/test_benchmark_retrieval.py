@@ -117,6 +117,15 @@ class BenchmarkRetrievalTests(unittest.TestCase):
         self.assertIn("MgNO 有 1,280 个样本", variants)
         self.assertIn("SciDQA 审阅了 7,000 个实例", variants)
 
+    def test_query_variants_split_multiple_question_clauses(self):
+        variants = query_variants(
+            "使用什么代理模型？每个表格集合生成多少个问题？包含哪三种方法？"
+        )
+        self.assertEqual(len(variants), 4)
+        self.assertIn("使用什么代理模型", variants)
+        self.assertIn("每个表格集合生成多少个问题", variants)
+        self.assertIn("包含哪三种方法", variants)
+
     def test_query_decomposition_fuses_variant_rankings_with_fixed_route(self):
         chunks = [
             Chunk("DrugR overview", {"source": "drugr.pdf"}),
@@ -606,6 +615,17 @@ class BenchmarkRetrievalTests(unittest.TestCase):
         self.assertIsNone(router.route("方法的性能是多少？"))
         self.assertIsNone(router.route("DrugR AlphaFold3 的差异是什么？"))
 
+    def test_document_router_recovers_three_letter_uppercase_source_id(self):
+        router = DocumentRouter(
+            ["uda.pdf", "other.pdf"],
+            ["UDA dataset and table retrieval", "other paper results"],
+        )
+
+        route = router.route("UDA 在结论中明确指出哪些限制？")
+        self.assertIsNotNone(route)
+        self.assertEqual(route.document_id, "uda.pdf")
+        self.assertIsNone(router.route("方法的性能是多少？"))
+
     def test_document_router_ignores_unique_generic_terms(self):
         router = DocumentRouter(
             ["paper-a", "paper-b"],
@@ -682,6 +702,37 @@ class BenchmarkRetrievalTests(unittest.TestCase):
         self.assertEqual(report["aggregate"]["1"]["reference_context_recall"], 1.0)
         self.assertEqual(report["aggregate"]["1"]["required_fact_coverage_macro"], 1.0)
         self.assertEqual(report["aggregate"]["1"]["full_fact_coverage_rate"], 1.0)
+
+    def test_fact_coverage_includes_table_caption_metadata(self):
+        chunks = [
+            Chunk(
+                "|Method|Score|\n|---|---|\n|TableRAG|25.5|",
+                {
+                    "page": 14,
+                    "type": "table",
+                    "table_number": 4,
+                    "table_caption": "Table 4: Results measured by exact match.",
+                },
+            )
+        ]
+        report = evaluate_document(
+            "paper",
+            [
+                {
+                    "case_id": "caption-fact",
+                    "question": "Table 4 的结果指标是什么？",
+                    "contexts": ["Table 4: Results measured by exact match."],
+                    "required_facts": ["exact match"],
+                    "source_pages": [14],
+                }
+            ],
+            chunks,
+            [1],
+            structured_table_guard=True,
+        )
+
+        detail = report["cases_detail"][0]
+        self.assertEqual(detail["metrics"]["1"]["fact_coverage_status"], "full")
 
     def test_report_has_case_weighted_overall_aggregate(self):
         chunks = [Chunk("A result 1.", {"page": 1, "type": "text"})]

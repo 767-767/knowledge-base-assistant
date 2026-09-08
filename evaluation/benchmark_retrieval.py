@@ -50,6 +50,7 @@ from sci_rag_core import (  # noqa: E402
     is_table_question,
     normalize_for_match,
     rerank_table_first,
+    table_label_from_metadata,
     table_number_from_question,
 )
 from sci_rag_reranking import CrossEncoderReranker, reranker_document_text  # noqa: E402
@@ -82,6 +83,12 @@ def evidence_tokens(value: Any) -> list[str]:
 
 def searchable_text(chunk: Chunk) -> str:
     return reranker_document_text(chunk.page_content, chunk.metadata)
+
+
+def evidence_text(chunk: Chunk) -> str:
+    """Return the text exposed by the retrieval/evidence path for a chunk."""
+
+    return searchable_text(chunk)
 
 
 class DenseIndex:
@@ -800,7 +807,7 @@ def _case_context_recall(case: dict[str, Any], chunks: list[Chunk], ranked: list
     references = [str(context) for context in case.get("contexts", [])]
     if not references:
         return 0.0
-    retrieved = [chunk.page_content for chunk in _target_ranked_chunks(case, chunks, ranked)]
+    retrieved = [evidence_text(chunk) for chunk in _target_ranked_chunks(case, chunks, ranked)]
     matched = sum(
         any(_reference_context_match(reference, text) for text in retrieved)
         for reference in references
@@ -831,12 +838,12 @@ def _case_document_hit(case: dict[str, Any], chunks: list[Chunk], ranked: list[R
 
 
 def _case_table_hit(case: dict[str, Any], chunks: list[Chunk], ranked: list[RankedItem]) -> bool | None:
-    table_number = table_number_from_question(str(case.get("question", "")))
-    if table_number is None:
+    table_label = table_number_from_question(str(case.get("question", "")))
+    if table_label is None:
         return None
-    target = int(table_number)
     return any(
-        chunk.metadata.get("type") == "table" and chunk.metadata.get("table_number") == target
+        chunk.metadata.get("type") == "table"
+        and table_label_from_metadata(chunk.metadata) == table_label
         for chunk in _target_ranked_chunks(case, chunks, ranked)
     )
 
@@ -844,9 +851,7 @@ def _case_table_hit(case: dict[str, Any], chunks: list[Chunk], ranked: list[Rank
 def _case_required_fact_coverage(
     case: dict[str, Any], chunks: list[Chunk], ranked: list[RankedItem]
 ) -> dict[str, Any]:
-    contexts = [
-        chunk.page_content for chunk in _target_ranked_chunks(case, chunks, ranked)
-    ]
+    contexts = [evidence_text(chunk) for chunk in _target_ranked_chunks(case, chunks, ranked)]
     return case_fact_coverage(case, contexts)
 
 
@@ -954,7 +959,7 @@ def case_provenance(
             if index < 0 or index >= len(chunks):
                 continue
             chunk = chunks[index]
-            if not fact_is_present(fact, [chunk.page_content], aliases):
+            if not fact_is_present(fact, [evidence_text(chunk)], aliases):
                 continue
             location = _provenance_location(case, chunk, rank)
             location["chunk_index"] = index

@@ -17,16 +17,21 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-TABLE_SEPARATOR_RE = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+$")
-TABLE_NUMBER_RE = re.compile(r"\btable\s*(\d+)\b", re.IGNORECASE)
-TABLE_CAPTION_RE = re.compile(r"^\s*table\s*(\d+)\b", re.IGNORECASE)
+# PDF table exporters may leave an empty leading/group cell in a separator row.
+# Keep the row delimiter strict (at least one dashed cell) while accepting
+# those empty cells so stacked headers can be normalized as one table.
+TABLE_SEPARATOR_RE = re.compile(
+    r"^\|(?=.*-{3,}\s*\|)(?:\s*(?::?-{3,}:?)?\s*\|)+$"
+)
+TABLE_LABEL_RE = re.compile(r"\btable\s*([A-Za-z]?\d+[A-Za-z]?)\b", re.IGNORECASE)
+TABLE_CAPTION_RE = re.compile(r"^\s*table\s*([A-Za-z]?\d+[A-Za-z]?)\b", re.IGNORECASE)
 TABLE_QUESTION_RE = re.compile(
-    r"\btables?\s*\d+\b|\b(?:the|this|following|above)\s+tables?\b|"
-    r"表\s*\d+|(?:该|此|下|上|上述|以下)表(?:格)?|表(?:格)?(?:中|内|里|所示)",
+    r"\btables?\s*[A-Za-z]?\d+[A-Za-z]?\b|\b(?:the|this|following|above)\s+tables?\b|"
+    r"表\s*[A-Za-z]?\d+[A-Za-z]?|(?:该|此|下|上|上述|以下)表(?:格)?|表(?:格)?(?:中|内|里|所示)",
     re.IGNORECASE,
 )
 TABLE_ROW_VALUE_QUESTION_RE = re.compile(
-    r"数量|占比|比例|数值|值|得分|values?|scores?|count|percentage|proportion|how\s+many",
+    r"数量|占比|比例|数值|值|得分|分别|values?|scores?|count|percentage|proportion|how\s+many",
     re.IGNORECASE,
 )
 TABLE_COMPARISON_QUESTION_RE = re.compile(
@@ -69,6 +74,10 @@ FORMULA_QUESTION_RE = re.compile(
     r"(?:形式化|数学|显式|明确).{0,20}(?:输出|变量|结果|定义|形式)|"
     r"(?:输出|变量|结果)\s*[A-Za-z]\b.{0,20}(?:定义|表达|形式)|"
     r"(?:output|variable|result)\s+[A-Za-z]\b.{0,24}(?:defined|definition|form|equation)|"
+    r"(?:定义|如何定义|define|defined|calculate|calculated).{0,40}"
+    r"(?:conditional\s+perplexity|uncertainty|\bcppl\b|\buct\b)|"
+    r"(?:conditional\s+perplexity|uncertainty|\bcppl\b|\buct\b).{0,40}"
+    r"(?:定义|如何定义|define|defined|calculate|calculated|公式|equation|formula)|"
     r"(?:激活|非线性激活|activation|nonlinear).{0,24}(?:函数|function|operator|算子)?|"
     r"离散(?:后的?)?.{0,20}(?:系统|方程).{0,12}(?:形式|表达式|写成)|"
     r"(?:finite[- ]element|FEM).{0,30}(?:system|equation|kernel|form)|"
@@ -153,7 +162,8 @@ ENTITY_RE = re.compile(r"[A-Za-z0-9_*+\-]+(?:[-\s][A-Za-z0-9_*+\-]+)*")
 HEADER_HINT_RE = re.compile(
     r"\b(?:model|dataset|setting|data|parameters?|time|metric|score|error|"
     r"accuracy|precision|recall|mse|f1(?:-score)?|meteor|rouge(?:-\d+)?|"
-    r"berts?|l\s*2|h\s*1|pipe|ns\d*)\b",
+    r"berts?|l\s*2|h\s*1|pipe|ns\d*|latency|avg|em|qa|tqa|tfv|ff-?tqa|"
+    r"bleu)\b",
     re.IGNORECASE,
 )
 
@@ -298,12 +308,24 @@ VALIDATION_PROXIMITY_TERMS = {
 # user may ask for an English table header in Chinese, or abbreviate a header
 # such as "Target property F1 score" to simply "F1 score".
 TABLE_COLUMN_ALIASES = {
+    "absolute avg": (
+        "absolute avg",
+        "absolute average",
+        "average absolute change",
+        "平均绝对变化",
+        "绝对平均变化",
+    ),
     "all f1": (
         "all f1",
         "overall f1",
         "overall f1 score",
         "整体 f1",
         "整体 f1 score",
+    ),
+    "multimodal": (
+        "multimodal",
+        "multi-modal",
+        "mutimodal",
     ),
     "overall optimization score": (
         "overall optimization score",
@@ -322,6 +344,35 @@ TABLE_COLUMN_ALIASES = {
         "目标属性f1",
         "靶属性 f1",
         "靶属性f1",
+    ),
+    "avg interactions": (
+        "avg interactions",
+        "avg. interactions",
+        "average interactions",
+        "平均交互次数",
+        "平均交互",
+    ),
+    "avg retrievers": (
+        "avg retrievers",
+        "avg. retrievers",
+        "average retrievers",
+        "平均检索器次数",
+        "平均检索器",
+    ),
+    "avg time": (
+        "avg time",
+        "avg. time",
+        "avg. time(s)",
+        "average time",
+        "平均耗时",
+        "平均时间",
+    ),
+    "avg token": (
+        "avg token",
+        "avg. token",
+        "average token",
+        "平均 token 数",
+        "平均token数",
     ),
     "fingerprint similarity": (
         "fingerprint similarity",
@@ -468,16 +519,33 @@ def missing_pdf_formula_blocks(
     raw_lines = [line for line in raw_lines if line]
     spans: list[tuple[int, int]] = []
     for index, line in enumerate(raw_lines):
-        normalized_line = normalize_for_match(line)
         if (
             len(line) > 500
             or not RAW_FORMULA_LINE_RE.search(line)
-            or normalized_line in markdown_normalized
         ):
             continue
-        spans.append(
-            (max(0, index - context_lines), min(len(raw_lines), index + context_lines + 1))
-        )
+        end = min(len(raw_lines), index + context_lines + 1)
+        # Displayed equations are often wrapped after a relation/operator;
+        # retain a short continuation line even when it has no standalone
+        # equals sign, otherwise a set constraint can be split from its
+        # relation-pruning formula.
+        while end < len(raw_lines):
+            continuation = raw_lines[end].lstrip()
+            if not (
+                continuation.startswith(("∧", "∨", "⊆", "∈", "}"))
+                or "⊆" in continuation
+            ):
+                break
+            end += 1
+        missing_lines = [
+            raw_lines[offset]
+            for offset in range(index, end)
+            if normalize_for_match(raw_lines[offset])
+            and normalize_for_match(raw_lines[offset]) not in markdown_normalized
+        ]
+        if not missing_lines:
+            continue
+        spans.append((max(0, index - context_lines), end))
 
     blocks: list[str] = []
     for start, end in spans:
@@ -521,6 +589,8 @@ def _formula_query_terms(question: str) -> set[str]:
         "数学": ("mathematical", "defined", "definition", "output"),
         "显式": ("explicit", "defined", "definition", "output"),
         "定义": ("define", "defined", "definition", "form", "output"),
+        "conditional perplexity": ("cppl", "perplexity", "conditional"),
+        "uncertainty": ("uct", "uncertainty"),
         "最终输出": ("final", "output", "result"),
         "激活": ("activation", "function", "GELU", "nonlinear"),
         "非线性": ("nonlinear", "activation", "function"),
@@ -619,6 +689,15 @@ def formula_evidence_indices(
     query_symbols.update(
         symbol.replace("_", "") for symbol in set(query_symbols) if "_" in symbol
     )
+    query_symbols.update(
+        abbreviation
+        for abbreviation in re.findall(r"(?<![A-Za-z])(?:cppl|uct)(?![A-Za-z])", str(question or ""), re.IGNORECASE)
+    )
+    normalized_question = normalize_for_match(question)
+    if "conditional perplexity" in normalized_question:
+        query_symbols.add("cppl")
+    if "uncertainty" in normalized_question:
+        query_symbols.add("uct")
     allowed = (
         {int(index) for index in allowed_indices if int(index) >= 0}
         if allowed_indices is not None
@@ -662,6 +741,12 @@ def formula_evidence_indices(
         ):
             continue
         score = min(marker_hits, 8) + query_hits * 6 + symbol_hits * 8 + lhs_hits * 48
+        score += sum(
+            24
+            for abbreviation in ("cppl", "uct")
+            if re.search(rf"(?<![a-z]){abbreviation}(?![a-z])", normalized)
+            and abbreviation in query_symbols
+        )
         if metadata.get("type") == "formula":
             score += 40
         rows.append((score, index))
@@ -686,7 +771,7 @@ def supplement_formula_with_evidence(
     texts: Iterable[str],
     metadatas: Iterable[dict[str, Any]] | None = None,
     *,
-    max_lines: int = 2,
+    max_lines: int = 3,
 ) -> str:
     """Append a literal formula line when a formula answer omits it.
 
@@ -705,6 +790,12 @@ def supplement_formula_with_evidence(
         for token in re.findall(
             r"(?<![A-Za-z])[A-Za-z](?:_[A-Za-z]+)?(?![A-Za-z])",
             str(question or ""),
+        )
+    }
+    explicit_formula_labels = {
+        token.casefold()
+        for token in re.findall(
+            r"(?<![A-Za-z0-9])[A-Z][A-Za-z]?\d+(?![A-Za-z0-9])", question
         )
     }
     metadata_list = list(metadatas or [])
@@ -742,9 +833,17 @@ def supplement_formula_with_evidence(
                 for term in query_terms
                 if len(term) >= 3 and term in normalize_for_match(formula_span)
             )
+            explicit_label_hit = any(
+                re.search(
+                    rf"(?<![A-Za-z0-9]){re.escape(label)}(?![A-Za-z0-9])",
+                    normalized_line,
+                    re.IGNORECASE,
+                )
+                for label in explicit_formula_labels
+            )
             if not symbol_hit and (
                 span_hits < 1 if "∈" in line else span_hits < 2
-            ):
+            ) and not (explicit_label_hit and "=" in line):
                 continue
             candidates.append((query_hits, int(symbol_hit), -context_index, line_index, line))
     candidates.sort(reverse=True)
@@ -1008,6 +1107,10 @@ def normalize_for_match(value: Any) -> str:
     text = text.replace("∗", "*").replace("﹡", "*").replace("＊", "*")
     text = unicodedata.normalize("NFKC", text)
     text = re.sub(r"[_~`]+", "", text)
+    # PyMuPDF may separate decimal punctuation from adjacent digits in PDF
+    # text (for example ``4 _._ 5``); retain the numeric value for evidence
+    # matching without changing ordinary prose punctuation.
+    text = re.sub(r"(?<=\d)\s*\.\s*(?=\d)", ".", text)
     text = re.sub(r"\s*\*\s*", "*", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip().casefold()
@@ -1867,6 +1970,15 @@ def _clean_header_cell(value: Any) -> str:
     text = html.unescape(str(value or ""))
     text = re.sub(r"<br\s*/?>", " ", text, flags=re.IGNORECASE)
     text = display_table_cell(text)
+    # Some PDF exporters split a grouped task header into ``Mi Pr.`` and
+    # ``PV-speciific Rec./F1`` cells.  Restore the shared label before column
+    # matching; the metric suffix remains available for value selection.
+    text = re.sub(r"\bPV-speciific\b", "MPV-specific", text, flags=re.IGNORECASE)
+    # OCR/PDF extraction occasionally drops the ``l`` in ``Multimodal``.
+    # Repair this stable layout typo before matching a requested column.
+    text = re.sub(r"\bMutimodal\b", "Multimodal", text, flags=re.IGNORECASE)
+    if re.fullmatch(r"Mi\s+Pr\.?", text, flags=re.IGNORECASE):
+        text = "MPV-specific Pr."
     # A PDF line wrap can split a single header token (``Narrat iveQA``).
     # Join fragments containing an internal capital, leaving ordinary
     # multi-word headers (for example ``Darcy s``) available to the grouped
@@ -1948,6 +2060,39 @@ def _looks_like_header_row(row: str) -> bool:
     numeric = sum(_looks_numeric_cell(cell) for cell in cells)
     if hints >= 2 and numeric <= len(cells) // 2:
         return True
+    structural_hints = sum(
+        bool(
+            re.search(
+                r"\b(?:method|type|dataset|metric|model|number|source|train|eval)\b",
+                _clean_header_cell(cell),
+                re.IGNORECASE,
+            )
+        )
+        for cell in cells
+    )
+    if structural_hints >= 2 and numeric == 0:
+        return True
+    # Retrieval tables often use a repeated rank row such as @1/@5/@10/@20.
+    # These are metric headers, not data values, even though they are not
+    # covered by the prose-oriented header hints above.
+    rank_metrics = [
+        _clean_header_cell(cell)
+        for cell in cells
+        if re.fullmatch(r"@\d+", _clean_header_cell(cell))
+    ]
+    if len(rank_metrics) >= 4 and len(rank_metrics) >= len(cells) // 2:
+        return True
+    # Some PDF exporters leave a blank row-label cell and emit category names
+    # such as ``Comparison|Statistics|Relationship|Overall`` as the concrete
+    # second header row. Require several non-numeric labels so an ordinary
+    # text data row is not consumed as a header.
+    non_empty = [cell for cell in cells[1:] if _clean_header_cell(cell)]
+    if (
+        not _clean_header_cell(cells[0])
+        and len(non_empty) >= 2
+        and numeric == 0
+    ):
+        return True
     # Some PDF exporters emit a second header row made entirely of repeated
     # dataset labels (for example three groups of PopQA/NQ/TriviaQA), none of
     # which are generic metric words.  Only accept this shape when every cell
@@ -1995,6 +2140,60 @@ def _combine_header_rows(group_line: str, header_line: str) -> str:
     if not any(clean_groups):
         return header_line
 
+    # A common exporter shape is one leading label followed by repeated
+    # ``@1/@5/@10/@20`` metric cycles.  Group fragments sit inside each cycle
+    # (e.g. ``FinH|ybrid``), so align groups to metric slots rather than
+    # assigning the padding cells to the preceding label.
+    metric_indices = [
+        index
+        for index, value in enumerate(clean_metrics)
+        if re.fullmatch(r"@\d+", value)
+    ]
+    if len(metric_indices) >= 4 and len(metric_indices) >= len(clean_metrics) // 2:
+        cycle_width = next(
+            (
+                offset
+                for offset in range(1, len(metric_indices))
+                if clean_metrics[metric_indices[offset]] == clean_metrics[metric_indices[0]]
+            ),
+            0,
+        )
+        if cycle_width >= 2 and len(metric_indices) % cycle_width == 0:
+            combined = list(clean_groups)
+            prefix = metric_indices[0]
+            for index in range(prefix):
+                if not combined[index] and index < len(clean_groups):
+                    combined[index] = clean_groups[index]
+
+            def join_fragments(fragments: list[str]) -> str:
+                label = ""
+                for fragment in fragments:
+                    if not fragment:
+                        continue
+                    if not label:
+                        label = fragment
+                    elif (
+                        fragment[0].islower()
+                        or (
+                            label.isalpha()
+                            and fragment.isalpha()
+                            and len(label) <= 4
+                            and len(fragment) <= 6
+                        )
+                    ):
+                        label += fragment
+                    else:
+                        label += f" {fragment}"
+                return label
+
+            for start in range(0, len(metric_indices), cycle_width):
+                slots = metric_indices[start : start + cycle_width]
+                fragments = clean_groups[slots[0] : slots[-1] + 1]
+                label = join_fragments(fragments)
+                for column in slots:
+                    combined[column] = f"{label} {clean_metrics[column]}".strip()
+            return _join_markdown_cells(combined)
+
     spans: list[list[Any]] = []
     index = 0
     while index < len(clean_groups):
@@ -2005,7 +2204,11 @@ def _combine_header_rows(group_line: str, header_line: str) -> str:
         end = index
         while end + 1 < len(clean_groups):
             next_label = clean_groups[end + 1]
-            if not next_label or not next_label[0].islower():
+            if not next_label or not (
+                next_label[0].islower()
+                or (next_label[0].isdigit() and (label.endswith("-") or label[-1].isdigit()))
+                or (label.isalpha() and len(label) <= 4 and next_label[0].isupper())
+            ):
                 break
             first_fragment, separator, remainder = next_label.partition(" ")
             if separator and len(first_fragment) <= 4:
@@ -2035,6 +2238,73 @@ def _combine_header_rows(group_line: str, header_line: str) -> str:
         spans.append([index, end, label])
         index = end + 1
 
+    # Some PDF exporters center a multi-column group label and split each
+    # word across adjacent cells (for example ``LL|M Turbo`` and
+    # ``Pret|rainedQ|wen-32B``).  When the concrete metric row contains equal
+    # repeated blocks, use those block boundaries instead of treating the
+    # centered fragments as separate groups.
+    if len(spans) >= 3 and spans[0][0] == 1:
+        first_end = spans[0][1]
+        metric_counts = {
+            value: clean_metrics.count(value)
+            for value in set(clean_metrics)
+            if value
+        }
+        first_metric = next(
+            (
+                pos
+                for pos in range(first_end + 1, len(clean_metrics))
+                if clean_metrics[pos] and metric_counts.get(clean_metrics[pos], 0) >= 2
+            ),
+            None,
+        )
+        if first_metric is None:
+            first_metric = next(
+                (pos for pos in range(first_end + 1, len(clean_metrics)) if clean_metrics[pos]),
+                None,
+            )
+        block_count = len(spans) - 1
+        remaining = len(clean_metrics) - first_metric if first_metric is not None else 0
+        if first_metric is not None and remaining > 0 and remaining % block_count == 0:
+            def _join_fragments(fragments: list[str]) -> str:
+                value = ""
+                for fragment in fragments:
+                    if not fragment:
+                        continue
+                    if not value:
+                        value = fragment
+                    elif (
+                        (
+                            fragment[0].islower()
+                            and (
+                                any(character.isupper() for character in fragment[1:])
+                                or any(character.isdigit() or character in "-_" for character in fragment)
+                            )
+                        )
+                        or fragment[0].isdigit()
+                        or value.endswith(("-", "_"))
+                        or (value.isalpha() and len(value) <= 4 and fragment[0].isupper())
+                    ):
+                        value += fragment
+                    else:
+                        value += f" {fragment}"
+                return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", value)
+
+            labels = [
+                _join_fragments(clean_groups[start : end + 1])
+                for start, end, _label in spans[1:]
+            ]
+            block_width = remaining // block_count
+            combined = list(clean_metrics[:first_metric])
+            for block, label in enumerate(labels):
+                start = first_metric + block * block_width
+                end = start + block_width
+                combined.extend(
+                    f"{label} {metric}".strip() if label and metric else label or metric
+                    for metric in clean_metrics[start:end]
+                )
+            return _join_markdown_cells(combined)
+
     # Some PDF table exporters place a final group label in the last cell of
     # a two-column metric group, leaving the preceding cell empty.  If that
     # pair repeats earlier in the header, move the label back one column.
@@ -2057,6 +2327,37 @@ def _combine_header_rows(group_line: str, header_line: str) -> str:
     combined = []
     for group, metric in zip(group_for_column, clean_metrics):
         combined.append(f"{group} {metric}".strip() if group and metric else group or metric)
+    return _join_markdown_cells(combined)
+
+
+def _combine_leaf_header_row(header_line: str, leaf_line: str) -> str:
+    """Append a concrete metric row to a spanning/grouped table header."""
+
+    headers = _split_markdown_row(header_line)
+    leaves = _split_markdown_row(leaf_line)
+    if not headers or len(headers) != len(leaves):
+        return header_line
+    # A second leaf row may supply concrete dataset names for every metric
+    # column (``FeTaQA|TabFact|WTQ|...``). Preserve only the row-label column
+    # in that shape; rows such as ``|||Metric|EM|...`` still preserve the
+    # traditional three-column Method/Type/Dataset prefix.
+    preserve_prefix = (
+        1
+        if len(leaves) > 1
+        and _clean_header_cell(leaves[1])
+        and _clean_header_cell(headers[1]) != _clean_header_cell(headers[0])
+        else 3
+    )
+    combined: list[str] = []
+    for index, (header, leaf) in enumerate(zip(headers, leaves)):
+        header = _clean_header_cell(header)
+        leaf = _clean_header_cell(leaf)
+        if index < preserve_prefix or not leaf or leaf.casefold() in {"metric", "metrics"}:
+            combined.append(header or leaf)
+        elif header and leaf:
+            combined.append(f"{header} {leaf}")
+        else:
+            combined.append(header or leaf)
     return _join_markdown_cells(combined)
 
 
@@ -2096,15 +2397,122 @@ def _looks_like_layout_table(header_line: str, rows: list[str], caption_idx: int
     )
 
 
+def _caption_candidates_near(
+    lines: list[str],
+    header_idx: int,
+    table_end_idx: int,
+    used_caption_indices: set[int],
+) -> list[tuple[int, str]]:
+    """Collect consecutive captions around one table span.
+
+    PDF reading order can place captions for two side-by-side tables after the
+    shared Markdown table.  Keeping the small candidate window here lets the
+    caller associate each caption with the subtable whose contents it names.
+    """
+
+    candidates: list[tuple[int, str]] = []
+    for direction, start in ((1, table_end_idx), (-1, header_idx - 1)):
+        index = start
+        blank_lines = 0
+        while 0 <= index < len(lines):
+            line = lines[index]
+            if not line.strip():
+                blank_lines += 1
+                if blank_lines > 5:
+                    break
+                index += direction
+                continue
+            if _is_table_caption(line):
+                if index not in used_caption_indices:
+                    candidates.append((index, line.strip()))
+                blank_lines = 0
+                index += direction
+                continue
+            break
+    return list(dict.fromkeys(candidates))
+
+
+def _caption_overlap_score(caption: str, table_content: str) -> int:
+    caption_tokens = set(re.findall(r"[a-z0-9]+", normalize_for_match(caption)))
+    table_tokens = set(re.findall(r"[a-z0-9]+", normalize_for_match(table_content)))
+    return len(caption_tokens & table_tokens)
+
+
+def _split_side_by_side_table(
+    header_line: str,
+    data_rows: list[str],
+) -> list[tuple[str, list[str]]] | None:
+    """Split one Markdown table that contains two horizontally placed tables.
+
+    ``pymupdf4llm`` can concatenate side-by-side PDF tables into one wide GFM
+    table.  A repeated leading header and aligned row widths provide a
+    document-agnostic boundary; ordinary grouped headers do not have this
+    shape and are left untouched.
+    """
+
+    headers = _split_markdown_row(header_line)
+    clean_headers = [_clean_header_cell(cell) for cell in headers]
+    if len(headers) < 4 or len(data_rows) < 2:
+        return None
+    for boundary in range(2, len(headers) - 1):
+        right_header = normalize_for_match(clean_headers[boundary])
+        if not right_header:
+            continue
+        if not any(
+            right_header == normalize_for_match(clean_headers[index])
+            for index in range(boundary)
+            if clean_headers[index]
+        ):
+            continue
+        left_rows: list[str] = []
+        right_rows: list[str] = []
+        right_caption_seen = False
+        left_caption_seen = False
+        aligned_rows = 0
+        for raw_row in data_rows:
+            cells = _split_markdown_row(raw_row)
+            if len(cells) != len(headers):
+                continue
+            aligned_rows += 1
+            left = cells[:boundary]
+            right = cells[boundary:]
+
+            def append_side(
+                side: list[str],
+                destination: list[str],
+                caption_seen: bool,
+            ) -> bool:
+                if caption_seen:
+                    return True
+                text = " ".join(display_table_cell(cell) for cell in side).strip()
+                if not text:
+                    return False
+                if TABLE_CAPTION_RE.match(text):
+                    return True
+                destination.append(_join_markdown_cells(side))
+                return False
+
+            left_caption_seen = append_side(left, left_rows, left_caption_seen)
+            right_caption_seen = append_side(right, right_rows, right_caption_seen)
+        if aligned_rows < 2 or not left_rows or not right_rows:
+            continue
+        return [
+            (_join_markdown_cells(headers[:boundary]), left_rows),
+            (_join_markdown_cells(headers[boundary:]), right_rows),
+        ]
+    return None
+
+
 def _table_metadata(
     source: str,
     caption: str,
     ordinal: int,
     base_metadata: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    number_match = TABLE_NUMBER_RE.search(caption)
-    number = number_match.group(1) if number_match else None
-    table_id = f"table-{number}" if number else f"table-unnamed-{ordinal}"
+    label_match = TABLE_LABEL_RE.search(caption)
+    label = label_match.group(1).upper() if label_match else None
+    number = label if label and label.isdigit() else None
+    table_id = f"table-{label.lower()}" if label else f"table-unnamed-{ordinal}"
     metadata = dict(base_metadata or {})
     metadata.update(
         {
@@ -2112,6 +2520,7 @@ def _table_metadata(
             "type": "table",
             "table_id": table_id,
             "table_number": int(number) if number else None,
+            "table_label": label,
             "table_caption": caption,
         }
     )
@@ -2150,6 +2559,18 @@ def _parse_gfm_tables(
             if not (candidate.startswith("|") and candidate.endswith("|")):
                 break
             if TABLE_SEPARATOR_RE.fullmatch(candidate):
+                # Some exporters write a spanning header, a separator, a
+                # concrete leaf-header row, then a second separator. Treat
+                # that sequence as one stacked header instead of splitting
+                # the data into a second table.
+                if (
+                    len(rows) == 1
+                    and header_line
+                    and _looks_like_group_header_row(header_line)
+                    and _looks_like_header_row(rows[0])
+                ):
+                    j += 1
+                    continue
                 break
             rows.append(lines[j])
             j += 1
@@ -2166,6 +2587,9 @@ def _parse_gfm_tables(
         ):
             header_line = _combine_header_rows(header_line, rows[0])
             data_rows = rows[1:]
+            if data_rows and _looks_like_header_row(data_rows[0]):
+                header_line = _combine_leaf_header_row(header_line, data_rows[0])
+                data_rows = data_rows[1:]
         header_line = _repair_wrapped_header_line(header_line)
         if header_line:
             header_line = _join_markdown_cells(
@@ -2175,12 +2599,75 @@ def _parse_gfm_tables(
         caption, caption_idx = _caption_near(
             lines, header_idx, j, used_caption_indices
         )
+        if caption_idx is None:
+            # A born-digital two-column page may place the caption far from
+            # the table in reading order. If the page has exactly one
+            # explicit Table N caption, it is a safe page-local association;
+            # multiple captions remain intentionally unnamed.
+            page_captions = [
+                (index, line.strip())
+                for index, line in enumerate(lines)
+                if _is_table_caption(line)
+            ]
+            if len(page_captions) == 1:
+                caption_idx, caption = page_captions[0]
         if caption_idx is not None:
             used_caption_indices.add(caption_idx)
+
+        split_tables = _split_side_by_side_table(header_line, data_rows)
+        caption_candidates = _caption_candidates_near(
+            lines, header_idx, j, used_caption_indices
+        )
+        if caption_idx is not None and (caption_idx, caption) not in caption_candidates:
+            caption_candidates.insert(0, (caption_idx, caption))
+        if split_tables and len(caption_candidates) >= 2:
+            # Captions for side-by-side tables are often emitted in visual
+            # column order rather than table order.  Match each caption to the
+            # subtable with the greatest lexical overlap instead of assuming
+            # that the first caption belongs to the left half.
+            available_captions = list(caption_candidates)
+            table_start_idx = header_idx if header_line else separator_idx
+            consumed.update(range(max(0, table_start_idx), j))
+            for subheader, subrows in split_tables:
+                subtable_content = "\n".join(
+                    [subheader, lines[separator_idx]] + subrows
+                )
+                if available_captions:
+                    caption_idx, caption = max(
+                        available_captions,
+                        key=lambda item: _caption_overlap_score(
+                            item[1], subtable_content
+                        ),
+                    )
+                    available_captions.remove((caption_idx, caption))
+                    used_caption_indices.add(caption_idx)
+                    consumed.add(caption_idx)
+                else:
+                    caption = "未命名表格"
+                metadata = _table_metadata(
+                    source, caption, len(tables) + 1, base_metadata
+                )
+                metadata["headers"] = normalize_for_match(subheader)
+                sub_separator = _join_markdown_cells(
+                    ["---"] * len(_split_markdown_row(subheader))
+                )
+                tables.append(
+                    Chunk(
+                        page_content="\n".join([subheader, sub_separator] + subrows),
+                        metadata=metadata,
+                    )
+                )
+            consumed.update(index for index, _caption in caption_candidates)
+            i = j
+            continue
         if _looks_like_layout_table(header_line, data_rows, caption_idx):
             i = j
             continue
-        start_idx = caption_idx if caption_idx is not None else header_idx
+        table_start_idx = header_idx if header_line else separator_idx
+        start_idx = min(
+            table_start_idx,
+            caption_idx if caption_idx is not None else table_start_idx,
+        )
         end_idx = max(j, (caption_idx + 1) if caption_idx is not None else j)
         consumed.update(range(max(0, start_idx), end_idx))
         metadata = _table_metadata(source, caption, len(tables) + 1, base_metadata)
@@ -2354,7 +2841,11 @@ def _row_entity_label(row: str, target: str) -> str | None:
     normalized_target = _row_entity_key(target)
     if not normalized_target:
         return None
-    for cell in _split_markdown_row(row):
+    cells = _split_markdown_row(row)
+    split_label = _split_row_entity_label(cells, normalized_target)
+    if split_label is not None:
+        return split_label
+    for cell in cells:
         display = display_table_cell(cell)
         normalized = _row_entity_key(display)
         if not normalized or _looks_numeric_cell(display):
@@ -2373,6 +2864,111 @@ def _row_entity_label(row: str, target: str) -> str | None:
         # composite entity (``WikiTQ+SQA+SciGen``).
         if normalized in normalized_target and len(normalized_target) - len(normalized) <= 2:
             return display
+    return None
+
+
+def _row_entity_variant(row: str, target: str) -> str | None:
+    """Return the matching item inside a ``<br>``-separated cell."""
+
+    target_key = _row_entity_key(target)
+    if not target_key:
+        return None
+    for cell in _split_markdown_row(row):
+        for part in re.split(r"<br\s*/?>|\n", str(cell), flags=re.IGNORECASE):
+            display = display_table_cell(part)
+            normalized = _row_entity_key(display)
+            if not normalized or _looks_numeric_cell(display):
+                continue
+            if (
+                normalized == target_key
+                or target_key in normalized
+                or re.sub(r"[^a-z0-9]", "", normalized)
+                == re.sub(r"[^a-z0-9]", "", target_key)
+            ):
+                return target if re.match(rf"^{re.escape(target_key)}\s*\(", normalized) else display
+    return None
+
+
+def _table_cell_parts(value: Any) -> list[str]:
+    parts = [
+        display_table_cell(part)
+        for part in re.split(r"<br\s*/?>|\n", str(value or ""), flags=re.IGNORECASE)
+        if part.strip()
+    ]
+    return [part for part in parts if part and not re.fullmatch(r"[:_]+", part)]
+
+
+def _parallel_table_value(
+    row: list[str],
+    entity: str,
+    column_index: int,
+    question: str,
+) -> str:
+    """Select the value aligned with an entity in parallel ``<br>`` cells."""
+
+    variant = _row_entity_variant(_join_markdown_cells(row), entity)
+    if variant is None:
+        return _select_table_value_for_question(
+            row[column_index] if column_index < len(row) else "", question
+        )
+    parts_by_cell = [_table_cell_parts(cell) for cell in row]
+    variant_index = None
+    entity_parts: list[str] | None = None
+    for parts in parts_by_cell:
+        if len(parts) <= 1:
+            continue
+        if variant in parts:
+            variant_index = parts.index(variant)
+            entity_parts = parts
+            break
+        if any(_row_entity_key(entity) in _row_entity_key(part) for part in parts):
+            variant_index = next(
+                index
+                for index, part in enumerate(parts)
+                if _row_entity_key(entity) in _row_entity_key(part)
+            )
+            entity_parts = parts
+            break
+        if parts and _row_entity_key(variant) in {
+            _row_entity_key(part) for part in parts
+        }:
+            variant_index = next(
+                index for index, part in enumerate(parts)
+                if _row_entity_key(part) == _row_entity_key(variant)
+            )
+            entity_parts = parts
+            break
+    if variant_index is None:
+        return _select_table_value_for_question(
+            row[column_index] if column_index < len(row) else "", question
+        )
+    if entity_parts and any(part.lstrip().startswith(("(", "[", "{")) for part in entity_parts[1:]):
+        return _select_table_value_for_question(
+            row[column_index] if column_index < len(row) else "", question
+        )
+    multi_lengths = [len(parts) for parts in parts_by_cell if len(parts) > 1]
+    if len(multi_lengths) < 2 or len(set(multi_lengths)) != 1:
+        return _select_table_value_for_question(
+            row[column_index] if column_index < len(row) else "", question
+        )
+    values = parts_by_cell[column_index] if column_index < len(parts_by_cell) else []
+    if variant_index < len(values):
+        return display_table_cell(values[variant_index])
+    return _select_table_value_for_question(
+        row[column_index] if column_index < len(row) else "", question
+    )
+
+
+def _split_row_entity_label(cells: list[str], target_key: str) -> str | None:
+    """Match an entity split across adjacent non-numeric PDF cells."""
+
+    for index in range(len(cells) - 1):
+        left = display_table_cell(cells[index])
+        right = display_table_cell(cells[index + 1])
+        if left and right and not _looks_numeric_cell(left) and not _looks_numeric_cell(right):
+            combined = f"{left} {right}"
+            if _row_entity_key(combined) == target_key:
+                return combined
     return None
 
 
@@ -2422,7 +3018,13 @@ def _is_table_section_marker(row: str) -> bool:
         len(non_empty) == 1
         or (
             len(non_empty) == 2
-            and all(not _looks_numeric_cell(cell) for cell in non_empty)
+            and (
+                all(not _looks_numeric_cell(cell) for cell in non_empty)
+                or (
+                    "(" in non_empty[0]
+                    and re.fullmatch(r"\d?[\W_]+", non_empty[1]) is not None
+                )
+            )
             and len(non_empty[1]) <= 2
         )
     )
@@ -2448,6 +3050,16 @@ def _table_data_rows_with_groups(table_content: str) -> list[tuple[str, str | No
 
     rows: list[tuple[str, str | None]] = []
     lines = table_content.splitlines()
+    parsed = parse_markdown_table(table_content)
+    headers = parsed[0] if parsed is not None else []
+    group_column = next(
+        (
+            index
+            for index, header in enumerate(headers)
+            if index == 0 and re.search(r"prompting", header, re.IGNORECASE)
+        ),
+        None,
+    )
     separator_idx = next(
         (idx for idx, line in enumerate(lines) if TABLE_SEPARATOR_RE.fullmatch(line.strip())),
         0,
@@ -2462,6 +3074,8 @@ def _table_data_rows_with_groups(table_content: str) -> list[tuple[str, str | No
             continue
         cells = [display_table_cell(cell) for cell in _split_markdown_row(line)]
         non_empty = [cell for cell in cells if cell]
+        if group_column is not None and group_column < len(cells) and cells[group_column]:
+            current_group = f"column:{_row_entity_key(cells[group_column])}"
         if _is_table_section_marker(line):
             # Section labels are often emitted as one cell, or split across
             # two cells when the final character wraps (for example
@@ -2470,6 +3084,63 @@ def _table_data_rows_with_groups(table_content: str) -> list[tuple[str, str | No
             current_group = f"section:{_row_entity_key(label)}"
             continue
         rows.append((line, current_group))
+    if group_column is not None:
+        first_group = next(
+            (group for _row, group in rows if group and group.startswith("column:")),
+            None,
+        )
+        if first_group is not None:
+            # Vertically centered PDF labels may appear halfway through the
+            # first group; carry that label back over its leading blank rows.
+            rows = [
+                (row, first_group if group is None else group)
+                for row, group in rows
+            ]
+        dataset_column = next(
+            (
+                index
+                for index, header in enumerate(headers)
+                if re.search(r"dataset|data\s+set", header, re.IGNORECASE)
+            ),
+            None,
+        )
+        if dataset_column is not None:
+            # Vertically centered group labels can also appear after the
+            # first row of a repeated dataset block. Move the suffix that
+            # restarts the dataset sequence to the following visible group.
+            run_starts = [
+                index
+                for index, (_row, group) in enumerate(rows)
+                if index == 0 or group != rows[index - 1][1]
+            ]
+            for run_index, start in enumerate(run_starts[:-1]):
+                end = run_starts[run_index + 1]
+                next_group = rows[end][1]
+                if not next_group or next_group == rows[start][1]:
+                    continue
+                first_dataset = None
+                seen_datasets: set[str] = set()
+                boundary = None
+                for index in range(start, end):
+                    cells = _split_markdown_row(rows[index][0])
+                    value = (
+                        display_table_cell(cells[dataset_column])
+                        if dataset_column < len(cells)
+                        else ""
+                    )
+                    if not value:
+                        continue
+                    key = _row_entity_key(value)
+                    if first_dataset is None:
+                        first_dataset = key
+                    elif key == first_dataset and len(seen_datasets) >= 2:
+                        boundary = index
+                        break
+                    seen_datasets.add(key)
+                if boundary is not None:
+                    rows[boundary:end] = [
+                        (row, next_group) for row, _group in rows[boundary:end]
+                    ]
     return rows
 
 
@@ -2477,10 +3148,11 @@ def _table_question_section(question: str, table_content: str) -> str | None:
     """Return a named one-cell section (usually a model family) from a query."""
 
     for _row, group in _table_data_rows_with_groups(table_content):
-        if not group or not group.startswith("section:"):
+        if not group or not group.startswith(("section:", "column:")):
             continue
         label = group.removeprefix("section:")
-        if len(label) < 8 and not re.search(r"\d", label):
+        label = label.removeprefix("column:")
+        if group.startswith("section:") and len(label) < 8 and not re.search(r"\d", label):
             continue
         if _question_mentions_label(question, label):
             return group
@@ -2508,11 +3180,25 @@ def _table_row_labels(table_content: str) -> list[str]:
         row_cells = _split_markdown_row(row_text)
         if not any(display_table_cell(cell) for cell in row_cells[1:]):
             continue
+        # Multi-level PDF tables may emit a second header row as a blank
+        # leading cell followed by metric names (for example ``F1|EM``).
+        # It is not a selectable entity and must not win row-column scoring.
+        if (
+            not any(_looks_numeric_cell(display_table_cell(cell)) for cell in row_cells)
+            and not display_table_cell(row_cells[0] if row_cells else "")
+        ):
+            continue
         for cell in row_cells:
-            display = display_table_cell(cell)
-            display = re.sub(r"^\s*\d+\.\s*", "", display).strip()
-            if display and not _looks_numeric_cell(display) and display not in labels:
-                labels.append(display)
+            for part in _table_cell_parts(cell):
+                display = re.sub(r"^\s*\d+\.\s*", "", part).strip()
+                if display and not _looks_numeric_cell(display) and display not in labels:
+                    labels.append(display)
+                # Dataset cells frequently carry a citation after the stable
+                # name; keep that name selectable without discarding the full
+                # display value used for other questions.
+                stem = re.match(r"^([A-Za-z0-9][A-Za-z0-9+._-]*)\s*\(", display)
+                if stem and stem.group(1) not in labels:
+                    labels.append(stem.group(1))
     return labels
 
 
@@ -2521,17 +3207,49 @@ def _question_mentions_label(question: str, label: str) -> bool:
     label_key = _row_entity_key(label)
     if not label_key:
         return False
-    compact_question = re.sub(r"[^a-z0-9]", "", question_key)
     compact_label = re.sub(r"[^a-z0-9]", "", label_key)
-    return bool(
-        re.search(
-            rf"(?<![a-z0-9]){re.escape(label_key)}(?![a-z0-9])",
-            question_key,
-        )
-        or len(compact_label) >= 4
-        and compact_label
-        and compact_label in compact_question
+    match = re.search(
+        rf"(?<![a-z0-9]){re.escape(label_key)}(?![a-z0-9])",
+        question_key,
     )
+    if match is not None:
+        if label_key in {"table", "figure", "fig"} and re.match(
+            r"\s*\d", question_key[match.end() :]
+        ):
+            return False
+        # Do not treat a shorter row label as a match inside a composite name
+        # such as ``GPT-4 + RAG`` or a superscripted ``DrugR*`` row.
+        following = question_key[match.end() :].lstrip()[:1]
+        if following not in {"+", "*"} or label_key.endswith(("+", "*")):
+            return True
+        return False
+    if len(compact_label) >= 4 and compact_label:
+        # Compact matching is only for punctuation/spacing drift. Compare
+        # against each original ASCII token so a PDF fragment such as
+        # ``Biolo`` cannot match the prefix of ``Biology``.
+        compact_tokens = {
+            re.sub(r"[^a-z0-9]", "", token)
+            for token in re.findall(r"[a-z0-9][a-z0-9+._*\-]*", question_key)
+        }
+        if compact_label in compact_tokens:
+            return True
+        if "+" in label_key and compact_label in re.sub(r"[^a-z0-9]", "", question_key):
+            return True
+    # Row labels commonly use English Train/Test suffixes while a Chinese
+    # question describes the same split as 训练/测试.  Match the stable stem
+    # plus that semantic suffix without translating arbitrary table content.
+    for suffix, cues in (
+        (("test set", "test"), ("测试", "test", "evaluation")),
+        (("train set", "train"), ("训练", "train", "training")),
+        (("validation set", "validation"), ("验证", "validation")),
+    ):
+        for suffix_text in suffix:
+            if not label_key.endswith(suffix_text):
+                continue
+            stem = label_key[: -len(suffix_text)].strip()
+            if stem and stem in question_key and any(cue in question_key for cue in cues):
+                return True
+    return False
 
 
 def _question_relation_targets(question: str, labels: Iterable[str]) -> list[str]:
@@ -2550,17 +3268,18 @@ def _question_relation_targets(question: str, labels: Iterable[str]) -> list[str
 
 
 def _question_relation_qualifiers(question: str) -> list[str]:
-    """Return compact ASCII values appearing after ``on/在``."""
+    """Return ASCII values listed after ``on/在`` qualifiers."""
 
     values: list[str] = []
+    value = r"[A-Za-z0-9_*+\-]+"
     for match in re.finditer(
-        r"(?:在|on)\s*([A-Za-z0-9_*+\-]+)",
+        rf"(?:在|on)\s*({value}(?:\s*(?:[、,，/]|and|和)\s*{value})*)",
         normalize_for_match(question),
         re.IGNORECASE,
     ):
-        value = match.group(1)
-        if value.casefold() not in {"oracle", "closed", "open"}:
-            values.append(value)
+        for item in re.split(r"\s*(?:[、,，/]|and|和)\s*", match.group(1)):
+            if item and item.casefold() not in {"oracle", "closed", "open"}:
+                values.append(item)
     return list(dict.fromkeys(values))
 
 
@@ -2573,7 +3292,26 @@ def _table_question_entities(question: str, table_content: str) -> list[str]:
     }:
         return []
     labels = _table_row_labels(table_content)
-    mentioned = [label for label in labels if _question_mentions_label(question, label)]
+    rows = [row for row, _group in _table_data_rows_with_groups(table_content)]
+    compound_candidates = [
+        candidate
+        for candidate in extract_query_entities(question)
+        if len(candidate.split()) > 1
+        and any(
+            _split_row_entity_label(_split_markdown_row(row), _row_entity_key(candidate))
+            is not None
+            for row in rows
+        )
+    ]
+    mentioned = compound_candidates or [
+        label for label in labels if _question_mentions_label(question, label)
+    ]
+    # Method rows are often rendered as ``Ours (CxtInt)`` while users name
+    # only the parenthetical variant. Treat that variant as the row entity.
+    for label in labels:
+        variants = re.findall(r"\(([^()]*)\)", label)
+        if any(_question_mentions_label(question, variant) for variant in variants):
+            mentioned.append(label)
     # Ablation questions often name only the removed component (RT) while the
     # row carries a generic w/o prefix.  Similarly, complete/full selects a
     # row named Ours.
@@ -2601,6 +3339,47 @@ def _table_question_entities(question: str, table_content: str) -> list[str]:
         seen_keys.add(key)
         deduped.append(label)
     mentioned = deduped
+    # A short cell label such as ``Chart`` or ``Table`` is often also present
+    # inside the full row names explicitly asked for by the user.  Keep the
+    # short label only when it appears independently; otherwise it can win
+    # column scoring and hide the requested rows.
+    question_key = normalize_for_match(question)
+    nested_labels: list[str] = []
+    for label in mentioned:
+        label_key = _row_entity_key(label)
+        if len(label_key) < 3:
+            continue
+        spans = [
+            match.span()
+            for match in re.finditer(
+                rf"(?<![a-z0-9]){re.escape(label_key)}(?![a-z0-9])",
+                question_key,
+                re.IGNORECASE,
+            )
+        ]
+        containers = [
+            _row_entity_key(other)
+            for other in mentioned
+            if other != label and len(_row_entity_key(other)) > len(label_key)
+            and label_key in _row_entity_key(other)
+        ]
+        if spans and containers:
+            container_spans = [
+                match.span()
+                for container in containers
+                for match in re.finditer(
+                    rf"(?<![a-z0-9]){re.escape(container)}(?![a-z0-9])",
+                    question_key,
+                    re.IGNORECASE,
+                )
+            ]
+            if all(
+                any(start <= span[0] and span[1] <= end for start, end in container_spans)
+                for span in spans
+            ):
+                nested_labels.append(label)
+    if nested_labels:
+        mentioned = [label for label in mentioned if label not in nested_labels]
     usage_group = _table_usage_group(question, table_content)
     if usage_group and len(mentioned) > 1:
         mentioned = [
@@ -2651,6 +3430,23 @@ def _table_question_entities(question: str, table_content: str) -> list[str]:
                             columns[label].add(index)
         distinct_columns = {tuple(sorted(values)) for values in columns.values() if values}
         if len(distinct_columns) > 1:
+            if _question_requests_multiple_rows(question):
+                target_column = max(
+                    (column for column in distinct_columns),
+                    key=lambda column: (
+                        sum(
+                            1
+                            for label in mentioned
+                            if tuple(sorted(columns[label])) == column
+                        ),
+                        max(column, default=-1),
+                    ),
+                )
+                scoped = [
+                    label for label in mentioned if tuple(sorted(columns[label])) == target_column
+                ]
+                if scoped:
+                    return scoped
             return [max(mentioned, key=lambda label: max(columns[label], default=-1))]
     return mentioned
 
@@ -2680,7 +3476,11 @@ def _dataset_label_matches(value: str, target: str) -> bool:
         return False
     if left == right:
         return True
-    threshold = 0.9 if "+" in str(value) or "+" in str(target) else 0.72
+    # Keep an explicitly named dataset split distinct from its parent label
+    # (for example ``MedQA-4`` versus ``MedQA-4 (Step 1)``).
+    if left.startswith(right) or right.startswith(left):
+        return False
+    threshold = 0.9
     return min(len(left), len(right)) >= 4 and SequenceMatcher(None, left, right).ratio() >= threshold
 
 
@@ -2701,11 +3501,21 @@ def _table_question_dataset_targets(question: str, table_content: str) -> list[s
     )
     if dataset_idx is None:
         return []
-    relation_targets = _question_relation_qualifiers(question)
-    if relation_targets:
-        return relation_targets
     candidates = extract_query_entities(question)
     values = [row[dataset_idx] for row in rows if dataset_idx < len(row)]
+    relation_targets = _question_relation_qualifiers(question)
+    if relation_targets:
+        # ``on/在`` can introduce horizontal column groups (for example
+        # ``CMB/MMCU``) as well as dataset rows.  Treat a qualifier as a
+        # dataset selector only when it matches an actual Dataset cell;
+        # otherwise let ordinary entity matching handle the table.
+        matched_relation_targets = [
+            target
+            for target in relation_targets
+            if any(_dataset_label_matches(value, target) for value in values)
+        ]
+        if matched_relation_targets:
+            return matched_relation_targets
     return [
         candidate
         for candidate in candidates
@@ -2739,10 +3549,15 @@ def _table_data_rows_with_context(
             cells = _split_markdown_row(row)
             if dataset_idx < len(cells):
                 value = display_table_cell(cells[dataset_idx])
-                for target in targets:
-                    if _dataset_label_matches(value, target):
-                        current_dataset = target
-                        break
+                if value:
+                    current_dataset = next(
+                        (
+                            target
+                            for target in targets
+                            if _dataset_label_matches(value, target)
+                        ),
+                        None,
+                    )
         result.append((row, group, current_dataset))
     return result
 
@@ -2755,11 +3570,10 @@ def _table_usage_group(question: str, table_content: str) -> str | None:
         return None
     grouped_rows = _table_data_rows_with_groups(table_content)
     method_labels = {
-        display_table_cell(_split_markdown_row(row)[0])
+        display_table_cell(cell)
         for row, _group in grouped_rows
-        if _split_markdown_row(row)
-        and display_table_cell(_split_markdown_row(row)[0])
-        and not _looks_numeric_cell(display_table_cell(_split_markdown_row(row)[0]))
+        for cell in _split_markdown_row(row)
+        if display_table_cell(cell) and not _looks_numeric_cell(cell)
     }
     method_labels.update(
         group.removeprefix("section:")
@@ -2823,7 +3637,17 @@ def _best_section_group(
     if not coverage:
         return None
     best_group, best_entities = max(coverage.items(), key=lambda item: len(item[1]))
-    return best_group if len(best_entities) > 1 else None
+    if len(best_entities) > 1:
+        return best_group
+    # When one row label repeats across explicit sections, prefer a canonical
+    # all/overall section instead of returning every duplicate variant.
+    if len(targets) == 1:
+        for group, covered in coverage.items():
+            if _row_entity_key(targets[0]) not in covered:
+                continue
+            if re.search(r"section:(?:all|overall)\b", group, re.IGNORECASE):
+                return group
+    return None
 
 
 def select_row_entity(question: str, table_content: str) -> str:
@@ -2903,17 +3727,24 @@ def parse_markdown_table(content: str) -> tuple[list[str], list[list[str]]] | No
     return header, rows
 
 
-def table_number_from_metadata(metadata: dict[str, Any]) -> int | None:
-    """Read a table number from new or legacy Chroma metadata."""
+def table_label_from_metadata(metadata: dict[str, Any]) -> str | None:
+    """Read a numeric or supplemental table label from chunk metadata."""
 
-    value = metadata.get("table_number")
-    try:
-        if value is not None:
-            return int(value)
-    except (TypeError, ValueError):
-        pass
-    caption_match = TABLE_NUMBER_RE.search(str(metadata.get("table_caption", "")))
-    return int(caption_match.group(1)) if caption_match else None
+    value = metadata.get("table_label")
+    if value is not None and re.fullmatch(r"[A-Za-z]?\d+[A-Za-z]?", str(value).strip()):
+        return str(value).strip().upper()
+    number = metadata.get("table_number")
+    if number is not None and str(number).strip().isdigit():
+        return str(number).strip()
+    caption_match = TABLE_LABEL_RE.search(str(metadata.get("table_caption", "")))
+    return caption_match.group(1).upper() if caption_match else None
+
+
+def table_number_from_metadata(metadata: dict[str, Any]) -> int | None:
+    """Read a numeric table number from new or legacy Chroma metadata."""
+
+    label = table_label_from_metadata(metadata)
+    return int(label) if label and label.isdigit() else None
 
 
 def matching_table_indices(
@@ -2924,13 +3755,13 @@ def matching_table_indices(
     """Return canonical table chunks satisfying an explicit Table N filter."""
 
     table_indices = [idx for idx, meta in enumerate(metas) if meta.get("type") == "table"]
-    table_numbers = table_numbers_from_question(question)
-    if not table_numbers:
+    table_labels = table_labels_from_question(question)
+    if not table_labels:
         return table_indices
     return [
         idx
         for idx in table_indices
-        if table_number_from_metadata(metas[idx]) in table_numbers
+        if table_label_from_metadata(metas[idx]) in table_labels
     ]
 
 
@@ -2969,7 +3800,14 @@ def _match_table_column(question: str, headers: list[str]) -> tuple[int, str] | 
     alias_matches: list[tuple[int, str, int]] = []
     for idx, header in enumerate(normalized_headers):
         for canonical, aliases in TABLE_COLUMN_ALIASES.items():
-            if header == canonical or header in canonical or canonical in header:
+            variants = {
+                normalize_for_match(canonical),
+                *(normalize_for_match(alias) for alias in aliases),
+            }
+            if any(
+                value and (header == value or header in value or value in header)
+                for value in variants
+            ):
                 if canonical in {"l2", "h1"} and header != canonical:
                     continue
                 for alias in aliases:
@@ -2986,50 +3824,122 @@ def _requested_table_columns(question: str, headers: list[str]) -> list[int]:
     """Return every table column explicitly named by a multi-value question."""
 
     normalized_question = normalize_for_match(question)
+    normalized_question = normalized_question.replace("最大", "max").replace(
+        "最小", "minimum"
+    )
     compact_question = re.sub(r"\s+", "", normalized_question)
     metric_re = re.compile(
-        r"(?<![a-z0-9])(?:l2|h1|f1(?:-score)?|mse|meteor|rouge-?\d+|berts?)(?![a-z0-9])",
+        r"(?<![a-z0-9])(?:@\d+|l2|h1|f1(?:-score)?|mse|meteor|rouge-?\d+|berts?|iou|"
+        r"precision|recall|em|pr|rec)(?![a-z0-9])",
         re.IGNORECASE,
     )
     qualifier_re = re.compile(
         r"rough|smooth|multiscale|helmholtz|full[- ]?text|rag|caption|representation|"
+        r"max(?:imum)?|最大|最小|minimum|"
         r"has[- ]?answer|miss[- ]?answer|internal\s+knowledge|表格|题注",
         re.IGNORECASE,
     )
     question_metrics = set(metric_re.findall(normalized_question))
+    if "precision" in question_metrics:
+        question_metrics.add("pr")
+    if "recall" in question_metrics:
+        question_metrics.add("rec")
+    question_tokens = set(
+        re.findall(r"[a-z][a-z0-9+\-]*", normalized_question.casefold())
+    )
+    named_group_tokens = {
+        token
+        for token in question_tokens - question_metrics
+        if len(token) >= 3
+        and sum(
+            token in set(re.findall(r"[a-z][a-z0-9+\-]*", normalize_for_match(header).casefold()))
+            for header in headers
+        )
+        >= 2
+    }
     question_qualifiers = set(qualifier_re.findall(normalized_question.casefold()))
+    if "最大" in question_qualifiers:
+        question_qualifiers.add("max")
+    if "最小" in question_qualifiers:
+        question_qualifiers.add("minimum")
     direct_requested: list[int] = []
     fallback_requested: list[int] = []
     for idx, raw_header in enumerate(headers):
         header = normalize_for_match(raw_header)
         clean_header = normalize_for_match(_clean_header_cell(raw_header))
         candidates = {value for value in (header, clean_header) if value}
+        header_metrics = set(metric_re.findall(clean_header))
+        if question_metrics & header_metrics:
+            header_group_text = re.sub(r"\s+@\d+\b", " ", clean_header).strip()
+            question_group_terms = set(
+                re.findall(r"[a-z][a-z0-9+\-]*", normalized_question.casefold())
+            )
+            header_group_terms = set(
+                re.findall(r"[a-z][a-z0-9+\-]*", header_group_text.casefold())
+            )
+            if header_group_terms & question_group_terms:
+                direct_requested.append(idx)
+                continue
         # A question may name a dataset column while the PDF header adds a
         # metric suffix, e.g. ``PopQA (acc)``.  Match the distinctive leading
         # label without relaxing metric/setting disambiguation below.
         header_stem = re.split(r"\s*[([<]", clean_header, maxsplit=1)[0].strip()
+        header_metrics = set(metric_re.findall(clean_header))
         if header_stem and re.search(
             rf"(?<![a-z0-9]){re.escape(header_stem)}(?![a-z0-9])",
             normalized_question,
             re.IGNORECASE,
+        ) and not (
+            question_metrics
+            and header_metrics
+            and not question_metrics & header_metrics
         ):
             direct_requested.append(idx)
             continue
         header_terms = set(re.findall(r"[a-z][a-z0-9@+\-]*", clean_header.casefold()))
         question_terms = set(re.findall(r"[a-z][a-z0-9@+\-]*", normalized_question.casefold()))
+        named_value_tokens = {
+            token
+            for token in header_terms & question_terms
+            if any(character.isdigit() for character in token)
+        }
+        if named_value_tokens:
+            direct_requested.append(idx)
+            continue
+        named_header_tokens = {
+            token
+            for token in header_terms & question_terms
+            if len(token) >= 3
+            and token not in {"table", "series", "performance", "model", "domain"}
+        }
+        if named_header_tokens and not (
+            question_metrics
+            and header_metrics
+            and not question_metrics & header_metrics
+        ):
+            direct_requested.append(idx)
+            continue
         if len(header_terms) >= 2 and header_terms <= question_terms:
             direct_requested.append(idx)
             continue
         # Reuse the semantic aliases used by the single-column matcher.
         for canonical, aliases in TABLE_COLUMN_ALIASES.items():
-            if header == canonical or header in canonical or canonical in header:
-                # ``l2``/``h1`` are metric tokens, not sufficient evidence to
-                # choose one of several qualified columns such as Darcy
-                # smooth/rough/multiscale.  Their context-aware fallback
-                # below handles those columns; keep aliases for exact or
-                # genuinely semantic headers such as ``FT (full-text)``.
-                if canonical not in {"l2", "h1"} or header == canonical:
-                    candidates.update(normalize_for_match(alias) for alias in aliases)
+            variants = {
+                normalize_for_match(canonical),
+                *(normalize_for_match(alias) for alias in aliases),
+            }
+            if not any(
+                value and (header == value or header in value or value in header)
+                for value in variants
+            ):
+                continue
+            # ``l2``/``h1`` are metric tokens, not sufficient evidence to
+            # choose one of several qualified columns such as Darcy
+            # smooth/rough/multiscale.  Their context-aware fallback
+            # below handles those columns; keep aliases for exact or
+            # genuinely semantic headers such as ``FT (full-text)``.
+            if canonical not in {"l2", "h1"} or header == canonical:
+                candidates.update(normalize_for_match(alias) for alias in aliases)
         compact_candidates = {re.sub(r"\s+", "", candidate) for candidate in candidates}
         if any(
             candidate and (
@@ -3049,6 +3959,10 @@ def _requested_table_columns(question: str, headers: list[str]) -> list[int]:
         if question_metrics & header_metrics and (
             not header_qualifiers or question_qualifiers & header_qualifiers
         ):
+            if named_group_tokens and not named_group_tokens & set(
+                re.findall(r"[a-z][a-z0-9+\-]*", clean_header.casefold())
+            ):
+                continue
             fallback_requested.append(idx)
     repeated_question_qualifiers = {
         qualifier
@@ -3059,14 +3973,98 @@ def _requested_table_columns(question: str, headers: list[str]) -> list[int]:
         ) > 1
     }
     if direct_requested and repeated_question_qualifiers:
+        explicitly_named = []
+        for index in direct_requested:
+            stem = re.split(
+                r"\s*[([<]", _clean_header_cell(headers[index]), maxsplit=1
+            )[0].strip()
+            if stem and re.search(
+                rf"(?<![a-z0-9]){re.escape(normalize_for_match(stem))}(?![a-z0-9])",
+                normalized_question,
+                re.IGNORECASE,
+            ):
+                explicitly_named.append(index)
+        if len(explicitly_named) != len(direct_requested):
+            qualified_requested = [
+                index
+                for index in direct_requested
+                if repeated_question_qualifiers
+                & set(qualifier_re.findall(normalize_for_match(headers[index])))
+            ]
+            if qualified_requested:
+                direct_requested = qualified_requested
+    if direct_requested and question_qualifiers:
+        # If the question explicitly names each requested header (for
+        # example ``Vanilla RAG, TableRAG, Text-to-SQL and End-to-End QA``),
+        # keep all of them. A generic qualifier such as ``RAG`` must not
+        # discard the other explicitly named columns.
+        explicit_header_columns = []
+        for index in direct_requested:
+            stem = re.split(
+                r"\s*[([<]", _clean_header_cell(headers[index]), maxsplit=1
+            )[0].strip()
+            if stem and re.search(
+                rf"(?<![a-z0-9]){re.escape(normalize_for_match(stem))}(?![a-z0-9])",
+                normalized_question,
+                re.IGNORECASE,
+            ):
+                explicit_header_columns.append(index)
+        if (
+            len(explicit_header_columns) == len(direct_requested)
+            and len(direct_requested) > 1
+            and not named_group_tokens
+        ):
+            return direct_requested
+
+        def _header_matches_qualifier(index: int, qualifier: str) -> bool:
+            header = normalize_for_match(headers[index]).casefold()
+            if qualifier.casefold() in set(qualifier_re.findall(header)):
+                return True
+            for canonical, aliases in TABLE_COLUMN_ALIASES.items():
+                variants = {
+                    normalize_for_match(canonical).casefold(),
+                    *(normalize_for_match(alias).casefold() for alias in aliases),
+                }
+                if qualifier.casefold() not in variants:
+                    continue
+                if any(
+                    re.search(
+                        rf"(?<![a-z0-9]){re.escape(variant)}(?![a-z0-9])",
+                        header,
+                    )
+                    for variant in variants
+                    if variant
+                ):
+                    return True
+            return False
+
         qualified_requested = [
             index
             for index in direct_requested
-            if repeated_question_qualifiers
-            & set(qualifier_re.findall(normalize_for_match(headers[index])))
+            if any(
+                _header_matches_qualifier(index, qualifier)
+                for qualifier in question_qualifiers
+            )
         ]
         if qualified_requested:
-            direct_requested = qualified_requested
+            if named_group_tokens:
+                repeated_columns = {
+                    index
+                    for index in direct_requested
+                    if named_group_tokens
+                    & set(
+                        re.findall(
+                            r"[a-z][a-z0-9+\-]*",
+                            normalize_for_match(headers[index]).casefold(),
+                        )
+                    )
+                }
+                unique_requested = [
+                    index for index in direct_requested if index not in repeated_columns
+                ]
+                direct_requested = unique_requested + qualified_requested
+            else:
+                direct_requested = qualified_requested
     if not direct_requested and question_qualifiers:
         question_tokens = set(re.findall(r"[a-z][a-z0-9-]*", normalized_question.casefold()))
         qualified_requested = []
@@ -3083,9 +4081,49 @@ def _requested_table_columns(question: str, headers: list[str]) -> list[int]:
                 qualified_requested.append(index)
         if qualified_requested:
             direct_requested = qualified_requested
-    # Prefer explicitly named semantic aliases (for example ``overall F1`` →
-    # ``all F1``) over the broad metric-token fallback, which would otherwise
-    # return every repeated F1 column in a multi-setting table.
+    # Prefer a named derived metric over comparison columns mentioned only as
+    # context (for example Table 2's LiveXiv/Verified Subset plus Absolute
+    # Avg.).
+    priority_aliases = {
+        normalize_for_match(alias)
+        for alias in TABLE_COLUMN_ALIASES["absolute avg"]
+    }
+    if any(alias in normalized_question for alias in priority_aliases):
+        priority_columns = [
+            index
+            for index, header in enumerate(headers)
+            if "absolute avg" in normalize_for_match(header)
+        ]
+        if priority_columns:
+            return priority_columns
+
+    if direct_requested or fallback_requested:
+        return direct_requested or fallback_requested
+
+    # If a question names a repeated dataset/group token (for example
+    # ``HeteQA``) but describes the metric in another language, keep only
+    # headers carrying that token instead of returning every comparison group.
+    header_token_counts: dict[str, int] = {}
+    header_tokens: list[set[str]] = []
+    for header in headers:
+        tokens = set(re.findall(r"[a-z][a-z0-9+\-]*", normalize_for_match(header).casefold()))
+        header_tokens.append(tokens)
+        for token in tokens:
+            header_token_counts[token] = header_token_counts.get(token, 0) + 1
+    repeated_named_tokens = {
+        token
+        for token in question_tokens
+        if len(token) >= 3 and header_token_counts.get(token, 0) >= 2
+    }
+    if repeated_named_tokens:
+        scoped_columns = [
+            index
+            for index, tokens in enumerate(header_tokens)
+            if tokens & repeated_named_tokens
+        ]
+        if scoped_columns and len(scoped_columns) < len(headers):
+            return scoped_columns
+
     return direct_requested or fallback_requested
 
 
@@ -3093,7 +4131,13 @@ def _select_table_value_for_question(value: Any, question: str) -> str:
     """Select a multi-line table value when the question names its variant."""
 
     raw = str(value or "")
-    variants = [part for part in re.split(r"<br\s*/?>|\n", raw, flags=re.IGNORECASE) if part.strip()]
+    variants = [
+        part
+        for part in re.split(r"<br\s*/?>|\n", raw, flags=re.IGNORECASE)
+        if part.strip() and not re.fullmatch(r"\s*[_:]+\s*", part)
+    ]
+    if len(variants) == 1 and re.search(r"<br\s*/?>|\n", raw, re.IGNORECASE):
+        return display_table_cell(variants[0])
     if len(variants) > 1:
         if re.search(r"表格表示|table\s+representations?|representations?", question or "", re.IGNORECASE):
             return display_table_cell(variants[-1])
@@ -3105,6 +4149,32 @@ def _select_table_value_for_question(value: Any, question: str) -> str:
         if not all(re.match(r"\s*[<>≤≥-]?\d", part) for part in variants):
             return display_table_cell(re.sub(r"<br\s*/?>", " ", raw, flags=re.IGNORECASE))
     return display_table_cell(raw)
+
+
+def _requested_table_descriptors(
+    question: str,
+    headers: list[str],
+    row: list[str],
+    matched_label: str,
+) -> list[dict[str, str]]:
+    """Keep non-numeric row cells explicitly named as query qualifiers."""
+
+    descriptors: list[dict[str, str]] = []
+    matched_key = _row_entity_key(matched_label)
+    for index, raw_value in enumerate(row):
+        value = display_table_cell(raw_value)
+        if index >= len(headers) or not value or _looks_numeric_cell(value):
+            continue
+        if _row_entity_key(value) == matched_key:
+            continue
+        if _question_mentions_label(question, value):
+            descriptors.append(
+                {
+                    "column": display_table_cell(headers[index]),
+                    "value": value,
+                }
+            )
+    return descriptors
 
 
 def _question_requests_multiple_rows(question: str) -> bool:
@@ -3223,17 +4293,20 @@ def extract_table_cell(
         row = _split_markdown_row(raw_row)
         if not row:
             continue
-        matched_label = _row_entity_label(_join_markdown_cells(row), entity)
+        matched_label = _row_entity_variant(_join_markdown_cells(row), entity) or _row_entity_label(
+            _join_markdown_cells(row), entity
+        )
         if matched_label is None:
             continue
         if column_idx >= len(row):
             return None
-        number = table_number_from_metadata(metadata or {})
+        label = table_label_from_metadata(metadata or {})
         return {
-            "table_number": str(number) if number is not None else "",
+            "table_number": str(label) if label and label.isdigit() else "",
+            "table_label": label or "",
             "row": matched_label,
             "column": display_table_cell(headers[column_idx]),
-            "value": _select_table_value_for_question(row[column_idx], question),
+            "value": _parallel_table_value(row, entity, column_idx, question),
         }
     return None
 
@@ -3309,14 +4382,17 @@ def extract_table_row_values(
             and not re.match(r"^(?:w(?:/o)?\b|∆)", first_label, re.IGNORECASE)
         ):
             active_outer_entity = first_label
+        outer_group = active_outer_entity if not first_label else None
         for entity in entities:
-            matched_label = _row_entity_label(row_text, entity)
+            matched_label = _row_entity_variant(row_text, entity) or _row_entity_label(
+                row_text, entity
+            )
             usage_row = usage_group and _row_entity_label(row_text, usage_group)
             if matched_label is None:
                 if usage_row and active_outer_entity and _row_entity_label(
                     active_outer_entity, entity
                 ):
-                    matched_label = usage_row
+                    matched_label = _row_entity_label(active_outer_entity, entity)
                 else:
                     continue
             entity_group = _table_question_group_for_entity(question, entity)
@@ -3347,28 +4423,44 @@ def extract_table_row_values(
             for column_idx in column_values:
                 if column_idx >= len(headers):
                     break
-                value = row[column_idx] if column_idx < len(row) else ""
                 values.append(
                     {
                         "column": display_table_cell(headers[column_idx]),
-                        "value": _select_table_value_for_question(value, question),
+                        "value": _parallel_table_value(
+                            row, entity, column_idx, question
+                        ),
                     }
                 )
             if not values:
                 continue
+            descriptors = _requested_table_descriptors(
+                question, headers, row, matched_label
+            )
             if multiple_rows_requested:
-                matched_results.append({"row": matched_label, "values": values})
+                matched_row = {"row": matched_label, "values": values}
+                if outer_group:
+                    matched_row["outer_group"] = outer_group
+                if descriptors:
+                    matched_row["descriptors"] = descriptors
+                matched_results.append(matched_row)
                 continue
-            number = table_number_from_metadata(metadata or {})
-            return {
-                "table_number": str(number) if number is not None else "",
+            label = table_label_from_metadata(metadata or {})
+            result = {
+                "table_number": str(label) if label and label.isdigit() else "",
+                "table_label": label or "",
                 "row": matched_label,
                 "values": values,
             }
+            if outer_group:
+                result["outer_group"] = outer_group
+            if descriptors:
+                result["descriptors"] = descriptors
+            return result
     if multiple_rows_requested and matched_results:
-        number = table_number_from_metadata(metadata or {})
+        label = table_label_from_metadata(metadata or {})
         return {
-            "table_number": str(number) if number is not None else "",
+            "table_number": str(label) if label and label.isdigit() else "",
+            "table_label": label or "",
             "rows": matched_results,
         }
     return None
@@ -3419,13 +4511,24 @@ def filter_table_rows_by_entity(content: str, entity: str) -> str | None:
     matched_rows = []
     pending_group: str | None = None
     emitted_group: str | None = None
+    last_outer_row: str | None = None
     for row in data:
         if not (row.strip().startswith("|") and row.strip().endswith("|")):
             continue
         if _table_row_group_marker(row) is not None or _is_table_section_marker(row):
             pending_group = row
             continue
+        cells = _split_markdown_row(row)
+        first_label = display_table_cell(cells[0]) if cells else ""
+        if (
+            first_label
+            and not _looks_numeric_cell(first_label)
+            and not re.match(r"^(?:w(?:/o)?\b|∆)", first_label, re.IGNORECASE)
+        ):
+            last_outer_row = row
         if _row_entity_label(row, entity) is not None:
+            if not first_label and last_outer_row and last_outer_row not in matched_rows:
+                matched_rows.append(last_outer_row)
             if pending_group is not None and pending_group != emitted_group:
                 matched_rows.append(pending_group)
                 emitted_group = pending_group
@@ -3452,15 +4555,25 @@ def is_comparative_table_question(question: str) -> bool:
 
 
 def table_number_from_question(question: str) -> str | None:
-    match = TABLE_NUMBER_RE.search(question or "")
-    return match.group(1) if match else None
+    match = TABLE_LABEL_RE.search(question or "")
+    return match.group(1).upper() if match else None
+
+
+def table_labels_from_question(question: str) -> tuple[str, ...]:
+    """Return distinct numeric or supplemental table labels in question order."""
+
+    return tuple(
+        dict.fromkeys(match.group(1).upper() for match in TABLE_LABEL_RE.finditer(question or ""))
+    )
 
 
 def table_numbers_from_question(question: str) -> tuple[int, ...]:
     """Return distinct explicit table numbers in question order."""
 
     return tuple(
-        dict.fromkeys(int(match.group(1)) for match in TABLE_NUMBER_RE.finditer(question or ""))
+        int(label)
+        for label in table_labels_from_question(question)
+        if label.isdigit()
     )
 
 

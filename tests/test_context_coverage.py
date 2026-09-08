@@ -22,6 +22,8 @@ class ContextCoverageTests(unittest.TestCase):
 
     def test_punctuation_and_explicit_aliases_are_auditable(self):
         self.assertTrue(fact_is_present("(0, 1)", ["x is sampled from (0,1)."]))
+        self.assertTrue(fact_is_present("entropy ≥4.5", ["entropy (≥ 4.5) is used."]))
+        self.assertTrue(fact_is_present("independent facts", ["independent - facts from multiple citations"]))
         case = {
             "required_facts": ["蛋白质", "核酸"],
             "required_fact_aliases": {
@@ -32,6 +34,46 @@ class ContextCoverageTests(unittest.TestCase):
         result = case_fact_coverage(case, ["The model handles proteins and nucleic acids."])
         self.assertEqual(result["fact_coverage_status"], "full")
         self.assertEqual(result["required_fact_coverage"], 1.0)
+
+    def test_structured_and_markdown_table_rows_match_without_cross_row_merge(self):
+        structured = (
+            "Table 2 结构化行：行=TC–RAG；Avg. Interactions=4.78；"
+            "Avg. Retrievers=3.37；Avg. Time (s)=50.91；Avg. Token=458.82"
+        )
+        self.assertTrue(fact_is_present("Avg. Interactions 4.78", [structured]))
+        self.assertTrue(fact_is_present("Avg. Time 50.91 s", [structured]))
+
+        markdown = """| Dataset | Split | Types | Samples |
+|---|---|---:|---:|
+| ChartX | Eval | 18 | 6k |
+| Plot2Code | Eval | 6 | 132 |"""
+        self.assertTrue(fact_is_present("ChartX Eval 18 6k", [markdown]))
+        self.assertTrue(fact_is_present("Plot2Code Eval 6 132", [markdown]))
+        self.assertFalse(fact_is_present("ChartX Eval 6 132", [markdown]))
+
+    def test_structured_row_label_and_value_match_in_order(self):
+        context = "WTQ：Dataset=WTQ；Samples=13,706\nHiTab：Dataset=HiTab；Samples=6,793"
+        self.assertTrue(fact_is_present("WTQ 13,706", [context]))
+        self.assertTrue(fact_is_present("HiTab 6,793", [context]))
+        self.assertFalse(fact_is_present("WTQ 6,793", [context]))
+
+    def test_markdown_table_facts_match_row_label_and_column_value(self):
+        context = """|Statistics|Table|Text|TaT|Total|
+|---|---|---|---|---|
+|Short-form answers|234|13|93|340|
+|Free-form answers|308|67|238|613|
+|Total|542|80|331|953|"""
+        self.assertTrue(fact_is_present("340 short-form answers", [context]))
+        self.assertTrue(fact_is_present("Table 542", [context]))
+        self.assertFalse(fact_is_present("340 free-form answers", [context]))
+
+    def test_markdown_table_facts_match_supplemental_statistics_headers(self):
+        context = """|Benchmark|Benchmark # Pages|Queries # Queries|
+|---|---|---|
+|FinReport|2687|853|
+|FinSlides|2280|1052|"""
+        self.assertTrue(fact_is_present("FinReport 2,687 pages", [context]))
+        self.assertTrue(fact_is_present("FinReport 853 queries", [context]))
 
     def test_case_statuses_distinguish_full_partial_zero_and_not_scored(self):
         case = {"required_facts": ["alpha", "beta"]}

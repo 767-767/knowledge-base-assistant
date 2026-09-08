@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-phaseH6-confirmation-v1",
+  "description": "Development regression set from two new 2025 ACL-family open-access papers. The set was frozen before retrieval, then used to diagnose a source-local quality-control retrieval gap.",
+  "status": "development-regression",
+  "freeze_date": "2026-09-06",
+  "reclassification_date": "2026-09-06",
+  "reclassification_reason": "The H6 retrieval gate exposed a generic quality-control alias gap in the MiMoTable question; the set is retained for regression and a fresh H7 set is required for unseen confirmation.",
+  "freeze_policy": "Do not tune retrieval or answer formatting against this set. If a failure is found, reclassify this set as development-regression and create a fresh unseen set for confirmation.",
+  "minimum_documents": 2,
+  "cases_path": "cases_phaseH6_confirmation.jsonl",
+  "documents": [
+    {
+      "document_id": "caqa-acl-2025",
+      "filename": "2025.acl-long.837.pdf",
+      "sha256": "0e7ec39f1afc80b90692b66b32ddd16fe394902affd163ed61351366eb42ea25",
+      "title": "Can LLMs Evaluate Complex Attribution in QA? Automatic Benchmarking using Knowledge Graphs",
+      "venue": "Proceedings of ACL 2025 (Long Papers)",
+      "year": 2025,
+      "pages": 23,
+      "domain": "attributed question answering and knowledge graphs",
+      "layout_tags": ["two-column", "tables", "figures", "appendix", "knowledge-graph", "attribution"],
+      "source_url": "https://aclanthology.org/2025.acl-long.837/",
+      "pdf_url": "https://aclanthology.org/2025.acl-long.837.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "development-regression"
+    },
+    {
+      "document_id": "mimotable-coling-2025",
+      "filename": "2025.coling-main.173.pdf",
+      "sha256": "c3b61245bcea99174ad81ef1113a6e157b68b6b3cec75e8a59d7331a075e798a",
+      "title": "MiMoTable: A Multi-scale Spreadsheet Benchmark with Meta Operations for Table Reasoning",
+      "venue": "Proceedings of the 31st International Conference on Computational Linguistics",
+      "year": 2025,
+      "pages": 13,
+      "domain": "spreadsheet and table reasoning",
+      "layout_tags": ["two-column", "tables", "figures", "appendix", "spreadsheet", "multilingual"],
+      "source_url": "https://aclanthology.org/2025.coling-main.173/",
+      "pdf_url": "https://aclanthology.org/2025.coling-main.173.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "development-regression"
+    }
+  ]
+}

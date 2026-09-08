@@ -19,7 +19,7 @@ from sci_rag_core import normalize_for_match
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9*._+\-]*|[\u4e00-\u9fff]")
 CJK_TOKEN_RE = re.compile(r"[\u4e00-\u9fff]")
-_CLAUSE_SEPARATOR_RE = re.compile(r"[，；;]+|(?<!\d),(?!\d)")
+_CLAUSE_SEPARATOR_RE = re.compile(r"[，；;。！？?!]+|(?<!\d),(?!\d)")
 _CONJUNCTION_RE = re.compile(r"\s*(与|以及|和)\s*")
 _QUESTION_CUE_RE = re.compile(r"什么|哪些|多少|如何|是否|分别|配置|指标|问题|条件|下")
 
@@ -236,6 +236,7 @@ class DocumentRouter:
     """
 
     _DISTINCTIVE_TOKEN_RE = re.compile(r"^[a-z0-9][a-z0-9*._+\-]{3,}$")
+    _SHORT_ACRONYM_RE = re.compile(r"^[a-z][a-z0-9]{2}$")
     # A token that happens to occur in only one paper is not necessarily a
     # document identifier.  These words are common in scientific prose and
     # must not route a query merely because of corpus imbalance.
@@ -290,10 +291,21 @@ class DocumentRouter:
         self._token_documents = token_documents
 
     def route(self, question: str) -> DocumentRoute | None:
+        # ``tokenize`` case-folds input, so recover only three-character
+        # uppercase acronyms from the original question.  This admits source
+        # identifiers such as UDA without routing on ordinary short words.
+        short_acronyms = {
+            match.casefold()
+            for match in re.findall(r"(?<![A-Za-z0-9])[A-Z][A-Z0-9]{2}(?![A-Za-z0-9])", str(question or ""))
+        }
         query_tokens = {
             token
             for token in tokenize(question)
-            if self._DISTINCTIVE_TOKEN_RE.fullmatch(token)
+            if (
+                self._DISTINCTIVE_TOKEN_RE.fullmatch(token)
+                or self._SHORT_ACRONYM_RE.fullmatch(token)
+                and token in short_acronyms
+            )
             and token not in self._GENERIC_TOKENS
         }
         document_tokens: dict[int, list[str]] = {}

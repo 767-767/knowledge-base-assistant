@@ -33,6 +33,7 @@ from sci_rag_core import (
     missing_pdf_formula_blocks,
     matching_figure_indices,
     matching_table_indices,
+    normalize_for_match,
     rerank_table_first,
     split_to_chunks,
     supplement_answer_with_evidence,
@@ -636,12 +637,37 @@ def _table_caption_unit_note(metadata: dict[str, Any]) -> str:
     if not plain or not _TABLE_UNIT_HINT_RE.search(plain):
         return ""
     body = re.sub(
-        r"^(?:extended\s+data\s+)?table\s*\d+\s*[:.]?\s*",
+        r"^(?:extended\s+data\s+)?table\s*[A-Za-z]?\d+[A-Za-z]?\s*[:.]?\s*",
         "",
         plain,
         flags=re.IGNORECASE,
     ).strip()
     return f"（表注：{body or plain}）"
+
+
+def _table_caption_metric_note(metadata: dict[str, Any], question: str) -> str:
+    """Preserve a caption-declared metric when the question names it."""
+
+    caption = str(metadata.get("table_caption", "") or "")
+    plain = html.unescape(re.sub(r"<[^>]*>", " ", caption))
+    match = re.search(
+        r"(?:measured|evaluated|based)\s+(?:by|using|on)\s+([^.;]+)",
+        plain,
+        re.IGNORECASE,
+    )
+    metric = re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
+    if not metric or normalize_for_match(metric) not in normalize_for_match(question):
+        return ""
+    return f"（表格指标：{metric}）"
+
+
+def _attach_table_caption(text: str, metadata: dict[str, Any]) -> str:
+    """Keep a table's caption beside its body in the generation context."""
+
+    caption = str(metadata.get("table_caption", "") or "").strip()
+    if metadata.get("type") != "table" or not caption or caption in text:
+        return text
+    return f"{caption}\n\n{text}"
 
 
 def _fuse_dense_results(
@@ -910,8 +936,11 @@ _SPATIAL_COORDINATE_RE = re.compile(
 _SECTION_QUERY_ALIASES = {
     "数据集": ("dataset", "data"),
     "规模": ("dataset", "size", "entries", "samples", "statistics"),
+    "分布": ("distribution", "benchmark", "questions", "text", "table", "image", "video"),
     "条目": ("entries", "dataset", "size"),
     "平均": ("average", "mean", "statistics", "analysis"),
+    "变化": ("change", "difference", "delta"),
+    "绝对": ("absolute", "difference"),
     "答案表": ("rows", "columns", "statistics"),
     "行": ("rows", "row"),
     "列": ("columns", "column"),
@@ -919,6 +948,38 @@ _SECTION_QUERY_ALIASES = {
     "重叠": ("overlap", "unigram"),
     "一致率": ("agreement", "agreement rate"),
     "人工标注": ("annotation", "annotators", "reviewed", "instances", "agreement"),
+    "标注": ("annotation", "annotator", "label"),
+    "问题标注": ("question annotation", "annotation", "annotator"),
+    "代理模型": ("agent annotator", "agent model", "model"),
+    "表格集合": ("table set", "multi-table set", "tables"),
+    "构造": ("construction", "collection", "construct"),
+    "实体筛选": ("entity", "BM25", "alpha", "top"),
+    "相似句": ("similar", "sentence", "top", "m"),
+    "结构邻接": ("structural", "adjacency", "three", "sentences"),
+    "设置": ("implementation", "details", "setting", "alpha", "top"),
+    "构成": ("construction", "composition", "collection", "dataset"),
+    "来源": ("source", "dataset"),
+    "线索": ("cue", "cues", "metadata", "titles", "headers"),
+    "人类引导": ("human-guided", "human-in-the-loop", "demonstration"),
+    "关键方法": ("methods", "method", "approach"),
+    "数量": ("number", "count", "statistics", "distribution", "instances"),
+    "占比": ("percentage", "proportion", "distribution", "statistics"),
+    "分类": ("category", "categories", "types", "distribution"),
+    "论文": ("paper", "papers", "relevant papers", "abstracts"),
+    "摘要": ("abstract", "abstracts", "PubMed"),
+    "领域": ("domain", "domains", "field", "fields", "discipline", "disciplines"),
+    "上限": ("up to", "capped", "maximum", "max"),
+    "评分尺度": ("rating scale", "Likert", "score"),
+    "输出格式": ("response format", "format", "JSON", "structured", "rationale"),
+    "质检": ("quality", "quality control", "experts", "annotators", "annotation", "agreement", "kappa", "inferences", "code interpreter"),
+    "质量控制": ("quality", "quality control", "experts", "annotators", "annotation", "agreement", "kappa"),
+    "多少": ("number", "count", "statistics"),
+    "修订": ("revised", "refined", "edit"),
+    "问答对": ("question-answer pairs", "pairs"),
+    "数据子集": ("data subsets", "subsets"),
+    "下游任务": ("downstream tasks", "QA", "T2T"),
+    "实例": ("instances",),
+    "生成": ("generate", "generation"),
     "候选实例": ("candidate", "instances"),
     "显式推理": ("explicit-reasoning", "reasoning"),
     "推理": ("reasoning",),
@@ -930,6 +991,8 @@ _SECTION_QUERY_ALIASES = {
     "问题生成": ("question", "generation", "generate"),
     "切分": ("split", "splitting", "caption", "subcaption"),
     "检索": ("retrieve", "retrieval", "BM25", "ranker", "top-k"),
+    "嵌入": ("embedding", "embeddings", "vector"),
+    "索引": ("index", "indexing", "OpenSearch"),
     "子章节": ("subsections", "section"),
     "排序": ("rank", "ranking", "ranker", "top"),
     "证据评估": ("evidence", "evaluation", "supported", "refuted"),
@@ -942,6 +1005,11 @@ _SECTION_QUERY_ALIASES = {
     "正确答案": ("correct", "answer", "example"),
     "示例": ("example", "correct", "answer"),
     "评估指标": ("evaluation", "metrics", "accuracy", "recall", "hit"),
+    "评价指标": ("evaluation", "metrics", "accuracy", "recall", "hit"),
+    "加速策略": (
+        "acceleration", "accelerate", "speedup", "latency", "draft",
+        "speculative", "retrieval", "interaction",
+    ),
     "效率": ("efficiency", "tokens", "regeneration", "time", "cost", "overhead"),
     "代价": ("cost", "overhead", "time", "tokens", "regeneration"),
     "开销": ("cost", "overhead", "time", "tokens", "regeneration"),
@@ -949,18 +1017,28 @@ _SECTION_QUERY_ALIASES = {
     "完整文本": ("full-text", "full text"),
     "第一人称": ("first-person", "third-person", "rewrite", "decontextualize"),
     "实验配置": ("experimental", "setup", "configuration", "configurations"),
+    "量化": ("analysis", "experiment", "Recall@2", "sampled"),
     "配置": ("configuration", "configurations", "setup"),
     "基线": ("baseline", "configured"),
     "奖励": ("reward",),
     "管道": ("pipeline",),
+    "流程": ("pipeline", "process", "steps"),
+    "工具": ("tool", "toolkit", "parse", "parsing"),
+    "过滤": ("filter", "blind test", "agreement"),
+    "人工复核": ("manual", "verified", "subset", "samples", "instances"),
+    "样本": ("samples", "instances", "subset"),
+    "选项": ("answer choices", "options", "choices"),
 }
 _SOURCE_LOCAL_EVIDENCE_CUES = (
-    "阈值", "重叠", "一致率", "人工标注", "候选实例", "架构", "切分", "检索",
+    "阈值", "重叠", "一致率", "人工标注", "候选实例", "架构", "切分", "检索", "量化", "规模", "分布", "嵌入", "索引",
     "排序", "显式推理", "强化学习", "随机种子", "激活函数", "正确答案", "示例",
     "主干", "结构模块", "替换",
-    "评估指标", "全文", "完整文本", "第一人称", "实验配置", "配置", "基线", "奖励",
-    "管道", "流程", "步骤", "阶段", "效率", "代价", "开销", "threshold", "overlap", "annotation", "architecture",
-    "chunk", "retrieval", "ranking", "seed", "activation", "correct answer", "evaluation",
+    "评估指标", "评价指标", "加速策略", "全文", "完整文本", "第一人称", "实验配置", "配置", "基线", "奖励",
+    "管道", "流程", "步骤", "阶段", "效率", "代价", "开销", "变化", "绝对", "工具", "过滤", "人工复核", "样本",
+    "标注", "问题标注", "代理模型", "表格集合", "人类引导", "数量", "条目", "摘要", "领域", "上限", "评分尺度", "输出格式", "构成", "占比", "分类",
+    "修订", "数据子集", "选项", "质检", "质量控制",
+    "threshold", "overlap", "annotation", "architecture",
+    "chunk", "retrieval", "ranking", "seed", "activation", "correct answer", "evaluation", "metrics", "acceleration strategies",
     "first-person", "pipeline", "steps", "configuration", "reward", "replace", "replacing",
 )
 _EXPLICIT_NUMBER_RE = re.compile(
@@ -1161,6 +1239,21 @@ def _lexical_route_evidence_result(
     expanded_question = " ".join([question, *_section_query_terms(question)])
     ranking = snapshot.index.retrieve(expanded_question, 6, indices=positions)
     indices = [positions[int(item.key)] for item in ranking]
+    if _is_composite_fact_question(question):
+        expanded_indices: list[int] = []
+        for index in indices:
+            if index not in expanded_indices:
+                expanded_indices.append(index)
+            for continuation in _section_continuation_indices(
+                index,
+                snapshot.metadatas,
+                snapshot.texts,
+                source,
+                1,
+            ):
+                if continuation not in expanded_indices:
+                    expanded_indices.append(continuation)
+        indices = expanded_indices[:6]
     if not indices:
         return None
     return {
@@ -1670,10 +1763,14 @@ def query_knowledge(
             routed_variant_ids.extend(
                 str(value) for value in _flat_result_values(variant_result, "ids")[:12]
             )
-            if len(routed_sources) > 1 or (
-                len(allowed_sources) == 1
-                and _source_local_evidence_requested(message)
+            source_local_requested = (
+                _source_local_evidence_requested(message)
                 and figure_reference_from_question(message) is None
+            )
+            if (
+                len(routed_sources) > 1
+                or (evidence_route is not None and source_local_requested)
+                or (len(allowed_sources) == 1 and source_local_requested)
             ):
                 # A source-only clause (for example ``TANQ`` after splitting
                 # ``TANQ 和 FigEx ...``) is useful for routing but carries no
@@ -2018,7 +2115,12 @@ def query_knowledge(
     cell_match = find_table_cell_in_chunks(message, filtered_texts, retrieved_metas)
     if cell_match is not None:
         cell_index, cell = cell_match
-        table_number = cell["table_number"] or explicit_table_number or "?"
+        table_number = (
+            cell.get("table_number")
+            or cell.get("table_label")
+            or explicit_table_number
+            or "?"
+        )
         if "rows" in cell:
             row_texts = []
             for row in cell["rows"]:
@@ -2026,7 +2128,15 @@ def query_knowledge(
                     f"{item['column']}={item['value']}"
                     for item in row.get("values", [])
                 )
-                row_texts.append(f"{row['row']}：{values}")
+                descriptors = "；".join(
+                    f"{item['column']}={item['value']}"
+                    for item in row.get("descriptors", [])
+                )
+                qualifier = f"（{descriptors}）" if descriptors else ""
+                row_label = row["row"]
+                if row.get("outer_group"):
+                    row_label = f"{row['outer_group']} / {row_label}"
+                row_texts.append(f"{row_label}{qualifier}：{values}")
             value_text = "；".join(row_texts)
             cell_context = (
                 f"Table {table_number} 结构化多行：{value_text}\n\n"
@@ -2038,11 +2148,20 @@ def query_knowledge(
                 f"{item['column']}={item['value']}"
                 for item in cell["values"]
             )
+            descriptors = "；".join(
+                f"{item['column']}={item['value']}"
+                for item in cell.get("descriptors", [])
+            )
+            if descriptors:
+                value_text = f"{descriptors}；{value_text}"
+            row_label = cell["row"]
+            if cell.get("outer_group"):
+                row_label = f"{cell['outer_group']} / {row_label}"
             cell_context = (
-                f"Table {table_number} 结构化行：行={cell['row']}；{value_text}\n\n"
+                f"Table {table_number} 结构化行：行={row_label}；{value_text}\n\n"
                 f"{filtered_texts[cell_index]}"
             )
-            answer = f"根据 Table {table_number} 中“{cell['row']}”行，相关列值为：{value_text}。"
+            answer = f"根据 Table {table_number} 中“{row_label}”行，相关列值为：{value_text}。"
         else:
             cell_context = (
                 f"Table {table_number} 结构化单元格：行={cell['row']}；"
@@ -2064,9 +2183,18 @@ def query_knowledge(
             # trace retains shared units/scale notes that are not part of a
             # parsed header (for example a table-wide ×10^-2 footnote).
             cell_context = f"{table_caption}\n\n{cell_context}"
+            if re.search(
+                r"总计|共有|一共|总数|合计|total|comprises|contains",
+                message,
+                re.IGNORECASE,
+            ) and re.search(r"\d", table_caption):
+                answer = f"{table_caption}\n\n{answer}"
         unit_note = _table_caption_unit_note(table_metadata)
         if unit_note and not _TABLE_UNIT_HINT_RE.search(answer):
             answer += unit_note
+        metric_note = _table_caption_metric_note(table_metadata, message)
+        if metric_note and metric_note not in answer:
+            answer += metric_note
         ordered_texts = [cell_context]
         ordered_ids = [retrieved_ids[cell_index]]
         ordered_metas = [retrieved_metas[cell_index]]
@@ -2094,19 +2222,22 @@ def query_knowledge(
         runtime,
     )
     ordered_texts = [
-        _annotate_spatial_context(text)
-        if metadata.get("type") == "figure"
-        else text
+        _attach_table_caption(
+            _annotate_spatial_context(text)
+            if metadata.get("type") == "figure"
+            else text,
+            metadata,
+        )
         for text, metadata in zip(ordered_texts, ordered_metas)
     ]
 
     context_parts = []
     for index, (text, metadata) in enumerate(zip(ordered_texts, ordered_metas), start=1):
         if metadata.get("type") == "table":
-            table_number = metadata.get("table_number")
+            table_label = metadata.get("table_label") or metadata.get("table_number")
             table_label = (
-                f"[表格，Table {table_number}]"
-                if table_number is not None and str(table_number).strip()
+                f"[表格，Table {table_label}]"
+                if table_label is not None and str(table_label).strip()
                 else "[表格]"
             )
             label = f"【片段 {index}】{table_label}"
@@ -2258,6 +2389,7 @@ SCIENTIFIC_SYSTEM_PROMPT = """你是一个面向科学论文的严谨学术问�
 【强制规则 6：公式与符号必须按证据转录】
 - 若问题询问公式、形式化定义、初始化/更新表达式或激活函数，优先转录参考片段中明确出现的等式、括号、参数顺序、上下标和运算符；不得凭语义改写、交换参数或自行补充等价形式。
 - 若同一问题涉及多个公式或变量，必须逐项回答并区分每个变量的定义；不要用流程概述替代显式公式。
+- 同一公式若因 PDF 分块分布在相邻参考片段，可在不改变符号、顺序和运算符的前提下按片段拼接；只要各部分分别出现在参考片段中，不得仅因没有单行完整公式而拒答。
 - 如果参考片段只有“表达如下/producing ... as”之类引导语而没有等式本身，必须说明该公式未出现在参考片段中，不能猜测。
 
 【其他要求】

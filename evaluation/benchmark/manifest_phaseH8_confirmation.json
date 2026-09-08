@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-phaseH8-confirmation-v1",
+  "description": "Development regression set from two open-access 2025 papers. It was frozen before retrieval diagnostics, then reclassified after the first gate exposed generic multi-fact and table-context gaps.",
+  "status": "development-regression",
+  "freeze_date": "2026-09-06",
+  "freeze_policy": "Do not tune retrieval, parsing, or answer formatting against this set. Any failure discovered after retrieval or generation requires reclassification as development-regression and a new unseen set.",
+  "reclassification_date": "2026-09-06",
+  "reclassification_reason": "The H8 context gate reached only 6/12 full cases; missing facts concentrated in multi-fact prose, multi-column tables, and modality-specific pipeline details. A new unseen set is required for confirmation.",
+  "minimum_documents": 2,
+  "cases_path": "cases_phaseH8_confirmation.jsonl",
+  "documents": [
+    {
+      "document_id": "chainrag-acl-2025",
+      "filename": "2025.acl-long.1089.pdf",
+      "sha256": "cb913580283c0e132bd9f788026930a7169c78001ccdc3432cc15ac4dea3f65c",
+      "title": "Mitigating Lost-in-Retrieval Problems in Retrieval Augmented Multi-Hop Question Answering",
+      "venue": "Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+      "year": 2025,
+      "pages": 14,
+      "domain": "multi-hop question answering and retrieval",
+      "layout_tags": ["two-column", "tables", "figures", "appendix", "multi-hop", "RAG"],
+      "source_url": "https://aclanthology.org/2025.acl-long.1089/",
+      "pdf_url": "https://aclanthology.org/2025.acl-long.1089.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "development-regression"
+    },
+    {
+      "document_id": "magmar-acl-2025",
+      "filename": "2025.magmar-1.5.pdf",
+      "sha256": "5dc9c99af37fca474a3c4a55cffa57f55031dbfa19b4b5e8f4488ee709e39dbd",
+      "title": "Multimodal Retrieval-Augmented Generation: Unified Information Processing Across Text, Image, Table, and Video Modalities",
+      "venue": "Proceedings of the 1st Workshop on Multimodal Augmented Generation via Multimodal Retrieval (MAGMaR 2025)",
+      "year": 2025,
+      "pages": 6,
+      "domain": "multimodal retrieval-augmented generation",
+      "layout_tags": ["two-column", "tables", "figures", "PDF", "image", "video", "multimodal"],
+      "source_url": "https://aclanthology.org/2025.magmar-1.5/",
+      "pdf_url": "https://aclanthology.org/2025.magmar-1.5.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "development-regression"
+    }
+  ]
+}

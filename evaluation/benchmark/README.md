@@ -40,6 +40,54 @@ SciDQA、科学表格理解、MgNO 和 AlphaFold 3 四篇论文的独立问题�
 复杂表格和效率/复现性信息。由于这批题已经被用于检索诊断和定向修复，清单现标记为
 `development-regression`，不能再作为未见盲测或正式泛化证据。两篇原始 PDF 仍保存在仓库外，不应提交到 Git。
 
+`manifest_blind_holdout_fresh_draft.json` 曾是已冻结的 fresh evaluation 清单，包含 NeurIPS 2024 的 SPIQA、UDA
+和 ICLR 2025 的 LiveXiv，共 20 道文本/表格/计算题。三篇 PDF 均为官方免费版本，已完成 SHA-256、页码、表格、
+图注和代表页视觉核对。冻结前已经运行过 E1 离线检索诊断，但没有用于 Chroma 生成、答案生成或模型调参；
+因此它不是严格意义上的 blind holdout。E2b 已经使用这批题生成并查看结果，清单现标记为
+`development-regression`；它可以用于回归修复，但不能再作为未见评估或泛化证据。原冻结版本的
+SHA-256 和 E2b 结果保留在 `PAPER_AUDIT.md`，后续正式验证必须另建未见评估集。
+
+Phase E2b 已在包含全部 13 篇论文的 1,594 块隔离 Chroma 上完成一次生成对照：Dense 与 Gated
+Hybrid + 固定 revision 的 BGE reranker 均为 20/20 请求成功。候选配置的 required-fact 上下文
+完整覆盖为 15/20，逐题人工语义复核为 14 correct / 3 partial / 3 incorrect，尚未达到预设的
+17/20 正确门槛，因此不切换线上默认检索，也不围绕这 20 题继续调参。完整生成 trace 保存在
+仓库外 `/private/tmp`，不提交到 Git。
+
+Phase E3b 已修复三类通用缺口：重复 `@N` 表头与拆分行实体、平均绝对变化等语义列的确定性匹配、以及唯一来源
+流程/工具/过滤/样本问题的来源内证据补全。UDA Table 6、LiveXiv Table 2 的真实 PDF 导出形态有离线回归覆盖；
+这 20 题仍只用于开发回归，不能重新充当未见泛化集。
+
+`manifest_phaseF1_unseen.json` 是 E3b 之后新建的最小未见留出集：TableRAG（EMNLP 2025）和
+CURIE（ICLR 2025）两篇此前未进入任何清单的论文，共 12 道题。题目覆盖复杂表格、跨页方法、长上下文
+统计和 2 道 Figure 视觉题；两篇 PDF 已完成页数、SHA-256、文字层和关键页面视觉核验。F2 诊断后因修复了
+表格 caption 证据对齐并补充 PDF 表头导出别名，清单已改标为 `development-regression`；它不再作为未见
+泛化证据，后续正式生成应另建确认集。
+
+Phase F3 在两篇论文的 402 块隔离库上完成受控生成：10 道文本/表格题各两轮均请求成功，人工复核每轮
+8 correct / 2 partial / 0 incorrect；两道 Figure 31 图片题各两轮请求成功，但坐标题稳定误读一个数字，
+因此视觉路径仍默认关闭。结果仅用于开发回归和能力边界记录，不代表生产正确率或泛化。
+
+Phase F4A 已补齐两个通用表格答案缺口：IoU 多指标选择，以及问题明确指定的 backbone/表注指标限定词。
+隔离应用路径复测已完整返回 TableRAG Table 4 和 CURIE Table 7 的请求项；全套离线测试为 `241/241`。
+
+Phase F4B 的 4× 高分辨率 full+detail 对照覆盖 12 道现有图像题，结果为 `9 correct / 2 incorrect / 1 empty`，
+没有超过已有输入策略的整体表现；高分辨率不接入正式路径，视觉仍默认关闭。
+
+`manifest_phaseG_confirmation.json` / `cases_phaseG_confirmation.jsonl` 原为一次性未见确认集：3 篇 ACL Anthology
+论文、20 道题（MT-RAIG 8、WikiMixQA 6、TableEval 6），PDF 保存在仓库外。题目和金标准仍保持冻结，但因生成
+trace 已被审计，清单现标为 `development-regression`，不再作为未见确认集。隔离库 472 块上的 Gated Hybrid
+离线候选诊断 @10/@50 完整事实覆盖为 `13/20`、`17/20`；这不是送入模型的最终上下文覆盖率。对真实 trace
+中的 `contexts` 重算后，@10 等价覆盖为 `11/20 full、7/20 partial、2/20 zero`（macro/micro=`0.7592/0.7157`）。
+两轮 DeepSeek 生成最终 `40/40` 成功，人工语义复核为每轮 `14 correct / 4 partial / 2 incorrect`，未达到
+`≥17/20` 且错误 `≤1` 的确认门槛。因此该结果不支持泛化结论或切换默认 reranker；后续修复只能使用该开发回归集，
+并在完成后另建全新的未见确认集。
+
+Phase H1 的首个通用修复已在同一隔离库、假客户端的真实应用路径完成上下文检查：复合问题现在按问号/句号拆分，
+并使用数量、占比、标注、代理模型、表格集合和人类引导等通用中英文别名。`mtraig-g-03` 的真实上下文事实覆盖
+从 `0/12` 提升到 `12/12`，`mtraig-g-05` 从 `0/5` 提升到 `5/5`；20 题真实上下文覆盖由原来的
+`11/20 full、7/20 partial、2/20 zero` 变为 `13/20 full、7/20 partial、0/20 zero`（macro/micro=`0.8592/0.8824`）。
+这只是检索上下文检查，尚未重新调用 DeepSeek，不代表答案正确率或泛化结论。
+
 Phase A 已完成独立 PDF 审核：16/16 题的页码、表号、公式、数值/单位和答案片段均与原文一致，关键页面另做
 视觉核对。该结果只证明题库自洽；两篇论文都是免费 arXiv 预印本，所以清单仍是候选压力测试，不单独支撑
 权威论文的泛化结论。是否转为正式盲测集，须先确认来源级别，再进行隔离库检索和生成。
@@ -557,3 +605,127 @@ RAGAS、未提交或推送。
 ## Phase 6.19 当前修复批次收尾
 
 `scidqa-10` 独立生成两轮均明确回答 OpenReview 上的同行评审—作者来源，并说明第三人称改写和上下文补充；DrugR Table 6、TANQ/FigEx 跨论文模型题和 THINKNOTE Table 1 控制题均通过。现有 8 篇论文、82 道题冻结为开发回归集，不再据此继续调参或宣称泛化能力；后续应建立未参与修复的盲测留出集。
+
+## Phase H3 新论文确认集
+
+`manifest_phaseH3_confirmation.json` / `cases_phaseH3_confirmation.jsonl` 曾冻结两篇新的 2025 ACL 论文、12 道题；
+隔离库 304 块上两轮生成均成功，但人工复核每轮仅 `8 correct / 3 partial / 1 incorrect`，因 MEBench Table 3
+跨列表头拆分导致的错误结构化答案未通过 H3。清单现标为 `development-regression`；题目和金标准保持冻结，修复后必须
+另建未见确认集，不能把 H3 结果当作泛化证据。逐题记录见 `reviews_phaseH3_confirmation_v1.jsonl`。
+
+## Phase H4 修复后开发回归
+
+H3 失败样本仅用于回归，题目和金标准保持冻结。修复了跨单元格表头、重复数据集/Prompting 分组、中文多值限定，
+并增加“选项”中英别名；全套离线 unittest `248/248`，解析、编译和 diff 检查通过。
+
+两篇论文重建的 304 块隔离库上，Table 3 `GPT-4 + RAG` 四列、Table 2 X→Y 下 GPT-4 的
+`78.63/60.71/67.32` 和 Medbullets 的 `five answer choices` 均进入真实送模上下文。两轮 DeepSeek `24/24` 成功，
+来源/配置/上下文/metadata 稳定；按 case 人工复核 `11 correct / 1 partial / 0 incorrect`，达到 H4 开发回归门槛。
+唯一 partial 是 MEBench Table 2 表头拆分展示，三类总数正确。trace 仅在 `/private/tmp/scirag_phaseH3_answers_h4_v1.jsonl`
+（SHA-256 `39dd5acf493aea92728de4f15a9f3c1a7a15bdadf3d780f118a7c77710a7a561`），复核记录见
+`reviews_phaseH3_confirmation_h4_v1.jsonl`。该结果不证明未见论文泛化、不改变线上默认配置；下一步建立新的 H5 未见确认集。
+
+## Phase H5 新论文确认集（现为开发回归）
+
+H5 使用两篇此前未进入基准的 ACL Anthology 免费论文：SciAssess（Findings of NAACL 2025，23 页）和 YESciEval（ACL 2025 Long
+Papers，35 页），共 12 道题。PDF 只保存在仓库外 `/Users/qinleqi/Desktop/sci-rag-benchmark-papers/`；详情、哈希和题目清单见
+`manifest_phaseH5_confirmation.json` / `cases_phaseH5_confirmation.jsonl`。清单状态为 `development-regression`，因为生成前已用该批次
+做离线检索诊断和通用修复，不能再作为严格未见集。
+
+在仓库外 432 块隔离 Chroma 上，真实应用路径来源路由 `12/12`，送模上下文 required-fact 覆盖 `12/12 full`（macro/micro=`1.0000/1.0000`）。
+两轮 DeepSeek `24/24` 成功，context/config/provenance 按 case 稳定。严格词面答案审计 macro/micro=`0.6606/0.7073`，仅作表面覆盖信号；人工复核
+第一轮 `12 correct / 0 partial / 0 incorrect`，第二轮 `10 correct / 2 partial / 0 incorrect`。两个 partial 是第二轮对两个 rubric/层级分组问题的保守拒答，
+不是上下文缺失。按每个 case 两轮均完整的保守口径为 `10/12 correct、2/12 partial、0/12 incorrect`，未达到 `≥85%` 未见确认门槛；不宣称泛化或切换线上默认检索。
+逐题记录见 `reviews_phaseH5_confirmation_v2.jsonl`，trace 只保存在仓库外 `/private/tmp/scirag_phaseH5_answers_v2.jsonl`。
+
+## Phase H6 开发回归集（初始冻结，后续降级）
+
+H6 为避免在 H5 上继续调参，选用两篇此前未进入任何基准的开放论文：CAQA（ACL 2025，23 页）和 MiMoTable（COLING 2025，13 页）。
+PDF 均来自 ACL Anthology 官方免费链接，保存在仓库外 `/Users/qinleqi/Desktop/sci-rag-benchmark-papers/`。
+
+`manifest_phaseH6_confirmation.json` / `cases_phaseH6_confirmation.jsonl` 共 12 道题（每篇 6 题），覆盖归因类别与复杂度、KG 构建流程、
+复杂表格统计、meta operations 和人工质量控制。清单初始在检索、生成和调参前冻结为 `frozen-unseen`，但隔离检索 gate 暴露通用质量控制别名缺口，现已按协议改标为 `development-regression`；当前 manifest SHA-256=
+`14e036d7b28c71bd9a43556da03208a545653a189ea7d3069597f09a15ef135c`，cases SHA-256=
+`c8976fc51e4fae8d7ae4f0504b01cded8e8caca9c98b67e978e571a558ef8a5a`。
+
+通用别名和换行断词修复后，隔离 256 块 Chroma 的真实应用路径 required-fact gate 为 `12/12 full`。两轮 DeepSeek `24/24` 成功，人工复核为 `20 correct / 2 partial / 2 incorrect`，按 case 两轮均完整 `10/12`；错误集中在 MiMoTable Table 4 Simple=33.6% 遗漏和 Figure 6 数值错配。不宣称泛化；trace 仅保存在仓库外 `/private/tmp/scirag_phaseH6_answers_regression_v1.jsonl`，逐题记录见 `reviews_phaseH6_regression_v1.jsonl`。下一步建立真正未参与诊断的新 H7 集。
+
+## Phase H7 开发回归集（初始冻结，后续降级，2026-09-06）
+
+H7 选用两篇此前未进入任何基准或诊断的 ACL 2025 Long Papers：TC–RAG（27 页）和 ChartCoder（16 页），分别覆盖 RAG 状态/记忆/公式/效率与图表多模态/代码生成。PDF 来自 ACL Anthology 官方免费链接，保存在仓库外 `/Users/qinleqi/Desktop/sci-rag-benchmark-papers/`。
+
+`manifest_phaseH7_confirmation.json` / `cases_phaseH7_confirmation.jsonl` 共 12 道题（每篇 6 题），覆盖表格、公式、方法流程、效率指标和图表统计。清单初始在任何检索、生成或调参前冻结为 `frozen-unseen`，但 context gate 发现通用表头、整行多列、公式证据和多事实召回缺口，现按协议改标为 `development-regression`；当前 manifest SHA-256=`f92c5082083b1c736dfb40deac3c1c80508ebf23011e3fa12710e565b4e390b7`，cases SHA-256=`e3ad5c19ab528ba8bb1b2d607e3b69acb479947c0def20b20a6e0574c8a6d290`。
+
+隔离 370 块 Chroma 的真实应用路径 required-fact gate 为 `5/12 full`，fact macro/micro=`0.6457/0.6705`；ChartCoder 六题 full，TC–RAG 失败集中在跨列拆分表头、整行多列查询、公式证据和多事实实验设置。H7 不作为未见泛化证据，修复完成后另建 H8。
+
+随后补充通用三层/居中表头合并、中文平均指标别名和“分别”多列行抽取；TC–RAG Table 2 已能直接返回四个平均值。H7 fix2 离线 gate 为 `5/12 full`、fact macro/micro=`0.6576/0.6818`，仅作开发回归诊断，未调用 DeepSeek，H7 仍不作为未见证据，后续另建 H8。
+
+## Phase H8 开发回归集（初始冻结，后续降级，2026-09-06）
+
+H8 选用 ACL 2025 Long Paper ChainRAG 与 ACL 相关 MAGMaR 2025 两篇免费 PDF，新增 12 道题，覆盖多跳实体改写、句图检索、表格指标及 PDF/视频多模态管道。清单初始在检索前冻结为 `frozen-unseen`，随后隔离 gate 暴露多事实、跨列统计表和模态流程细节的通用覆盖缺口，现改标为 `development-regression`。
+
+隔离 158 块 Chroma 的真实应用路径 required-fact gate 为 `6/12 full`，fact macro/micro=`0.7449/0.7500`；未调用 DeepSeek，不作为未见泛化证据，后续另建 H9。
+
+H8 回归修复补齐多级表头续行、嵌套方法行外层模型、阈值括号/小数空格及来源内量化/设置/模态分布别名；同一 158 块隔离库的真实 `query_knowledge` 路径（假客户端、来源过滤）复测为 `12/12 full`，fact macro/micro=`1.0000/1.0000`。ChainRAG Table 1 和 MAGMaR 多模态阈值/统计均可核验；未调用 DeepSeek。H8 仍是开发回归，不证明未见泛化，下一步建立 H9。
+
+当前 H8 文件 SHA-256：manifest=`fb1a4b69d1ceda09f56203269fe5d367ff450ad05b54429955914c87d936019b`，cases=`ecc61faad0c583e9debd2133935cfc0a280e4b8b77e3c514836cc277f9ff3d66`。
+
+## H7 最后一轮通用修复（2026-09-07）
+
+表格行过滤现仅接受实际 `Dataset` 单元格匹配的 `在/on` 限定词，避免将 CMB、MMCU 等横向表头误当作数据集行；同时补充“评价指标/加速策略”及英文检索别名。全套离线 unittest 为 `259/259`。
+
+在同一 370 块 H7 隔离库、Hybrid、文档路由、查询分解、可选证据保护和假客户端路径复测，送模上下文 required-fact gate 为 `8/12 full、4/12 partial、0/12 zero`，fact macro/micro=`0.9000/0.8750`。TC–RAG Table 1 已完整，ChartCoder 六题保持完整；这仍是开发回归的上下文覆盖，不证明答案语义正确或未见论文泛化。H7 达到停损点，下一步建立不参与修复的 H9 确认集。
+
+## H3–H8 配置 A/B 验收（2026-09-07）
+
+A 为默认 Dense（文档路由、查询分解关闭），B 为 Dense+文档路由+查询分解；固定各批次隔离库、离线嵌入模型和 `context_k=10`，A/B 各重复 3 次且结果一致。B 的 full 案例数相对 A：H3 `9→11`、H5 `7→9`、H6 `8→11`、H7 `7→8`、H8 `7→8`；各批次 required-fact macro/micro 均提高，目标论文和显式 Table N 命中均保持 `100%`。
+
+页级命中 H3/H5/H6 提高、H7 持平，但 H8 从 `12/12` 降为 `10/12`，未通过严格的全指标无回退门槛。因此线上默认仍为 Dense，B 仅作为 opt-in；Hybrid 不因本次验收切换默认。
+
+## H7 两轮生成语义闸门（2026-09-07）
+
+H7 在 370 块隔离库上完成 12 题×2 轮生成，`24/24` 成功。provenance、配置、context ID 和 metadata 均按 case 稳定；答案逐字稳定 `5/12`。人工复核结果为第 1 轮 `5 correct / 6 partial / 1 incorrect`、第 2 轮 `5 correct / 5 partial / 2 incorrect`，未通过 `≥10/12 correct 且 ≤1 incorrect` 的生成闸门。逐题记录见 `reviews_phaseH7_generation_v2.jsonl`，trace 只保存在仓库外 `/private/tmp/scirag_phaseH7_answers_v2.jsonl`。
+
+H7 继续作为 `development-regression`，不证明泛化，也不改变线上默认；下一步应建立真正未参与修复的 H9，且在下载任何新 PDF 前先审阅候选及免费来源。
+
+## Phase H9 新论文确认集（首轮后降级为开发回归，2026-09-07）
+
+经用户批准，从 ACL Anthology 下载三篇此前未进入基准的免费 2025 PDF，保存在仓库外
+`/Users/qinleqi/Desktop/sci-rag-benchmark-papers/`：LongTableBench（Findings of EMNLP，39 页）、Table-R1（EMNLP，20 页）和
+Query-Driven Multimodal GraphRAG（Findings of ACL，21 页）。三篇 PDF 的文字层逐页可读，代表页及关键表格/公式完成视觉核对。
+`manifest_phaseH9_confirmation.json` / `cases_phaseH9_confirmation.jsonl` 共 12 道题，清单校验通过。
+
+475 块仓库外隔离 Chroma 的真实 `app.query_knowledge` 门禁（Hybrid、路由、查询分解、parent-window、公式/图形证据保护、来源隔离、假客户端）为
+`6/12 full、5/12 partial、1/12 zero`，required-fact macro/micro=`0.7593/0.8052`；全库不传 `source_filter` 的结果相同。
+失败集中在共享的多列整行表格截断/单元格截断、无题注编号表格的显式 Table N 定位、跨块公式尾部条件和多事实段落召回，不能用论文特例解释。
+按冻结协议，H9 manifest 已改标为 `development-regression`，不作为未见泛化证据，尚未调用 DeepSeek；下一步只做一次通用根因修复并在 H9 回归。
+
+## H9 通用修复回归（2026-09-07）
+
+本轮修复堆叠/远距离表头关联、`<br>` 并行单元格、显式多列限定词、PDF 公式续行和结构化行内有序事实审计；新增回归后全套离线 unittest `264/264`，`py_compile` 与 `git diff --check` 通过。
+
+在仓库外 `/private/tmp/scirag_phaseH9_db_fix2_20260907` 重建 `476` 块，Hybrid+路由+查询分解+parent-window+公式/图形证据保护的真实 `app.query_knowledge`（来源过滤及全库不传过滤器）均为 `12/12 full`，required-fact macro/micro=`1.0000/1.0000`。H9 仍是 `development-regression`，不作为泛化或答案正确率证据；未调用 DeepSeek，未修改项目 `chroma_db`。
+
+之后在同一隔离库完成两轮 DeepSeek 生成，`24/24` 成功；trace 保存在仓库外 `/private/tmp/scirag_phaseH9_answers_regression_20260907.jsonl`（SHA-256=`7890f6bff824764016ade60cede8be8dea37883bead21fb1e3de31107809b097`）。人工 PDF/gold/context 复核为 `11 correct / 1 partial / 0 incorrect`；词面答案审计 macro/micro=`0.8536/0.8571`，真实送模 contexts=`1.0000/1.0000`。该集已参与修复定位，仍不能证明未见泛化或默认配置切换。
+
+## Phase H10 新论文确认集（首轮后降级为开发回归，2026-09-07）
+
+H10 新增三篇 ACL Anthology 2025 免费 PDF：SCITAT、REAL-MM-RAG 和 RealHiTBench，PDF 均保存在仓库外
+`/Users/qinleqi/Desktop/sci-rag-benchmark-papers/`；关键表格和代表页面完成文字/视觉核对。对应
+`manifest_phaseH10_unseen.json` / `cases_phaseH10_unseen.jsonl` 共 12 道题，清单初始冻结后进行一次隔离 Hybrid 检索诊断。
+
+@50 目标文档命中为 `12/12`、文档路由为 `10/10`，但 required-fact 仅 `8/12 full`，macro/micro=`0.694/0.658`；缺口集中在宽表统计和多列值覆盖。清单按冻结协议改标为 `development-regression`，不作为未见泛化证据；诊断结果仅保存于仓库外 `/private/tmp/scirag_phaseH10_retrieval_20260907.json`，未调用 DeepSeek、未修改项目 Chroma。
+
+## H10 表格标签与并排表解析修复（2026-09-07）
+
+公共解析器新增 `Table S1` 等字母数字表号支持，并将 `pymupdf4llm` 合并的横向宽表按重复首级表头和对齐列通用拆分。SCITAT 第 4 页现在产生独立 Table 3/Table 4，REAL-MM-RAG 第 15 页的补充表元数据为 `table_label=S1`；原有整数表号保持兼容。
+
+新增回归测试后全量离线 unittest 为 `266/266`，`py_compile` 与 `git diff --check` 通过。临时隔离库 `/private/tmp/scirag_phaseH10_parserfix_m060cn06` 的真实 `app.query_knowledge` 为 `9/12 full、1/12 partial、2/12 zero`；人工检查确认目标表块均已进入上下文，剩余缺口是事实审计字符串没有表达表格的“行标签—列值”关系。H10 继续是开发回归，不证明泛化或答案正确率。
+
+随后将事实审计改为在单个 Markdown 行内关联行标签、列标题和单元格值，并兼容 PDF 千位逗号缺失及 `Table`/`Tables` 形式。全量离线 unittest 为 `268/268`；同一临时隔离库的真实应用路径复测为 `12/12 full`，required-fact macro/micro=`1.0000/1.0000`。该结果仍仅属于 H10 开发回归，不证明未见论文泛化或答案语义正确。
+
+当前离线 Hybrid 检索诊断在 `@50` 的目标文档、来源页、表号和 required-fact 均为 `12/12`，macro/micro=`1.0000/1.0000`；`@10` 为 `9/12 full`，用于保留低召回预算的边界观察。
+
+H10 定向生成复核中，SCITAT Table 4 与 REAL-MM-RAG Table S1 两题答案正确。H9 GraphRAG Definition 4 公式题在上下文已完整的情况下仍出现不必要拒答和公式混排；通用相邻公式提示及多字符标签识别的单次重试未消除该问题。该项记录为生成/公式 provenance 边界，不再追加论文特例；H10 尚未进行全量生成。
+
+H10 单轮生成回归（2026-09-08）：12/12 次 DeepSeek 调用成功；人工复核为 `10 correct / 1 partial / 1 incorrect`。partial 是 SCITAT 四类 reasoning type 漏列三个总类，incorrect 是 RealHiTBench Table 2 的模型/行列定位错误。逐题记录见 `reviews_phaseH10_generation_v1.jsonl`；该结果只达到开发回归门槛，不证明未见泛化或默认检索切换。

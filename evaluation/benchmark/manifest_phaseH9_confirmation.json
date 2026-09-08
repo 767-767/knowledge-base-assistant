@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-phaseH9-confirmation-v1",
+  "description": "Three previously unused open-access 2025 papers covering long-context tables, table reasoning training, and multimodal Graph-RAG.",
+  "status": "development-regression",
+  "freeze_date": "2026-09-07",
+  "reclassification_date": "2026-09-07",
+  "reclassification_reason": "The first isolated app.query_knowledge context gate found shared retrieval/structured-evidence gaps: multi-column table rows were truncated, an unnamed Table 1 could not be deterministically addressed, a formula was split across blocks, and a multimodal table row was partially parsed. This set is no longer an unseen confirmation set.",
+  "freeze_policy": "Do not tune retrieval, parsing, or answer formatting against this set. Any failure discovered after retrieval or generation requires reclassification as development-regression and a new unseen set.",
+  "minimum_documents": 3,
+  "cases_path": "cases_phaseH9_confirmation.jsonl",
+  "documents": [
+    {
+      "document_id": "longtablebench-emnlp-2025",
+      "filename": "2025.findings-emnlp.638.pdf",
+      "sha256": "0de0b2f87eefff392a19ceb19bbe0b52124db13d79c2664fe9615586cc9a95a7",
+      "title": "LongTableBench: Benchmarking Long-Context Table Reasoning across Real-World Formats and Domains",
+      "venue": "Findings of the Association for Computational Linguistics: EMNLP 2025",
+      "year": 2025,
+      "pages": 39,
+      "domain": "long-context semi-structured table reasoning",
+      "layout_tags": ["two-column", "tables", "figures", "appendix", "long-context", "multi-table"],
+      "source_url": "https://aclanthology.org/2025.findings-emnlp.638/",
+      "pdf_url": "https://aclanthology.org/2025.findings-emnlp.638.pdf",
+      "access": "ACL Anthology official free PDF"
+    },
+    {
+      "document_id": "tabler1-emnlp-2025",
+      "filename": "2025.emnlp-main.1040.pdf",
+      "sha256": "ac314de535c21e9f31e0016267499ec2cac6308556d14e86a9fa68f61acedf6a",
+      "title": "Table-R1: Inference-Time Scaling for Table Reasoning Tasks",
+      "venue": "Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing",
+      "year": 2025,
+      "pages": 20,
+      "domain": "table reasoning and verifiable-reward training",
+      "layout_tags": ["two-column", "tables", "figures", "appendix", "RLVR", "table-reasoning"],
+      "source_url": "https://aclanthology.org/2025.emnlp-main.1040/",
+      "pdf_url": "https://aclanthology.org/2025.emnlp-main.1040.pdf",
+      "access": "ACL Anthology official free PDF"
+    },
+    {
+      "document_id": "qd-multimodal-graphrag-acl-2025",
+      "filename": "2025.findings-acl.1100.pdf",
+      "sha256": "4b5c4f44d5bb9dd32f0246b1c1b2e03ba73442edfd7b931d3db07900c0720932",
+      "title": "Query-Driven Multimodal GraphRAG: Dynamic Local Knowledge Graph Construction for Online Reasoning",
+      "venue": "Findings of the Association for Computational Linguistics: ACL 2025",
+      "year": 2025,
+      "pages": 21,
+      "domain": "multimodal Graph-RAG and multi-hop question answering",
+      "layout_tags": ["two-column", "tables", "figures", "formulas", "image", "table", "Graph-RAG"],
+      "source_url": "https://aclanthology.org/2025.findings-acl.1100/",
+      "pdf_url": "https://aclanthology.org/2025.findings-acl.1100.pdf",
+      "access": "ACL Anthology official free PDF"
+    }
+  ]
+}

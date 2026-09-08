@@ -102,7 +102,11 @@ def _answer_refusal_risks(
     }
 
 
-def audit_answer(case: dict[str, Any], answer: str) -> dict[str, Any]:
+def audit_answer(
+    case: dict[str, Any],
+    answer: str,
+    contexts: Iterable[str] | None = None,
+) -> dict[str, Any]:
     """Return one answer-level fact audit row for a benchmark case."""
 
     answer_case = dict(case)
@@ -120,6 +124,11 @@ def audit_answer(case: dict[str, Any], answer: str) -> dict[str, Any]:
         merged_aliases[str(fact)] = list(dict.fromkeys(merged_aliases[str(fact)]))
     answer_case["required_fact_aliases"] = merged_aliases
     coverage = case_fact_coverage(answer_case, [answer])
+    context_coverage = (
+        case_fact_coverage(case, contexts)
+        if contexts is not None
+        else None
+    )
     refusal_risks = _answer_refusal_risks(answer_case, answer, coverage)
     return {
         "id": case.get("id", case.get("case_id")),
@@ -149,6 +158,37 @@ def audit_answer(case: dict[str, Any], answer: str) -> dict[str, Any]:
         "matched_required_fact_count": coverage["matched_required_fact_count"],
         "matched_fact_count": coverage["matched_required_fact_count"],
         "required_fact_count": coverage["required_fact_count"],
+        "context_fact_coverage": (
+            context_coverage["required_fact_coverage"]
+            if context_coverage is not None
+            else None
+        ),
+        "context_fact_status": (
+            context_coverage["fact_coverage_status"]
+            if context_coverage is not None
+            else None
+        ),
+        "context_matched_facts": (
+            context_coverage["matched_required_facts"]
+            if context_coverage is not None
+            else []
+        ),
+        "context_missing_facts": (
+            context_coverage["missing_required_facts"]
+            if context_coverage is not None
+            else []
+        ),
+        "context_matched_required_fact_count": (
+            context_coverage["matched_required_fact_count"]
+            if context_coverage is not None
+            else 0
+        ),
+        "context_required_fact_count": (
+            context_coverage["required_fact_count"]
+            if context_coverage is not None
+            else 0
+        ),
+        "context_count": len(contexts) if contexts is not None else None,
     }
 
 
@@ -169,12 +209,23 @@ def aggregate_answer_audit(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
         for row in row_list
         if "full_coverage_with_refusal" in (row.get("answer_risk_flags") or [])
     ]
+    context_rows = [
+        {
+            "required_fact_coverage": row["context_fact_coverage"],
+            "fact_coverage_status": row["context_fact_status"],
+            "required_fact_count": row["context_required_fact_count"],
+            "matched_required_fact_count": row["context_matched_required_fact_count"],
+        }
+        for row in row_list
+        if row.get("context_fact_status") not in (None, "not_scored")
+    ]
     return {
         **fact_summary,
         "answer_risk_case_count": len(risk_rows),
         "answer_refusal_case_count": len(refusal_rows),
         "required_fact_refusal_conflict_case_count": len(conflict_rows),
         "full_coverage_with_refusal_case_count": len(full_refusal_rows),
+        "context_summary": aggregate_fact_coverage(context_rows),
     }
 
 
@@ -287,7 +338,8 @@ def _load_answers(path: str | Path) -> list[dict[str, Any]]:
         raise ValueError(f"回答文件必须是非空数组、JSONL，或含 answers/results 的对象：{source}")
 
     answers: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen_keys: set[tuple[str, str | None]] = set()
+    seen_case_ids: set[str] = set()
     for record in payload:
         if not isinstance(record, dict):
             raise ValueError(f"回答记录必须是对象：{source}")
@@ -295,9 +347,12 @@ def _load_answers(path: str | Path) -> list[dict[str, Any]]:
         if case_id is None or "answer" not in record:
             raise ValueError(f"回答记录必须含 id/case_id 和 answer：{source}")
         key = str(case_id)
-        if key in seen:
-            raise ValueError(f"回答文件存在重复 case id：{key}")
-        seen.add(key)
+        repeat = record.get("repeat")
+        repeat_key = str(repeat) if repeat is not None else None
+        if (key, repeat_key) in seen_keys or (repeat_key is None and key in seen_case_ids):
+            raise ValueError(f"回答文件存在重复 case id/repeat：{key}@{repeat_key or '-'}")
+        seen_keys.add((key, repeat_key))
+        seen_case_ids.add(key)
         answers.append({**record, "case_id": key, "answer": str(record["answer"])})
     return answers
 
@@ -320,8 +375,9 @@ def audit_answers(
         if case is None:
             unknown.append(case_id)
             continue
-        row = audit_answer(case, record["answer"])
+        row = audit_answer(case, record["answer"], contexts=record.get("contexts"))
         row["mode"] = record.get("mode")
+        row["repeat"] = record.get("repeat")
         row["latency_seconds"] = record.get("latency_seconds")
         rows.append(row)
 
@@ -359,11 +415,27 @@ def _print_summary(report: dict[str, Any]) -> None:
         f"{fmt(summary['partial_fact_coverage_rate'])}/"
         f"{fmt(summary['zero_fact_coverage_rate'])}"
     )
+    context_summary = summary.get("context_summary") or {}
+    if context_summary.get("fact_scored_cases"):
+        print(
+            "真实送模 contexts macro/micro="
+            f"{fmt(context_summary['required_fact_coverage_macro'])}/"
+            f"{fmt(context_summary['required_fact_coverage_micro'])}; "
+            "full/partial/zero="
+            f"{fmt(context_summary['full_fact_coverage_rate'])}/"
+            f"{fmt(context_summary['partial_fact_coverage_rate'])}/"
+            f"{fmt(context_summary['zero_fact_coverage_rate'])}"
+        )
     for row in report["results"]:
         if row["answer_fact_status"] != "full":
             print(
                 f"- {row['case_id']}: {row['answer_fact_status']}; "
                 f"遗漏={', '.join(row['missing_facts']) or '无'}"
+            )
+        if row.get("context_fact_status") not in (None, "full", "not_scored"):
+            print(
+                f"- {row['case_id']}: context {row['context_fact_status']}; "
+                f"遗漏={', '.join(row['context_missing_facts']) or '无'}"
             )
 
 

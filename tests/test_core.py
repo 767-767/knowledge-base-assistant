@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 import app
+import sci_rag_core as core
 from sci_rag_reranking import RerankResult
 from sci_rag_retrieval import DocumentRoute, RankedItem
 from sci_rag_core import (
@@ -124,6 +125,14 @@ TABLE_SECTION_GROUPS = """|Question Type|Count|Freq (%)|
 |2. One skill|657|61.2|
 |3. Two skills|94|8.8|
 |4. Three skills|23|2.1|"""
+TABLE_RANK_GROUPED = """||Model||FinH|ybrid|||Pap|erTab|||Pape|rText|||Feta|Tab|||Nq|Text||
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+|||@1|@5|@10|@20|@1|@5|@10|@20|@1|@5|@10|@20|@1|@5|@10|@20|@1|@5|@10|@20|
+|Sparse|BM-25|65.6|83.7|87.4|90.0|46.0|79.7|90.0|92.3|47.4|80.0|88.0|89.9|68.3|91.9|95.2|96.2|42.0|69.2|75.8|80.3|"""
+TABLE_LIVEXIV_AVG = """||LiveXiv|Verified Subset|Absolute Avg.|
+|---|---|---|---|
+|**VQA**|46.734|47.273|2.336|
+|**TQA**|45.101|46.028|2.105|"""
 
 
 class CoreTests(unittest.TestCase):
@@ -211,6 +220,62 @@ class CoreTests(unittest.TestCase):
         )
         self.assertIn("[表格，Table 2]", client.prompt)
 
+    def test_generation_prompt_includes_table_caption_for_narrative_questions(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        class Collection:
+            def count(self):
+                return 1
+
+            def query(self, **_kwargs):
+                return {
+                    "ids": [["table"]],
+                    "documents": [["|Model|Blind|Oracle|\n|---|---|---|\n|GPT-4o|33.46|71.42|"]],
+                    "metadatas": [[
+                        {
+                            "type": "table",
+                            "table_number": 1,
+                            "table_caption": "Table 1: Random baseline is 25%.",
+                        }
+                    ]],
+                }
+
+            def get(self, **_kwargs):
+                return {"ids": [], "documents": [], "metadatas": []}
+
+        class Client:
+            def __init__(self):
+                self.prompt = ""
+                self.chat = self
+                self.completions = self
+
+            def create(self, **kwargs):
+                self.prompt = kwargs["messages"][1]["content"]
+                return type(
+                    "Response",
+                    (),
+                    {"choices": [type("Choice", (), {"message": type("Message", (), {"content": "25%"})()})()]},
+                )()
+
+        client = Client()
+        result = app.query_knowledge(
+            "Table 1 的随机选择基线准确率是多少？",
+            runtime=app.Runtime(
+                app.RuntimeConfig(retrieval_k=1, context_k=1),
+                client,
+                Embedding(),
+                Collection(),
+            ),
+        )
+        self.assertIn("Random baseline is 25%", result["contexts"][0])
+        self.assertIn("Random baseline is 25%", client.prompt)
+
     def test_table_caption_unit_note_preserves_shared_scale(self):
         note = app._table_caption_unit_note(
             {
@@ -261,6 +326,17 @@ class CoreTests(unittest.TestCase):
             formula_evidence_indices(question, texts, metas, allowed_indices=[0, 2]),
             [2],
         )
+
+    def test_formula_evidence_aliases_conditional_perplexity_and_uncertainty(self):
+        question = "TC–RAG 如何定义 conditional perplexity 和 uncertainty？"
+        texts = [
+            "cppl(Mtop | Mbottom) = exp ...",
+            "uct(Mtop) = -P(wi | w1, ..., wi−1) log P(wi | w1, ..., wi−1)",
+            "An unrelated transition formula δ(s, a) = (s', op, b).",
+        ]
+        metas = [{"type": "formula"}] * len(texts)
+        selected = formula_evidence_indices(question, texts, metas, max_results=2)
+        self.assertEqual(selected, [0, 1])
 
     def test_formula_evidence_uses_explicit_symbol_for_isolated_formula_chunk(self):
         question = "Thought Accommodation 阶段的最终输出 y 如何定义？"
@@ -332,6 +408,20 @@ class CoreTests(unittest.TestCase):
         )
         self.assertNotIn("top-k", answer)
         self.assertNotIn("【公式原文核对项】", answer)
+
+    def test_formula_supplement_keeps_explicit_multi_character_formula_labels(self):
+        question = "Definition 4 如何定义 Retrieval Graph G2？请给出 G2 和 Type Filtering 的公式。"
+        answer = supplement_formula_with_evidence(
+            question,
+            "参考片段给出了类型过滤公式。",
+            [
+                "G2 = Ψ1",
+                "Type Filtering : V = {v ∈D | ϕtype(v) ∈T}",
+            ],
+            [{"type": "formula", "formula_evidence": True}] * 2,
+        )
+        self.assertIn("G2 = Ψ1", answer)
+        self.assertIn("V = {v ∈D | ϕtype(v) ∈T}", answer)
 
     def test_pdf_formula_text_recovery_merges_adjacent_spans_and_parentheses(self):
         class Page:
@@ -480,6 +570,11 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(
             is_formula_question(
                 "MgNO 多重网格平滑迭代开始时如何初始化状态，更新时使用什么量？"
+            )
+        )
+        self.assertTrue(
+            is_formula_question(
+                "TC–RAG 如何定义 conditional perplexity 和 uncertainty？"
             )
         )
         self.assertTrue(
@@ -1021,6 +1116,14 @@ class CoreTests(unittest.TestCase):
             "The discretized system can be expressed as:\nA ∗ u = f\nwhere u and f are vectors."
         ])
 
+    def test_missing_pdf_formula_blocks_keep_wrapped_constraint_tail(self):
+        blocks = missing_pdf_formula_blocks(
+            "Relation Pruning : E = {(vi, r, vj) ∈D | r ∈R",
+            "Relation Pruning : E = {(vi, r, vj) ∈D | r ∈R\n∧{ϕtype(vi), ϕtype(vj)} ⊆T}\nHere, ϕtype maps entities to types.",
+        )
+
+        self.assertIn("∧{ϕtype(vi), ϕtype(vj)} ⊆T}", blocks[0])
+
     def test_table_spans_are_removed_from_text_chunks(self):
         markdown = f"# Results\n\n**Table 1**\n{TABLE_1}\n\n**Table 2**\n{TABLE_2}\n\nNarrative."
         tables, body = extract_tables(markdown, "paper.pdf", {"page": 2})
@@ -1043,6 +1146,27 @@ class CoreTests(unittest.TestCase):
         tables, _body = extract_tables(markdown, "paper.pdf")
         self.assertEqual([table.metadata["table_number"] for table in tables], [2, 3])
 
+    def test_single_page_caption_can_label_a_distant_table(self):
+        markdown = (
+            "|Dataset|Samples|\n|---|---|\n|WTQ|13,706|\n\n"
+            "### Training data\n\nTable 1: Overview of datasets\n"
+        )
+        tables, _body = extract_tables(markdown, "paper.pdf")
+        self.assertEqual(tables[0].metadata["table_number"], 1)
+
+    def test_stacked_group_and_dataset_headers_are_combined(self):
+        markdown = (
+            "||In-domain|Out-of-domain|\n"
+            "|---|---|---|\n"
+            "|Model|FF-TQA|TFV|\n"
+            "||FeTaQA|TabFact|\n"
+            "|Table-R1-Zero|30.6|87.6|"
+        )
+        tables, _body = extract_tables(markdown, "paper.pdf")
+        headers, rows = parse_markdown_table(tables[0].page_content)
+        self.assertEqual(headers, ["Model", "In-domain FF-TQA FeTaQA", "Out-of-domain TFV TabFact"])
+        self.assertEqual(rows[0][1:], ["30.6", "87.6"])
+
     def test_wrapped_group_headers_are_repaired_before_lookup(self):
         markdown = (
             "|**Method**|**Formul**<br>validity|**ation design**<br>success rate|\n"
@@ -1053,6 +1177,114 @@ class CoreTests(unittest.TestCase):
         self.assertIn("Formulation design validity", headers)
         self.assertIn("Formulation design success rate", headers)
 
+    def test_centered_split_group_headers_use_repeated_metric_blocks(self):
+        markdown = (
+            "| |LL|M Turbo|||Qwen-3|2B|||Pret|rainedQ|wen-32B||\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+            "|**Method**|**Type**|**Dataset**|CMB|MMCU||CMB-Clin||CMB|MMCU||CMB-Cli|n|\n"
+            "|TC-RAG|Adaptive RAG|TC-RAG-uct|87.95|93.15|25.89|57.29|56.59|87.33|92.80|24.65|56.94|57.46|\n"
+        )
+        tables, _body = extract_tables(markdown, "tcrag.pdf")
+        headers, _rows = parse_markdown_table(tables[0].page_content)
+        self.assertEqual(headers[1:3], ["Type", "Dataset"])
+        self.assertEqual(headers[3], "Qwen-32B CMB")
+        self.assertEqual(headers[8], "Pretrained Qwen-32B CMB")
+
+    def test_three_level_grouped_headers_consume_leaf_metric_row(self):
+        markdown = (
+            "| |LL|M Turbo|||Qwen-3|2B|||Pret|rainedQ|wen-32B||\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+            "|**Method**|**Type**|**Dataset**|CMB|MMCU||CMB-Clin||CMB|MMCU||CMB-Cli|n|\n"
+            "|||**Metric**|EM|EM|BLEU-1|BLEU-4|ROUGE|EM|EM|BLEU-1|BLEU-4|ROUGE|\n"
+            "|TC-RAG|Adaptive RAG|TC-RAG-uct|87.95|93.15|25.89|57.29|56.59|87.33|92.80|24.65|56.94|57.46|\n"
+        )
+        tables, _body = extract_tables(markdown, "tcrag.pdf")
+        headers, rows = parse_markdown_table(tables[0].page_content)
+        self.assertEqual(len(rows), 1)
+        self.assertIn("Qwen-32B CMB EM", headers)
+        self.assertIn("Pretrained Qwen-32B CMB EM", headers)
+
+    def test_chinese_average_metric_aliases_select_all_requested_columns(self):
+        question = "Table 2 TC–RAG 的平均交互次数、平均检索器次数、平均耗时和平均 token 数分别是多少？"
+        table = (
+            "|Method|Avg. Interactions|Avg. Retrievers|Avg. Time(s)|Avg. Token|\n"
+            "|---|---|---|---|---|\n"
+            "|TC–RAG|4.78|3.37|50.91|458.82|"
+        )
+        row = extract_table_row_values(question, table, {"table_number": 2})
+        self.assertEqual(
+            [item["value"] for item in row["values"]],
+            ["4.78", "3.37", "50.91", "458.82"],
+        )
+
+    def test_rank_metric_group_headers_and_split_row_are_repaired(self):
+        question = "Table 6 中 Sparse BM-25 在 FinHybrid 与 PaperTab 的 @10 evidence score 分别是多少？"
+        tables, _body = extract_tables(TABLE_RANK_GROUPED, "uda.pdf")
+        headers, _rows = parse_markdown_table(tables[0].page_content)
+        self.assertIn("FinHybrid @10", headers)
+        self.assertIn("PaperTab @10", headers)
+        row = extract_table_row_values(question, tables[0].page_content, tables[0].metadata)
+        self.assertEqual([item["value"] for item in row["values"]], ["87.4", "90.0"])
+
+    def test_blank_label_second_header_row_is_combined(self):
+        markdown = """Table 3: Experimental results
+
+|Models||Accu|racy||
+|---|---|---|---|---|
+||Comparison|Statistics|Relationship|Overall|
+|GPT-4 + RAG|0.763|0.410|0.687|0.593|
+"""
+        tables, _body = extract_tables(markdown, "paper.pdf")
+        content = tables[0].page_content
+        headers, _rows = parse_markdown_table(content)
+        self.assertEqual(
+            headers,
+            ["Models", "Models Comparison", "Accuracy Statistics", "Accuracy Relationship", "Accuracy Overall"],
+        )
+        row = extract_table_row_values(
+            "Table 3 中 GPT-4 + RAG 在 Comparison、Statistics、Relationship 和 Overall 四列的准确率分别是多少？",
+            content,
+            tables[0].metadata,
+        )
+        self.assertEqual(
+            [item["value"] for item in row["values"]],
+            ["0.763", "0.410", "0.687", "0.593"],
+        )
+
+    def test_repeated_row_defaults_to_all_section_when_unqualified(self):
+        markdown = """Table 3: Experimental results
+
+|Models||Accu|racy||
+|---|---|---|---|---|
+||Comparison|Statistics|Relationship|Overall|
+||**All sets**||||
+|GPT-4 + RAG|0.763|0.410|0.687|0.593|
+||**Set1(0-10**|**)**|||
+|GPT-4 + RAG|0.870|0.619|0.740|0.729|
+"""
+        tables, _body = extract_tables(markdown, "paper.pdf")
+        row = extract_table_row_values(
+            "Table 3 中 GPT-4 + RAG 在 Comparison、Statistics、Relationship 和 Overall 四列的准确率分别是多少？",
+            tables[0].page_content,
+            tables[0].metadata,
+        )
+        self.assertEqual(
+            [item["value"] for item in row["values"]],
+            ["0.763", "0.410", "0.687", "0.593"],
+        )
+
+    def test_derived_average_absolute_column_wins_over_context_columns(self):
+        question = "LiveXiv v1 与人工验证子集相比，Table 2 给出的 VQA 和 TQA 平均绝对变化分别是多少？"
+        row = extract_table_row_values(
+            question,
+            TABLE_LIVEXIV_AVG,
+            {"type": "table", "table_number": 2},
+        )
+        self.assertEqual(
+            [(item["row"], item["values"][0]["value"]) for item in row["rows"]],
+            [("VQA", "2.336"), ("TQA", "2.105")],
+        )
+
     def test_row_entity_ignores_column_name_and_normalizes_sup(self):
         question = "Table 2 中 DrugR* 的 Target property F1 score 是多少？"
         entity = select_row_entity(question, TABLE_2)
@@ -1062,6 +1294,44 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("0.2997", filtered)
         self.assertEqual(normalize_for_match("**DrugR**"), "drugr")
         self.assertEqual(normalize_for_match("**DrugR**<sup>_∗_</sup>"), "drugr*")
+
+    def test_parenthetical_method_variant_selects_the_full_row(self):
+        table = (
+            "|LLM|Method|F1|EM|\n|---|---|---|---|\n"
+            "|**GPT4o-mini**|Ours (CxtInt)|47.87|38.50|"
+        )
+        row = extract_table_row_values(
+            "Table 1 中 GPT4o-mini 的 CxtInt F1 和 EM 分别是多少？",
+            table,
+            {"type": "table", "table_number": 1},
+        )
+        self.assertEqual(
+            [item["value"] for item in row["values"]],
+            ["47.87", "38.50"],
+        )
+
+    def test_multilevel_table_header_row_is_not_an_entity(self):
+        table = (
+            "|LLMs|Methods|MuS|iQue|2W|iki|\n|---|---|---|---|---|---|\n"
+            "|||F1|EM|F1|EM|\n"
+            "|**GPT4o-mini**|Ours (AnsInt)|50.54|37.00|62.55|52.00|\n"
+            "||Ours (CxtInt)|47.87|38.50|56.54|50.50|"
+        )
+        row = extract_table_row_values(
+            "Table 1 中 GPT4o-mini 的 CxtInt 在 MuSiQue 和 2Wiki 上的 F1/EM 分别是多少？",
+            table,
+            {"type": "table", "table_number": 1},
+        )
+        self.assertEqual(
+            [item["value"] for item in row["values"]],
+            ["47.87", "38.50", "56.54", "50.50"],
+        )
+        self.assertEqual(row["outer_group"], "GPT4o-mini")
+        filtered = filter_table_rows_by_entity(table, "Ours (CxtInt)")
+        self.assertIn("GPT4o-mini", filtered)
+
+    def test_normalize_for_match_repairs_spaced_pdf_decimal(self):
+        self.assertEqual(normalize_for_match("entropy (≥ 4 _._ 5)"), "entropy (≥ 4.5)")
 
     def test_structured_cell_lookup_supports_chinese_alias(self):
         cell = extract_table_cell(
@@ -1095,6 +1365,38 @@ class CoreTests(unittest.TestCase):
                 {"column": "Mean / Value", "value": "3,863 / 4,826"},
                 {"column": "Range / Definition", "value": "80.05%"},
             ],
+        )
+
+    def test_parallel_break_cells_keep_dataset_counts_aligned(self):
+        table = (
+            "|Task|Dataset|Samples|\n|---|---|---|\n"
+            "|Short-form QA|WTQ (citation)<br>HiTab (citation)|13,706<br>6,793|\n"
+            "|Fact Verification|TabFact (citation)|20,740|"
+        )
+        row = extract_table_row_values(
+            "Table 1 中 WTQ、HiTab 和 TabFact 的训练样本数分别是多少？",
+            table,
+            {"type": "table", "table_number": 1},
+        )
+        self.assertEqual(
+            [(item["row"], item["values"][-1]["value"]) for item in row["rows"]],
+            [("WTQ", "13,706"), ("HiTab", "6,793"), ("TabFact", "20,740")],
+        )
+
+    def test_table_caption_metric_note_follows_question(self):
+        metadata = {
+            "table_caption": "Table 4: Results measured by exact match."
+        }
+        self.assertEqual(
+            app._table_caption_metric_note(
+                metadata,
+                "Table 4 中使用 Qwen-2.5-72b 的 exact match 分数是多少？",
+            ),
+            "（表格指标：exact match）",
+        )
+        self.assertEqual(
+            app._table_caption_metric_note(metadata, "Table 4 中的 HeteQA 分数是多少？"),
+            "",
         )
 
     def test_structured_target_set_alias_resolves_table_row(self):
@@ -2865,6 +3167,139 @@ class RuntimeContractTests(unittest.TestCase):
         for term in ("efficiency", "tokens", "regeneration", "time", "cost"):
             self.assertIn(term, efficiency_terms)
         self.assertTrue(app._source_local_evidence_requested("效率代价是多少？"))
+        annotation_terms = app._section_query_terms(
+            "问题标注使用什么代理模型？每个表格集合生成多少个问题？"
+        )
+        for term in ("question annotation", "agent annotator", "table set", "generation"):
+            self.assertIn(term, annotation_terms)
+        statistics_terms = app._section_query_terms("四类问题的数量和占比分别是多少？")
+        for term in ("count", "percentage", "distribution"):
+            self.assertIn(term, statistics_terms)
+        self.assertTrue(app._source_local_evidence_requested("四类问题的数量和占比分别是多少？"))
+        self.assertIn("embedding", app._section_query_terms("PDF 的嵌入模型和索引是什么？"))
+        self.assertTrue(app._source_local_evidence_requested("实验如何量化不同设置的规模分布？"))
+        construction_terms = app._section_query_terms(
+            "如何构造多表集合，使用哪些来源或线索？"
+        )
+        for term in ("construction", "collection", "source", "cue", "metadata", "headers"):
+            self.assertIn(term, construction_terms)
+        revision_terms = app._section_query_terms(
+            "最终数据集如何由 Correct 和修订后的问题组成？"
+        )
+        for term in ("revised", "refined", "edit"):
+            self.assertIn(term, revision_terms)
+        subset_terms = app._section_query_terms(
+            "最终包含多少个数据子集、下游任务和实例？"
+        )
+        for term in ("data subsets", "downstream tasks", "instances"):
+            self.assertIn(term, subset_terms)
+        self.assertTrue(app._source_local_evidence_requested("修订后的数据集如何构成？"))
+        self.assertTrue(app._source_local_evidence_requested("数据子集和下游任务分别是什么？"))
+        option_terms = app._section_query_terms("每题有几个选项？")
+        for term in ("answer choices", "options", "choices"):
+            self.assertIn(term, option_terms)
+        self.assertTrue(app._source_local_evidence_requested("每题有几个选项？"))
+        quality_terms = app._section_query_terms("问题和答案如何生成与人工质检？")
+        for term in ("quality", "quality control", "experts", "kappa"):
+            self.assertIn(term, quality_terms)
+        self.assertTrue(app._source_local_evidence_requested("问题和答案如何生成与人工质检？"))
+
+    def test_multiple_dataset_rows_keep_qualifier_list_and_prompt_group(self):
+        content = """Table 2: Accuracy (%)
+|Prompting|Dataset|GPT-4|
+|---|---|---|
+|X→Y|MedQA-4|78.63|
+||Medbullets-5|60.71|
+||JAMA|67.32|
+|X→RY|MedQA-4|82.64|
+||Medbullets-5|63.31|
+||JAMA|67.13|"""
+        question = "Table 2 的零样本 X→Y 结果中，GPT-4 在 MedQA-4、Medbullets-5 和 JAMA 上的准确率分别是多少？"
+        self.assertEqual(
+            core._question_relation_qualifiers(question),
+            ["medqa-4", "medbullets-5", "jama"],
+        )
+        self.assertEqual(
+            core._table_question_section(question, content),
+            "column:x→y",
+        )
+        values = extract_table_row_values(question, content, {"table_number": 2})
+        self.assertEqual(
+            [(row["row"], row["values"][-1]["value"]) for row in values["rows"]],
+            [("MedQA-4", "78.63"), ("Medbullets-5", "60.71"), ("JAMA", "67.32")],
+        )
+
+    def test_horizontal_qualifiers_do_not_filter_dataset_rows(self):
+        content = """|Setting|Dataset|CMB|MMCU|CMB-Clin|
+|---|---|---|---|---|
+|TC-RAG|MMCU-Medical|80.1|78.2|76.4|"""
+        question = "TC-RAG 在 CMB、MMCU 和 CMB-Clin 上的主要评价指标分别是什么？"
+        values = extract_table_row_values(question, content, {"table_number": 2})
+        self.assertIsNotNone(values)
+        self.assertEqual(values["row"], "TC-RAG")
+
+    def test_source_local_aliases_cover_metrics_and_acceleration(self):
+        terms = app._section_query_terms(
+            "实验使用了哪些数据集和主要评价指标？两种加速策略是什么？"
+        )
+        for term in ("metrics", "accuracy", "acceleration", "speculative"):
+            self.assertIn(term, terms)
+        self.assertTrue(
+            app._source_local_evidence_requested(
+                "实验使用了哪些数据集和主要评价指标？两种加速策略是什么？"
+            )
+        )
+
+    def test_nested_table_labels_and_chinese_split_aliases_keep_requested_rows(self):
+        content = (
+            "|Domain|Task|# Questions|Metric|Modality|\n"
+            "|---|---|---|---|---|\n"
+            "||Biology Chart QA|199|Accuracy|Chart|\n"
+            "||OLED Property Extraction|13|Recall|Mol., Table|"
+        )
+        question = "Table 1 中 Biology Chart QA 和 OLED Property Extraction 各有多少道题？"
+        values = extract_table_row_values(question, content, {"table_number": 1})
+        self.assertEqual(
+            [(row["row"], row["values"][1]["value"]) for row in values["rows"]],
+            [("Biology Chart QA", "199"), ("OLED Property Extraction", "13")],
+        )
+
+        split_content = (
+            "| |BioASQ|ORKGSynthesis|\n"
+            "|---|---|---|\n"
+            "|LLMgen Train|51|234|\n"
+            "|LLMgen Test|22|105|\n"
+            "|LLMeval Test Set|2,376|11,340|"
+        )
+        split_question = (
+            "Table 2 中，BioASQ 和 ORKGSynthesis 的 LLMgen 训练/测试规模，"
+            "以及 LLMeval Test Set 规模分别是多少？"
+        )
+        split_values = extract_table_row_values(
+            split_question, split_content, {"table_number": 2}
+        )
+        self.assertEqual(
+            [(row["row"], row["values"][1]["value"]) for row in split_values["rows"]],
+            [("LLMgen Train", "234"), ("LLMgen Test", "105"), ("LLMeval Test Set", "11,340")],
+        )
+
+        metric_content = (
+            "|Host|Dopant|Td [°C] / Tg [°C] / ET [eV]|Von [V]|"
+            "max EQE [%] / CE [cd A−1] / PE [lm W−1]|"
+            "EQE [%] / CE [cd A−1] / PE [lm W−1]|CIE [x, y]|\n"
+            "|---|---|---|---|---|---|---|\n"
+            "|CDPO|5CzCN|455 / 89 / 2.84|4.9|13.2 / 31.6 / 18.1|– / – / –|(0.20, 0.38)|"
+        )
+        metric_question = (
+            "Table 5 中 CDPO 的 Td/Tg/ET、Von、最大 EQE/CE/PE 和 CIE (x,y) 分别是多少？"
+        )
+        metric_values = extract_table_row_values(
+            metric_question, metric_content, {"table_number": 5}
+        )
+        self.assertEqual(
+            [item["value"] for item in metric_values["values"]],
+            ["455 / 89 / 2.84", "4.9", "(0.20, 0.38)", "13.2 / 31.6 / 18.1"],
+        )
 
     def test_explicit_figure_query_keeps_same_page_explanatory_text(self):
         self.assertIsNone(

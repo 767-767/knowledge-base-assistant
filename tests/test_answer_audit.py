@@ -64,6 +64,26 @@ class AnswerAuditTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             audit_answers([self.case], [], require_all=True)
 
+    def test_audit_answers_reports_actual_context_coverage_separately(self):
+        report = audit_answers(
+            [self.case],
+            [
+                {
+                    "case_id": "drugr-09",
+                    "answer": "4,855 samples.",
+                    "contexts": [
+                        "The dataset contains 4,855 samples. DeepSeek-R1 proposes candidates."
+                    ],
+                }
+            ],
+            require_all=True,
+        )
+        row = report["results"][0]
+        self.assertEqual(row["answer_fact_status"], "partial")
+        self.assertEqual(row["context_fact_status"], "partial")
+        self.assertEqual(row["context_missing_facts"], ["0.6", "ADMETLab"])
+        self.assertEqual(report["summary"]["context_summary"]["fact_scored_cases"], 1)
+
     def test_jsonl_and_json_answer_inputs_are_supported(self):
         import json
         from evaluation.answer_audit import _load_answers, _load_cases
@@ -76,6 +96,21 @@ class AnswerAuditTests(unittest.TestCase):
             answers_path.write_text(json.dumps({"case_id": "drugr-09", "answer": "4,855"}) + "\n", encoding="utf-8")
             self.assertEqual(_load_cases(cases_path)[0]["case_id"], "drugr-09")
             self.assertEqual(_load_answers(answers_path)[0]["answer"], "4,855")
+
+    def test_repeated_generation_trace_rows_are_supported(self):
+        import json
+        from evaluation.answer_audit import _load_answers
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.jsonl"
+            path.write_text(
+                json.dumps({"case_id": "case-1", "repeat": 1, "answer": "a"})
+                + "\n"
+                + json.dumps({"case_id": "case-1", "repeat": 2, "answer": "b"})
+                + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(len(_load_answers(path)), 2)
 
     def test_benchmark_pointer_cases_are_resolved_before_answer_audit(self):
         from evaluation.answer_audit import _load_cases
