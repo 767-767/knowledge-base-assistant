@@ -20,6 +20,17 @@ from sci_rag_core import normalize_for_match, parse_markdown_table
 _COMPACT_PUNCTUATION_RE = re.compile(r"\s*([=,()<>≤≥*×^])\s*")
 _PARENTHETICAL_OPERATOR_RE = re.compile(r"\(\s*([<>≤≥=]\s*[^()]*)\s*\)")
 _FACT_TOKEN_RE = re.compile(r"[a-z0-9]+(?:[./-][a-z0-9]+)*", re.IGNORECASE)
+_DECIMAL_RE = re.compile(r"(?<![\w.])[+-]?\d+\.\d+(?![\w.])")
+
+
+def _trim_decimal_zeros(match: re.Match[str]) -> str:
+    value = match.group(0)
+    sign = ""
+    if value[:1] in {"+", "-"}:
+        sign, value = value[0], value[1:]
+    integer, fraction = value.split(".", 1)
+    fraction = fraction.rstrip("0")
+    return f"{sign}{integer}{('.' + fraction) if fraction else ''}"
 
 
 def _normalized_forms(value: Any) -> set[str]:
@@ -33,6 +44,7 @@ def _normalized_forms(value: Any) -> set[str]:
             continue
         form = re.sub(r"\s+", " ", form)
         forms.add(form)
+        forms.add(_DECIMAL_RE.sub(_trim_decimal_zeros, form))
         forms.add(_COMPACT_PUNCTUATION_RE.sub(r"\1", form))
         forms.add(re.sub(r"(?<=\d),(?=\d)", "", form))
         # PDF prose often wraps a threshold in parentheses while the
@@ -117,6 +129,17 @@ def _contains_ordered_fact_tokens(text: str, surface: str) -> bool:
     return True
 
 
+def _row_label_variants(cells: list[str], value_index: int) -> list[str]:
+    """Return row identifiers without discarding numeric/composite labels."""
+
+    variants: list[str] = []
+    for end in range(1, min(value_index, len(cells) - 1) + 1):
+        prefix = " ".join(cell for cell in cells[:end] if cell).strip()
+        if prefix and prefix not in variants:
+            variants.append(prefix)
+    return variants
+
+
 def _table_fact_present(fact: str, aliases: Iterable[str], context: str) -> bool:
     """Match facts expressed as a table row/column/value relationship."""
 
@@ -129,12 +152,6 @@ def _table_fact_present(fact: str, aliases: Iterable[str], context: str) -> bool
         surfaces.update(_normalized_forms(value))
     for row in rows:
         cells = [normalize_for_match(cell) for cell in row]
-        labels = [
-            cell
-            for cell in cells
-            if cell and not re.search(r"[0-9]", cell)
-        ]
-        row_label = labels[0] if labels else ""
         for index, value in enumerate(cells):
             if not value:
                 continue
@@ -143,22 +160,24 @@ def _table_fact_present(fact: str, aliases: Iterable[str], context: str) -> bool
                 continue
             header_variants = {header}
             header_variants.add(re.sub(r"\btable\b", "tables", header))
-            for header_variant in header_variants:
-                combinations = (
-                    f"{value} {row_label}",
-                    f"{value} {row_label} {header_variant}",
-                    f"{row_label} {value} {header_variant}",
-                    f"{header_variant} {row_label} {value}",
-                    f"{header_variant} {value} {row_label}",
-                )
-                if any(
-                    _contains_ordered_fact_tokens(
-                        normalize_for_match(candidate), surface
+            for row_label in _row_label_variants(cells, index):
+                for header_variant in header_variants:
+                    combinations = (
+                        f"{value} {row_label}",
+                        f"{value} {row_label} {header_variant}",
+                        f"{row_label} {value} {header_variant}",
+                        f"{row_label} {header_variant} {value}",
+                        f"{header_variant} {row_label} {value}",
+                        f"{header_variant} {value} {row_label}",
                     )
-                    for candidate in combinations
-                    for surface in surfaces
-                ):
-                    return True
+                    if any(
+                        _contains_ordered_fact_tokens(
+                            normalize_for_match(candidate), surface
+                        )
+                        for candidate in combinations
+                        for surface in surfaces
+                    ):
+                        return True
     return False
 
 

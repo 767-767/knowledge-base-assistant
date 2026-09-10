@@ -1465,6 +1465,65 @@ def _find_pdf(filename: str, papers_dirs: list[Path]) -> Path:
     raise FileNotFoundError(f"找不到论文文件：{searched}")
 
 
+_MANIFEST_RUNNER_CONFIG_KEYS = (
+    "embedding_model",
+    "retrieval_mode",
+    "hybrid_rrf_k",
+    "context_k",
+    "document_routing",
+    "query_decomposition",
+    "parent_window",
+    "spatial_figure_evidence",
+    "formula_evidence",
+    "structured_table_guard",
+    "limitation_evidence",
+    "adjacent_context",
+    "section_expansion",
+    "reranker_model",
+    "vision_enabled",
+)
+
+
+def _manifest_release_candidate_config(manifest_path: str | Path) -> dict[str, Any] | None:
+    path = Path(manifest_path).resolve()
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"无法读取 release-candidate 配置：{path}: {exc}") from exc
+    config = manifest.get("release_candidate_config")
+    if config is None:
+        return None
+    if not isinstance(config, dict):
+        raise ValueError("manifest.release_candidate_config 必须是对象")
+    return dict(config)
+
+
+def validate_release_candidate_config(
+    manifest_config: dict[str, Any] | None,
+    actual_config: dict[str, Any],
+) -> None:
+    """Reject benchmark runner drift before loading models or parsing PDFs."""
+
+    if manifest_config is None:
+        raise ValueError("manifest 缺少 release_candidate_config，不能启用严格配置校验")
+    missing = sorted(set(_MANIFEST_RUNNER_CONFIG_KEYS) - set(manifest_config))
+    if missing:
+        raise ValueError(
+            "release_candidate_config 缺少 runner 控制项：" + ", ".join(missing)
+        )
+    mismatches = {
+        key: (manifest_config[key], actual_config.get(key))
+        for key in _MANIFEST_RUNNER_CONFIG_KEYS
+        if manifest_config[key] != actual_config.get(key)
+    }
+    if mismatches:
+        details = "; ".join(
+            f"{key}: manifest={expected!r}, actual={actual!r}"
+            for key, (expected, actual) in mismatches.items()
+        )
+        raise ValueError(f"runner 与 manifest 配置不一致：{details}")
+
+
 def run_diagnostic(
     manifest_path: str | Path,
     papers_dirs: Iterable[str | Path],
@@ -1490,6 +1549,7 @@ def run_diagnostic(
     parent_window: bool = False,
     document_routing: bool = False,
     query_decomposition: bool = False,
+    enforce_manifest_config: bool = False,
 ) -> dict[str, Any]:
     directories = [Path(directory).resolve() for directory in papers_dirs]
     if not directories:
@@ -1502,6 +1562,26 @@ def run_diagnostic(
     normalized_k = sorted({max(1, int(value)) for value in top_k_values})
     if not normalized_k:
         raise ValueError("至少需要一个 top-k")
+    manifest_config = _manifest_release_candidate_config(manifest_path)
+    actual_config = {
+        "embedding_model": dense_model_name,
+        "retrieval_mode": retriever,
+        "hybrid_rrf_k": rrf_k,
+        "context_k": max(normalized_k),
+        "document_routing": bool(document_routing),
+        "query_decomposition": bool(query_decomposition),
+        "parent_window": bool(parent_window),
+        "spatial_figure_evidence": bool(spatial_figure_evidence),
+        "formula_evidence": bool(formula_evidence),
+        "structured_table_guard": bool(structured_table_guard),
+        "limitation_evidence": bool(limitation_evidence),
+        "adjacent_context": bool(adjacent_context),
+        "section_expansion": bool(section_expansion),
+        "reranker_model": reranker_model,
+        "vision_enabled": False,
+    }
+    if enforce_manifest_config:
+        validate_release_candidate_config(manifest_config, actual_config)
     if reranker_model and retriever != "hybrid":
         raise ValueError("cross-encoder 实验必须基于 --retriever hybrid")
     if reranker_candidate_k < max(normalized_k):
@@ -1635,6 +1715,8 @@ def run_diagnostic(
             else None
         ),
         "manifest": str(Path(manifest_path).resolve()),
+        "manifest_release_candidate_config": manifest_config,
+        "manifest_config_enforced": bool(enforce_manifest_config),
         "top_k": normalized_k,
         "documents": documents,
         "overall": global_result["aggregate"],
@@ -1880,6 +1962,11 @@ def main() -> int:
         help="对复合问题启用有界子查询 RRF 对照；原问题始终保留，默认关闭",
     )
     parser.add_argument(
+        "--enforce-manifest-config",
+        action="store_true",
+        help="执行前严格校验 release_candidate_config 与本次 runner 参数一致",
+    )
+    parser.add_argument(
         "--show-failures",
         action="store_true",
         help="打印最大 top-k 下所有未完整覆盖用例及遗漏事实",
@@ -1914,6 +2001,7 @@ def main() -> int:
             parent_window=args.parent_window,
             document_routing=args.document_routing,
             query_decomposition=args.query_decomposition,
+            enforce_manifest_config=args.enforce_manifest_config,
         )
     except (ValueError, FileNotFoundError, OSError, RuntimeError) as exc:
         print(f"❌ 基线诊断失败：{exc}", file=sys.stderr)

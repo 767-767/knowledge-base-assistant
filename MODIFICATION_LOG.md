@@ -797,3 +797,113 @@
 - 在仓库外隔离库 `/private/tmp/scirag_phaseH10_parserfix_m060cn06` 上完成 H10 12 题单轮 DeepSeek 生成，`12/12` 调用成功、无 API 错误；trace 位于 `/private/tmp/scirag_phaseH10_answers_20260908.jsonl`，SHA-256=`935ae355f9c58194aab24f0208cb5dc54b944a1528cb2fe9d2abb8b4fc0d1e07`。
 - 人工对照 PDF、gold 和实际 contexts：`10 correct / 1 partial / 1 incorrect`。partial 为 SCITAT 四类 reasoning type 漏列三个总类；incorrect 为 RealHiTBench Table 2 的模型/行列定位错误。逐题记录见 `evaluation/benchmark/reviews_phaseH10_generation_v1.jsonl`。
 - 该结果达到“单轮至少 10/12 正确且 incorrect 不超过 1”的开发回归门槛，但 H10 已参与修复，仍不构成未见泛化证据；H10 保持 `development-regression`，不切换线上默认检索。
+
+### 2026-09-08：H10 RealHiTBench 表格行列定位修复
+
+- 修复共享 Markdown 表格解析与查询路径：稀疏分组行不再误判为叶表头，拆分的 `Numerical Reasoning` 表头可正确合并；同一行的模型与 `Input/Modality/Mode` 限定词不再互相误选，并在请求单一 `F1` 指标时过滤 sibling metric 列。
+- 新增 H10 风格回归测试；直接解析外部 RealHiTBench PDF Table 2 可稳定返回 `GPT4o(TreeThinker)` 的 `Image+Text` 行及 `73.32/64.28/77.42` 三个 F1 值。
+- 全量离线 unittest `270/270`、`py_compile`、`git diff --check`、benchmark manifest 校验和 Gradio Blocks 构建冒烟通过；仅有 Gradio `theme` 参数迁移 warning。
+- H10 继续标为 `development-regression`；未调用新 API、未修改项目 `chroma_db`、未切换线上默认，也未开始 H11。
+
+### 2026-09-08：Phase H11 新论文确认集首轮门禁
+
+- 按冻结口径新增两篇此前未进入任何基准或修复的公开论文：IRPAPERS（arXiv:2602.17687，24 页）和 PDF Retrieval Augmented Question Answering（arXiv:2506.18027，14 页）。PDF 保存在仓库外 `/Users/qinleqi/Desktop/sci-rag-benchmark-papers/`，SHA-256 已写入 `evaluation/benchmark/manifest_phaseH11_unseen.json`。
+- 新增 12 道 H11 用例（每篇 6 题），覆盖数据集统计、检索对照、宽表、多模态 PDF 管线和结果表；冻结前通过 `validate_benchmark.py --verify-files --require-complete`。
+- 首轮隔离 Hybrid（文档路由、查询分解、结构化表格/公式/限制/图形证据保护、parent-window）目标文档/来源页/表号均为 `12/12`；但 @50 required-fact 仅 `4/12 full`，macro/micro=`0.350/0.300`，失败集中在宽表和表格字段覆盖。诊断 JSON 仅保存于仓库外 `/private/tmp/scirag_phaseH11_retrieval_20260908.json`。
+- 根因分析发现事实审计遗漏“行标签+列头+值”顺序；在 `evaluation/context_coverage.py` 增加一条通用组合并补充回归测试，全量离线 unittest 为 `271/271`。同一配置重跑后 H11 @50 提升至 `5/12` 完整、macro/micro=`0.517/0.457`，但仍有 7/12 题不完整，未达到确认门槛；结果保存于 `/private/tmp/scirag_phaseH11_retrieval_fix1_20260908.json`。
+- 按冻结协议 H11 保持 `development-regression`；不在 H11 上继续调参、不调用 DeepSeek 生成、不修改项目 `chroma_db`。下一步另建 H12 未见确认集。
+
+### 2026-09-09：H11 事实审计有效性修复与复测
+
+- 修复 `evaluation/context_coverage.py` 的通用 Markdown 表格事实匹配：不再丢弃含数字的行标签，并按当前值之前的单元格前缀匹配复合行标识；同时将等价的小数尾零（例如 `0.1910` 与 PDF 提取的 `0.191`）纳入可审计形式。
+- 新增数字模型名、参数化行、多级模型行和小数精度差异的回归测试；全量离线 unittest `275/275`，`py_compile` 与 `git diff --check` 通过。
+- 使用与 H11 首轮完全相同的 Hybrid、路由、查询分解、结构化表格/公式/限制/图形证据保护和 parent-window 配置重跑：@50 目标文档、来源页、表号和路由均为 `12/12`；required-fact `11/12 full`，macro/micro=`0.933/0.943`，7/7 表格题全部完整，唯一缺口为 PIER-QA 多步骤 pipeline 证据题。
+- 结果保存于仓库外 `/private/tmp/scirag_phaseH11_retrieval_fix3_20260909.json`。H11 继续标记为 `development-regression`；不在该集合上继续调参或调用 DeepSeek，下一步进入回归检查点和新的 H12 未见确认集设计。
+
+### 2026-09-09：Phase H12 未见集冻结与首轮诊断
+
+- 新增两篇此前未出现在任何基准清单的公开论文：T²-RAGBench（arXiv:2506.12071，27 页）和 mmRAG（arXiv:2505.11180，19 页），PDF 保存在仓库外论文目录，SHA-256 已写入 `evaluation/benchmark/manifest_phaseH12_unseen.json`。
+- 新增 12 道冻结用例（每篇 6 题），覆盖数据统计、表格行列值、检索配置、标注协议和评估设置；冻结前通过 `validate_benchmark.py --verify-files --require-complete`，未运行 H12 检索或生成诊断。
+- 使用与 H11 相同的 Hybrid、路由、查询分解、结构化表格/公式/限制/图形证据保护和 parent-window 配置完成首轮隔离检索：@50 目标文档、来源页、表号均为 `12/12`，但 required-fact `7/12 full`，macro/micro=`0.764/0.763`，full/partial/zero=`0.583/0.333/0.083`。
+- 失败集中在表格行标签/列值和自然语言事实顺序的表面对齐，另有一处 pipeline 证据排名问题；结果保存于仓库外 `/private/tmp/scirag_phaseH12_retrieval_v1_20260909.json`。按冻结协议 H12 已改标为 `development-regression`，不在该集合上调参、改题或调用 DeepSeek。
+
+### 2026-09-09：新增 PDF 解析证据前置门禁
+
+- `evaluation/validate_benchmark.py` 新增 `--verify-extracted-evidence`：按每道题的 `source_pages` 加载真实 PDF 解析输出，并用同一事实审计器检查 required facts；缺失时在检索前失败。
+- 新增两条门禁单元测试；全量离线 unittest `277/277` 通过。
+- 对 H12 回放该门禁时，6 道题在检索前暴露实际解析表面与 gold fact 不一致，验证了 H12 的失败主要混入了标注/审计对齐问题；H12 不重写、不调参，保留为开发回归。
+
+### 2026-09-09：Phase H13 解析门禁通过与一次性检索验收
+
+- 新增两篇此前未进入任何基准或修复的公开论文：BRIGHT（arXiv:2407.12883，51 页）和 G-Retriever（arXiv:2402.07630，23 页），共 12 道表格事实题；真实 PDF 解析证据前置门禁全部通过后，manifest 冻结为 `frozen-unseen`。
+- 使用与 H11/H12 相同的 Hybrid、文档路由、查询分解、结构化表格/公式/限制/图形证据保护和 parent-window 配置完成一次性隔离检索：@10、@50 均为目标文档/来源页/表号 `12/12`，required-fact macro/micro=`1.000/1.000`，`12/12 full`，无 partial/zero，路由 `12/12` 正确。
+- H13 不再修改题目、解析器或检索参数；结果仅证明当前检索证据链在该未见集上通过，不自动扩展到生成语义正确率。诊断 JSON 保存在仓库外 `/private/tmp/scirag_phaseH13_retrieval_v1_20260909.json`；未调用 DeepSeek、未写项目 `chroma_db`、未提交或推送。
+
+### 2026-09-09：Phase H13 单轮生成闸门
+
+- 在仓库外隔离库 `/private/tmp/scirag_phaseH13_db_20260909`（420 块）上完成 H13 单轮生成；最初 11/12 成功，唯一失败为 `bright-h13-05` 网络连接错误，联网环境下仅补跑该 case 后达到 `12/12` 成功。
+- 生成 trace 位于 `/private/tmp/scirag_phaseH13_answers_20260909.jsonl`，SHA-256=`f91250551eb55905f6f32df43aee3d745cdceb68ed94d332e66fd104c44464aa`；provenance 完整 `12/12`，配置和上下文稳定，无重复 case。
+- 独立人工复核为 `10 correct / 2 partial / 0 incorrect`，达到预设生成闸门（至少 10 correct 且 incorrect 不超过 1）。partial 为 BRIGHT Table 2 一题遗漏两个请求值，以及 G-Retriever Table 11 一题遗漏 KAPING 值；未出现错误答案。逐题记录见 `evaluation/benchmark/reviews_phaseH13_generation_v1.jsonl`。
+- H13 的生成语义结果达到开发闸门，但不单独宣称未见泛化；本步未修改项目 `chroma_db`，未提交或推送。
+
+### 2026-09-09：H13 真实送模上下文差异归类
+
+- 对 H13 生成 trace 的真实 `contexts` 做独立审计后，发现 `gretriever-h13-05` 只送入了 G-Retriever=70.49 的 Table 11 行，缺少题目要求的 KAPING=60.81；因此实际送模上下文是 `11/12 full`，macro/micro=`0.9583/0.9688`。
+- 该差异没有触发题目或检索参数修改；按冻结协议，H13 manifest 已从 `frozen-unseen` 改为 `development-regression`。离线原始检索 12/12 与真实应用路径不一致，下一步只做一次通用根因分析，暂不继续生成或调参。
+
+### 2026-09-09：表格行实体引用标记的通用修复
+
+- 根因是表格行实体识别只接受 `实体名(...)`，无法识别 `KAPING [1] (top-k triple retrieval)` 这类“实体名 + 引用 + 括号说明”；真实 `query_knowledge` 因此只返回 G-Retriever 行。
+- 将括号说明前的引用标记改为可选通用语法，并新增回归测试；在 H13 隔离库同一路径复测已同时返回 KAPING=60.81 与 G-Retriever=70.49。
+- 全量离线 unittest `278/278`、`py_compile` 和 `git diff --check` 已通过；H13 继续保留为 `development-regression`，不因该修复重新宣称未见泛化，也不立即重跑生成。
+
+### 2026-09-09：新增真实送模上下文门禁
+
+- 新增 `evaluation/app_context_gate.py`：连接已构建的隔离 Chroma，以本地假客户端运行真实 `app.query_knowledge` 路径，并使用同一 required-fact 审计器检查最终 `contexts`；不会调用 DeepSeek。
+- 新增最小缺失行回归测试和 README 命令。H13 修复后的隔离库门禁为 `12/12 full`、fact micro=`1.0000`，完整报告位于仓库外 `/private/tmp/scirag_phaseH13_app_context_gate_fix1_20260909.json`。
+- 新的固定顺序为 PDF 解析门禁 → 检索诊断 → 真实送模上下文门禁 → 单轮生成 → 人工复核；任何前置门禁失败即停止，不消费生成 API。全量离线 unittest `279/279`、`py_compile` 和 `git diff --check` 通过。
+
+### 2026-09-09：Phase H14 完整门禁与回答验收
+
+- 新增此前未进入任何 manifest 的 BERGEN（Findings of EMNLP 2024，24 页）和 Benchmarking Retrieval-Augmented Generation for Medicine / MIRAGE（Findings of ACL 2024，19 页）；官方 PDF 保存在仓库外论文目录，SHA-256 已写入 H14 manifest。
+- 12 道 H14 表格题在冻结前通过真实 PDF 解析证据门禁；冻结后的首轮 Hybrid 检索 @10/@50 均为目标文档、来源页、表号和 required-fact `12/12`，路由 `12/12` 正确。诊断保存于 `/private/tmp/scirag_phaseH14_retrieval_v1_20260909.json`。
+- 在 257 块隔离 Chroma 上运行真实送模上下文门禁，`12/12 full`、fact micro=`1.0000`；报告位于 `/private/tmp/scirag_phaseH14_app_context_gate_v1_20260909.json`。
+- 首次应用回答 trace 为 `12/12` 成功、provenance 完整；所有题均由确定性结构化表格路径直接回答，因此未实际调用 DeepSeek。人工复核为 `7 correct / 5 partial / 0 incorrect`，未达到至少 10 correct 的门槛；partial 均为多行或多列请求被裁剪。
+- H14 已改标为 `development-regression`，不修改冻结题目、不在本轮修复或重跑。trace 位于 `/private/tmp/scirag_phaseH14_answers_v1_20260909.jsonl`，SHA-256=`cec3db7603c4ae84fb1685257a0261d3afbb574cca0488c5ef17d963f96f96fe`；逐题记录见 `evaluation/benchmark/reviews_phaseH14_generation_v1.jsonl`。
+- 只读归因将 5 个 partial 收敛为两类共享缺口：`LoRa_r_`、`PubMedQA*`/`BioASQ-Y/N` 等带装饰符行标签的多行匹配，以及中文“原始文档数/平均长度/是否开源”到 `#Doc./Avg. L/Open` 的列意图映射。后续只允许各做一个通用修复和最小回归，不在 H14 上调参。
+
+### 2026-09-09：H14 多行/多列表格回答通用修复
+
+- 表格实体规范化现在将字母数字之间的 PDF/Markdown 下划线保留为词边界，使 `LoRa_r_` 可与问题中的 `LoRA r` 匹配；多行提取不再把已经选中的 Dataset 行实体重复当作全局数据集筛选条件。
+- 通用列别名增加中文“原始文档数/文档数”“平均长度”“是否开源/开源”到 `#Doc.`、`Avg. L`、`Open` 的映射；没有加入 BERGEN/MIRAGE 专用规则。
+- 复用原 257 块隔离库运行真实送模上下文门禁仍为 `12/12 full`、fact micro=`1.0000`；随后单轮确定性表格回答及离线答案审计为 `12/12 full`，答案与 contexts 的 fact macro/micro 均为 `1.0000/1.0000`。回答 trace SHA-256=`2d95c4279edd5ba49b19764c82f19159957308b279927f6d65268f3c423f6243`。
+- H14 继续保持 `development-regression`，不恢复未见集身份；本轮未实际调用 DeepSeek、未修改项目 `chroma_db`、未提交或推送。
+
+### 2026-09-10：Phase H15 最终一次性留出集冻结
+
+- 从 ACL Anthology 官方来源选取此前未进入任何 manifest 的 RAGTruth（17 页）、MedExQA（15 页）和 M-LongDoc（18 页）；PDF 仅保存在仓库外论文目录，页数、SHA-256、文字层及关键表格/公式页面已核对。
+- 新增 `manifest_phaseH15_unseen.json` / `cases_phaseH15_unseen.jsonl`，共 18 道题（每篇 6 题）；冻结前真实 PDF 解析证据门禁为 `18/18 full`，随后清单改标为 `frozen-unseen`。
+- release-candidate 配置固定为 Hybrid、`retrieval_k=12`、`context_k=10`、文档路由、查询分解、parent-window、表格/公式/空间 Figure 证据，不使用 reranker 或视觉模型；这不改变产品 Dense 默认值。
+- 停止规则固定为：门禁通过即结束本轮开发周期；任一门禁失败则记录边界并进入 backlog，不针对 H15 修复、不立即建立 H16，除非同一失败在至少两篇无关论文上复现。本步未运行 H15 检索、真实送模上下文或生成，未修改解析器、项目 Chroma，也未提交或推送。
+
+### 2026-09-10：H15 一次性检索门禁停止
+
+- 在仓库外 `/private/tmp/scirag_phaseH15_db.kTMhzy` 用冻结配置重建 3 篇 PDF 的独立 Chroma，共 297 块；首次模型加载的联网探测已中止，随后使用 `HF_HUB_OFFLINE=1` 从本地缓存成功完成索引。
+- 按固定 Hybrid、`@10`、文档路由、查询分解、结构化表格/限制/公式/空间 Figure 证据和 parent-window 配置完成一次性检索；目标文档命中 `18/18`，路由正确 `17/17`，但 required-fact 为 `14/18 full`、macro/micro=`0.831/0.843`，缺口为 `ragtruth-h15-01`、`ragtruth-h15-03`、`medexqa-h15-06`、`mlongdoc-h15-02`。
+- 诊断报告位于仓库外 `/private/tmp/scirag_phaseH15_retrieval_20260910.json`。按 H15 停止规则，本轮不进入真实送模上下文或生成，不修改 H15 清单、解析器或检索参数；4 个缺口进入 backlog，未提交或推送。
+
+### 2026-09-10：H15 缺口跨阶段收束审计
+
+- 只读对照 H7、H11、H12 的历史失败报告：虽然“多事实题在有限 top-k 下覆盖不足”是共同表象，但 H15 的 RAGTruth 标注协议、M-LongDoc 训练语料/证据页和 MedExQA 限制未来工作分别属于不同证据形态；历史缺口也分别涉及流程块、统计表和表格/公式。
+- 当前没有足够证据把它们归因到同一个可安全共享的解析器或检索根因，因此不启动共享修复，不重跑 H15，不建立 H16；H15 保持冻结留出结果并继续作为 backlog 边界样本。未提交或推送。
+
+### 2026-09-10：评测 runner 配置契约硬化
+
+- `evaluation/benchmark_retrieval.py` 新增严格的 `release_candidate_config` 校验和 `--enforce-manifest-config`；它会在加载 embedding 模型和解析 PDF 前拒绝缺少 runner 控制项或 CLI/manifest 漂移，并在 JSON 报告记录 manifest 配置及是否强制校验。
+- 新增两条配置契约回归测试，针对性 benchmark retrieval 测试 `47/47`、`py_compile` 和 `git diff --check` 通过。H15 历史诊断未重跑；其 manifest 缺少新增的 runner-only 控制项，继续按原始报告解释。
+- 本步未修改产品默认 Dense 配置、未修改冻结 H15 清单、未调用生成 API、未提交或推送。
+
+### 2026-09-10：历史清单稳定性检查点
+
+- 使用当前 `validate_benchmark.py --verify-files --verify-extracted-evidence --require-complete` 复核 H11–H15：H13、H14、H15 全部通过；H11/H12 按历史已知问题分别暴露旧 required facts 与当前 PDF 解析表面的不一致。
+- H11/H12 继续保持 `development-regression`，不重写旧题、不为历史门禁失败追加解析器特例；今后只有新清单在冻结前通过真实 PDF 证据门禁，才进入一次性检索。

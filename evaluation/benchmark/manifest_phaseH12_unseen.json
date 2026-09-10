@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-phaseH12-unseen-v1",
+  "description": "Two open-access RAG benchmark papers not present in earlier benchmark manifests, frozen before retrieval diagnostics.",
+  "status": "development-regression",
+  "freeze_date": "2026-09-09",
+  "reclassification_date": "2026-09-09",
+  "reclassification_reason": "The first frozen Hybrid diagnostic hit both target documents, all marked pages, and all explicit table numbers, but only 7/12 cases had complete required-fact coverage at @50 (macro 0.764, micro 0.763). Several failures are surface-order mismatches between extracted PDF evidence and the frozen fact strings, so this set is retained as a development regression rather than a confirmation set.",
+  "freeze_policy": "Freeze documents, hashes, cases, gold facts, and retrieval configuration before any H12 retrieval or generation diagnostic. Any implementation or prompt change motivated by H12 reclassifies this set as development-regression.",
+  "minimum_documents": 2,
+  "cases_path": "cases_phaseH12_unseen.jsonl",
+  "documents": [
+    {
+      "document_id": "t2-ragbench-arxiv-2506-12071",
+      "filename": "2025.arxiv.2506.12071.pdf",
+      "sha256": "c4a636e767bf03fd6d8d226fca13320a020f538ab390337a72b6f7f276a7c475",
+      "title": "T²-RAGBench: Text-and-Table Benchmark for Evaluating Retrieval-Augmented Generation",
+      "venue": "arXiv preprint",
+      "year": 2025,
+      "pages": 27,
+      "domain": "text-and-table retrieval augmented generation",
+      "layout_tags": ["two-column", "tables", "figures", "finance", "retrieval", "appendix"],
+      "source_url": "https://arxiv.org/abs/2506.12071",
+      "pdf_url": "https://arxiv.org/pdf/2506.12071",
+      "access": "free arXiv PDF",
+      "status": "frozen-unseen"
+    },
+    {
+      "document_id": "mmrag-arxiv-2505-11180",
+      "filename": "2025.arxiv.2505.11180.pdf",
+      "sha256": "5fd54f6ae7ba1f8195ac4c2d58817ded056fa26e572b8359485e7d8060b191be",
+      "title": "mmRAG: A Modular Benchmark for Retrieval-Augmented Generation over Text, Tables, and Knowledge Graphs",
+      "venue": "arXiv preprint",
+      "year": 2025,
+      "pages": 19,
+      "domain": "multimodal and modular retrieval augmented generation",
+      "layout_tags": ["two-column", "tables", "text", "tables", "knowledge-graphs", "retrieval"],
+      "source_url": "https://arxiv.org/abs/2505.11180",
+      "pdf_url": "https://arxiv.org/pdf/2505.11180",
+      "access": "free arXiv PDF",
+      "status": "frozen-unseen"
+    }
+  ]
+}

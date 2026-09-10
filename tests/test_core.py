@@ -1310,6 +1310,90 @@ class CoreTests(unittest.TestCase):
             ["47.87", "38.50"],
         )
 
+    def test_row_label_with_citation_before_parenthetical_is_selectable(self):
+        table = (
+            "|Method|Retrieval Accuracy|\n|---|---|\n"
+            "|KAPING [1] (top-k triple retrieval)|60.81|\n"
+            "|_G-Retriever_|70.49|"
+        )
+        row = extract_table_row_values(
+            "G-Retriever Table 11 中 KAPING 和 G-Retriever 的 retrieval accuracy 分别是多少？",
+            table,
+            {"type": "table", "table_number": 11},
+        )
+        self.assertEqual(
+            [(item["row"], item["values"][0]["value"]) for item in row["rows"]],
+            [
+                ("KAPING [1] (top-k triple retrieval)", "60.81"),
+                ("G-Retriever", "70.49"),
+            ],
+        )
+
+    def test_markdown_underscores_inside_row_labels_keep_word_boundaries(self):
+        table = (
+            "|Hyperparameter|Assignment|\n|---|---|\n"
+            "|learning Rate|1e-4|\n|warmup ratio|0.05|\n"
+            "|LoRa alpha|64|\n|LoRa_r_|32|"
+        )
+        row = extract_table_row_values(
+            "Table 8 中 learning rate、warmup ratio、LoRA alpha 和 LoRA r 分别设置为多少？",
+            table,
+            {"type": "table", "table_number": 8},
+        )
+        self.assertEqual(
+            [(item["row"], item["values"][0]["value"]) for item in row["rows"]],
+            [
+                ("learning Rate", "1e-4"),
+                ("warmup ratio", "0.05"),
+                ("LoRa alpha", "64"),
+                ("LoRa r", "32"),
+            ],
+        )
+
+    def test_dataset_row_entities_are_not_reused_as_row_filters(self):
+        table = (
+            "|Dataset|Size|#O.|Avg. L|\n|---|---|---|---|\n"
+            "|PubMedQA|500|3|211|\n|BioASQ-Y/N|618|2|36|"
+        )
+        row = extract_table_row_values(
+            "Table 2 中 PubMedQA 和 BioASQ-Y/N 的数据集大小分别是多少？",
+            table,
+            {"type": "table", "table_number": 2},
+        )
+        self.assertEqual(
+            [(item["row"], item["values"][0]["value"]) for item in row["rows"]],
+            [("PubMedQA", "500"), ("BioASQ-Y/N", "618")],
+        )
+
+    def test_chinese_table_column_aliases_select_document_length_and_open(self):
+        corpus = (
+            "|Corpus|#Doc.|#Snippets|Avg. L|Domain|\n|---|---|---|---|---|\n"
+            "|MedCorp|30.4M|54.2M|221|Medical|"
+        )
+        row = extract_table_row_values(
+            "Table 3 中 MedCorp 的原始文档数、snippets 数和平均长度分别是多少？",
+            corpus,
+            {"type": "table", "table_number": 3},
+        )
+        self.assertEqual(
+            [(item["column"], item["value"]) for item in row["values"]],
+            [("#Doc.", "30.4M"), ("#Snippets", "54.2M"), ("Avg. L", "221")],
+        )
+
+        llms = (
+            "|LLM|Size|Context|Open|Domain|\n|---|---|---|---|---|\n"
+            "|GPT-4|?|32,768|No|General|\n|Mixtral|?|32,768|Yes|General|"
+        )
+        row = extract_table_row_values(
+            "Table 5 中 GPT-4 和 Mixtral 的 context length 及是否开源分别是什么？",
+            llms,
+            {"type": "table", "table_number": 5},
+        )
+        self.assertEqual(
+            [[item["value"] for item in entry["values"]] for entry in row["rows"]],
+            [["32,768", "No"], ["32,768", "Yes"]],
+        )
+
     def test_multilevel_table_header_row_is_not_an_entity(self):
         table = (
             "|LLMs|Methods|MuS|iQue|2W|iki|\n|---|---|---|---|---|---|\n"
@@ -1472,6 +1556,36 @@ class CoreTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row["row"], "FigEx-7B")
         self.assertEqual([item["value"] for item in row["values"]], ["0.72", "0.81"])
+
+    def test_table_lookup_keeps_model_when_input_qualifier_shares_row(self):
+        markdown = (
+            "Table 2: RealHiTBench results\n\n"
+            "|**Model**|**Input**|**Fact C**|**hecking**|**Numerical**|**Reasoning**|"
+            "**Structure Co**|**mprehendin**|**g**<br>**Data A**|**nalysis**|"
+            "**Chart G**|**eneration**|\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+            "|||EM|F1|EM|F1|EM|F1|GPT-EVAL|ROUGE|PASS@1|ECR|\n"
+            "|||||**Table-**|**oriented Mod**|**els**||||||\n"
+            "|**GPT4o(TreeThinker)**|Text|64.50|72.41|53.34|65.08|64.40|75.67|"
+            "77.26|37.63|39.47|67.76|\n"
+            "|**GPT4o(TreeThinker)**|Image|44.13|52.41|40.57|49.35|49.21|58.32|"
+            "70.83|34.44|19.61|67.32|\n"
+            "|**GPT4o(TreeThinker)**|Image+Text|65.82|73.32|55.60|64.28|"
+            "66.31|77.42|79.45|37.08|33.55|65.13|"
+        )
+        tables, _body = extract_tables(markdown, "realhitbench.pdf")
+        headers, _rows = parse_markdown_table(tables[0].page_content)
+        self.assertIn("Numerical Reasoning F1", headers)
+        self.assertNotIn("Table-oriented Models", headers)
+        question = (
+            "RealHiTBench Table 2 中 GPT4o(TreeThinker) 的 Image+Text 输入在 "
+            "Fact Checking、Numerical Reasoning 和 Structure Comprehending 三项的 F1 分数分别是多少？"
+        )
+        row = extract_table_row_values(question, tables[0].page_content, tables[0].metadata)
+        self.assertEqual(row["row"], "GPT4o(TreeThinker)")
+        self.assertEqual(
+            [item["value"] for item in row["values"]], ["73.32", "64.28", "77.42"]
+        )
 
     def test_table_lookup_returns_named_rows_and_setting_groups(self):
         question = (

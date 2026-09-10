@@ -67,6 +67,49 @@ class ContextCoverageTests(unittest.TestCase):
         self.assertTrue(fact_is_present("Table 542", [context]))
         self.assertFalse(fact_is_present("340 free-form answers", [context]))
 
+    def test_markdown_table_facts_match_row_header_value_order(self):
+        context = """|Retriever|Recall@1|Recall@5|
+|---|---|---|
+|ColModernVBERT|43%|78%|
+|ColPali|45%|79%|"""
+        self.assertTrue(fact_is_present("ColModernVBERT Recall@1 43%", [context]))
+        self.assertTrue(fact_is_present("ColPali Recall@5 79%", [context]))
+
+    def test_markdown_table_facts_keep_numeric_row_labels(self):
+        context = """|Retriever|Recall@1|Recall@5|
+|---|---|---|
+|ColQwen2|46%|81%|
+|GPT-4o|52%|84%|"""
+        self.assertTrue(fact_is_present("ColQwen2 Recall@1 46%", [context]))
+        self.assertTrue(fact_is_present("GPT-4o Recall@5 84%", [context]))
+
+    def test_markdown_table_facts_match_composite_numeric_row_labels(self):
+        context = """|Method|Setting|Recall@10|
+|---|---|---|
+|MUVERA|ef=1024|73.4%|
+|MUVERA|ef=512|70.1%|"""
+        self.assertTrue(fact_is_present("MUVERA ef=1024 Recall@10 73.4%", [context]))
+        self.assertFalse(fact_is_present("MUVERA ef=1024 Recall@10 70.1%", [context]))
+
+    def test_markdown_table_facts_match_multi_level_model_labels(self):
+        context = """|Baseline|Model|F1|
+|---|---|---|
+|Baseline|GPT-4o|73.32|
+|PIER-QA|GPT-4o|77.42|"""
+        self.assertTrue(fact_is_present("Baseline GPT-4o F1 73.32", [context]))
+        self.assertTrue(fact_is_present("PIER-QA GPT-4o F1 77.42", [context]))
+
+    def test_markdown_table_facts_match_equivalent_decimal_precision(self):
+        context = """|System|Model|Accuracy @0.95|
+|---|---|---|
+|PIER-QA|GPT-4o|**0.191**|"""
+        self.assertTrue(
+            fact_is_present(
+                "PIER-QA GPT-4o accuracy@0.95 0.1910",
+                [context],
+            )
+        )
+
     def test_markdown_table_facts_match_supplemental_statistics_headers(self):
         context = """|Benchmark|Benchmark # Pages|Queries # Queries|
 |---|---|---|

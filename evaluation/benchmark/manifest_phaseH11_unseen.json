@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-phaseH11-unseen-v1",
+  "description": "Two new open-access papers not used in prior benchmark construction or fixes, covering visual scientific retrieval and PDF multimodal RAG.",
+  "status": "development-regression",
+  "freeze_date": "2026-09-08",
+  "reclassification_date": "2026-09-08",
+  "reclassification_reason": "The first isolated Hybrid retrieval diagnostic hit both target documents and all marked pages/table numbers, but only 4/12 cases had complete required-fact coverage at @50 (macro 0.350, micro 0.300). Failures concentrated in wide-table and table-field coverage, so this set is no longer an unseen confirmation set.",
+  "freeze_policy": "Freeze the cases and gold facts before retrieval diagnostics. Any implementation or prompt change motivated by this set reclassifies it as development-regression and requires a new unseen set.",
+  "minimum_documents": 2,
+  "cases_path": "cases_phaseH11_unseen.jsonl",
+  "documents": [
+    {
+      "document_id": "irpapers-arxiv-2602-17687",
+      "filename": "2026.arxiv.2602.17687.pdf",
+      "sha256": "2b8c2a75439504eafebd0de2e043e4faf8b155ad8d0d60c2cc25d1d116cf4308",
+      "title": "IRPAPERS: A Visual Document Benchmark for Scientific Retrieval and Question Answering",
+      "venue": "arXiv preprint",
+      "year": 2026,
+      "pages": 24,
+      "domain": "visual scientific document retrieval and question answering",
+      "layout_tags": ["two-column", "tables", "figures", "retrieval", "multimodal", "appendix"],
+      "source_url": "https://arxiv.org/abs/2602.17687",
+      "pdf_url": "https://arxiv.org/pdf/2602.17687",
+      "access": "free arXiv PDF",
+      "status": "development-regression"
+    },
+    {
+      "document_id": "pier-qa-arxiv-2506-18027",
+      "filename": "2025.arxiv.2506.18027.pdf",
+      "sha256": "2cf4d90f9981be405154096dd600baf9ff8a65b1ee2272a57ef1eb5e101c7b21",
+      "title": "PDF Retrieval Augmented Question Answering",
+      "venue": "arXiv preprint",
+      "year": 2025,
+      "pages": 14,
+      "domain": "PDF multimodal retrieval augmented question answering",
+      "layout_tags": ["two-column", "tables", "figures", "PDF", "multimodal", "appendix"],
+      "source_url": "https://arxiv.org/abs/2506.18027",
+      "pdf_url": "https://arxiv.org/pdf/2506.18027",
+      "access": "free arXiv PDF",
+      "status": "development-regression"
+    }
+  ]
+}

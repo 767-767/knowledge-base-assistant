@@ -12,6 +12,7 @@ from evaluation.benchmark_retrieval import (
     _structured_figure_guard_indices,
     _formula_guard_indices,
     _structured_table_guard_indices,
+    validate_release_candidate_config,
 )
 from sci_rag_reranking import CrossEncoderReranker
 from sci_rag_retrieval import (
@@ -27,6 +28,41 @@ from sci_rag_core import Chunk
 
 
 class BenchmarkRetrievalTests(unittest.TestCase):
+    def _release_config(self):
+        return {
+            "embedding_model": "BAAI/bge-small-zh-v1.5",
+            "retrieval_mode": "hybrid",
+            "hybrid_rrf_k": 60,
+            "context_k": 10,
+            "document_routing": True,
+            "query_decomposition": True,
+            "parent_window": True,
+            "spatial_figure_evidence": True,
+            "formula_evidence": True,
+            "structured_table_guard": True,
+            "limitation_evidence": True,
+            "adjacent_context": False,
+            "section_expansion": False,
+            "reranker_model": None,
+            "vision_enabled": False,
+        }
+
+    def test_manifest_release_config_accepts_exact_runner_profile(self):
+        config = self._release_config()
+        validate_release_candidate_config(config, dict(config))
+
+    def test_manifest_release_config_rejects_missing_or_drifted_controls(self):
+        config = self._release_config()
+        with self.assertRaisesRegex(ValueError, "structured_table_guard"):
+            validate_release_candidate_config(
+                {key: value for key, value in config.items() if key != "structured_table_guard"},
+                dict(config),
+            )
+        with self.assertRaisesRegex(ValueError, "query_decomposition"):
+            actual = dict(config)
+            actual["query_decomposition"] = False
+            validate_release_candidate_config(config, actual)
+
     def test_ensure_source_coverage_promotes_missing_routed_source(self):
         order = ensure_source_coverage(
             [0, 1, 2],

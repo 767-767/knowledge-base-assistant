@@ -171,6 +171,49 @@ gold contexts。事实等价性不由 embedding 或模型裁判。
 
 原始论文不应复制到项目目录或提交到 Git。
 
+冻结新留出集前，还应把 required facts 对照指定页的实际 PDF 解析输出校验；该门禁会在任何检索运行前拦截事实顺序、表格行列或数字格式不一致：
+
+```bash
+./venv/bin/python evaluation/validate_benchmark.py \
+  --manifest evaluation/benchmark/manifest_phaseH12_unseen.json \
+  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
+  --verify-extracted-evidence --require-complete
+```
+
+只有该命令通过后，清单才具备进入未见检索诊断的资格。
+
+检索诊断通过后、调用生成模型前，还必须用已构建的隔离 Chroma 运行真实应用路径上下文门禁；该命令使用本地假客户端，不发起 API 请求：
+
+```bash
+./venv/bin/python evaluation/app_context_gate.py \
+  --manifest evaluation/benchmark/manifest_phaseH13_unseen.json \
+  --db-path /private/tmp/scirag_phaseH13_db_20260909 \
+  --expected-chunks 420 \
+  --json-out /private/tmp/scirag_phaseH13_app_context_gate.json
+```
+
+只有输出的 case 全部为 `full` 才进入单轮生成；失败时记录缺失事实并停止，不修改冻结用例。
+
+## Phase H15 最终一次性留出集
+
+`manifest_phaseH15_unseen.json` / `cases_phaseH15_unseen.jsonl` 包含 RAGTruth、MedExQA 和
+M-LongDoc 三篇此前未进入任何清单的论文及 18 道题。清单已在检索、应用上下文和生成之前冻结；
+真实 PDF 解析证据门禁为 `18/18 full`。
+
+H15 固定使用 manifest 中的 release-candidate 配置，按“PDF 解析 → 隔离检索 @10 → 真实送模上下文
+→ 单轮生成 → 人工复核”依次执行。任一门禁失败即停止：记录边界并进入 backlog，不针对 H15 修复，
+也不立即新建 H16；只有同一失败在至少两篇无关论文上复现，才重开共享修复。通过则结束本轮开发周期。
+
+2026-09-10 的一次性 H15 检索已停止于第一道检索门禁：Hybrid、文档路由、查询分解、结构化表格/限制/公式/空间
+Figure 证据和 parent-window 均开启时，`@10` 为 `14/18 full`，fact macro/micro=`0.831/0.843`；
+目标文档命中 `18/18`、路由正确 `17/17`。4 个缺口为 RAGTruth 两道叙述/标注协议题、M-LongDoc 一道训练语料与证据页题、
+MedExQA 一道限制题。报告保存在仓库外 `/private/tmp/scirag_phaseH15_retrieval_20260910.json`；按停止规则不继续上下文门禁或生成，
+也不修改 H15 清单、解析器和检索参数。
+
+后续新清单必须把 runner 控制项（包括结构化表格、限制证据、相邻上下文和 section expansion）完整写入
+`release_candidate_config`，并在一次性诊断时增加 `--enforce-manifest-config`；参数缺失或漂移会在加载模型/PDF 前失败。
+H15 的历史报告保留原样，不因新增契约而重跑。
+
 扩展清单校验：
 
 ```bash
