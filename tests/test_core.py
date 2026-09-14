@@ -1,5 +1,6 @@
 import hashlib
 import os
+from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -407,6 +408,18 @@ class CoreTests(unittest.TestCase):
             [{"type": "formula", "formula_evidence": True}] * 2,
         )
         self.assertNotIn("top-k", answer)
+        self.assertNotIn("【公式原文核对项】", answer)
+
+    def test_formula_supplement_does_not_append_other_named_symbols(self):
+        answer = supplement_formula_with_evidence(
+            "离散系统 A∗u=f 中卷积核 A 的尺寸是多少？",
+            "离散系统为 A∗u=f，A 的尺寸是 3×3。",
+            [
+                "K_i,j(x, x′) defines another operator",
+                "i,j ∈ L(Y, Y)",
+            ],
+            [{"type": "formula", "formula_evidence": True}] * 2,
+        )
         self.assertNotIn("【公式原文核对项】", answer)
 
     def test_formula_supplement_keeps_explicit_multi_character_formula_labels(self):
@@ -2066,6 +2079,33 @@ class RuntimeContractTests(unittest.TestCase):
             config = app.RuntimeConfig.from_env()
         self.assertEqual(config.retrieval_mode, "dense")
         self.assertIsNone(config.reranker_model)
+
+    def test_runtime_config_accepts_generic_and_legacy_model_settings(self):
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_BASE_URL": "https://generic.example/v1",
+                "LLM_MODEL": "generic-model",
+                "DEEPSEEK_BASE_URL": "https://legacy.example/v1",
+                "DEEPSEEK_MODEL": "legacy-model",
+            },
+            clear=True,
+        ):
+            config = app.RuntimeConfig.from_env()
+        self.assertEqual(config.llm_base_url, "https://generic.example/v1")
+        self.assertEqual(config.llm_model, "generic-model")
+
+        with patch.dict(
+            os.environ,
+            {
+                "DEEPSEEK_BASE_URL": "https://legacy.example/v1",
+                "DEEPSEEK_MODEL": "legacy-model",
+            },
+            clear=True,
+        ):
+            config = app.RuntimeConfig.from_env()
+        self.assertEqual(config.llm_base_url, "https://legacy.example/v1")
+        self.assertEqual(config.llm_model, "legacy-model")
 
     def test_runtime_config_document_routing_is_opt_in(self):
         with patch.dict(os.environ, {"SCI_RAG_DOCUMENT_ROUTING": "true"}, clear=True):
@@ -3945,6 +3985,166 @@ class RuntimeContractTests(unittest.TestCase):
         result = app.query_knowledge("Table 2 中 DrugR* 的整体优化得分是多少？", runtime=runtime)
         self.assertIn("Table 2", result["answer"])
         self.assertIn("不能用其他表格替代", result["answer"])
+
+    def test_document_inventory_and_confirmed_deletion(self):
+        digest = "a" * 64
+        shared_digest = "b" * 64
+
+        class Collection:
+            def __init__(self):
+                self.records = [
+                    ("a-1", {"source": "a.pdf", "document_sha256": digest}),
+                    ("a-2", {"source": "a.pdf", "document_sha256": shared_digest}),
+                    ("b-1", {"source": "b.txt", "document_sha256": shared_digest}),
+                ]
+                self.deleted = []
+
+            def count(self):
+                return len(self.records)
+
+            def get(self, where=None, **_kwargs):
+                records = self.records
+                if where:
+                    field, condition = next(iter(where.items()))
+                    value = condition["$eq"]
+                    records = [row for row in records if row[1].get(field) == value]
+                return {
+                    "ids": [row[0] for row in records],
+                    "metadatas": [row[1] for row in records],
+                }
+
+            def delete(self, ids):
+                self.deleted.extend(ids)
+                self.records = [row for row in self.records if row[0] not in ids]
+
+        with tempfile.TemporaryDirectory() as directory:
+            collection = Collection()
+            runtime = app.Runtime(
+                app.RuntimeConfig(db_path=directory),
+                object(),
+                object(),
+                collection,
+            )
+            runtime._lexical_snapshot = object()
+            source_pdf = Path(directory) / "source_pdfs" / f"{digest}.pdf"
+            source_pdf.parent.mkdir()
+            source_pdf.write_bytes(b"pdf")
+            shared_pdf = source_pdf.with_name(f"{shared_digest}.pdf")
+            shared_pdf.write_bytes(b"pdf")
+
+            self.assertEqual(app.document_inventory(runtime), [("a.pdf", 2), ("b.txt", 1)])
+            self.assertEqual(app.delete_document("a.pdf", False, runtime), "请先确认删除。")
+            self.assertEqual(collection.deleted, [])
+
+            status = app.delete_document("a.pdf", True, runtime)
+
+            self.assertIn("2 个文本块", status)
+            self.assertEqual(collection.deleted, ["a-1", "a-2"])
+            self.assertEqual(app.document_inventory(runtime), [("b.txt", 1)])
+            self.assertFalse(source_pdf.exists())
+            self.assertTrue(shared_pdf.exists())
+            self.assertIsNone(runtime._lexical_snapshot)
+
+    def test_model_service_can_be_configured_after_local_startup(self):
+        class Collection:
+            def count(self):
+                return 1
+
+        runtime = app.Runtime(
+            app.RuntimeConfig(),
+            None,
+            object(),
+            Collection(),
+        )
+        self.assertIn("设置", app.generate_mindmap(runtime))
+        self.assertIn("设置", app.generate_quiz(runtime))
+
+        with patch("openai.OpenAI") as openai_client:
+            self.assertIn(
+                "Base URL",
+                app.configure_model_service("file:///tmp/model", "test-model", runtime=runtime),
+            )
+            self.assertIn(
+                "API Key",
+                app.configure_model_service(
+                    "https://example.com/v1", "test-model", runtime=runtime
+                ),
+            )
+        openai_client.assert_not_called()
+
+        with patch("openai.OpenAI") as openai_client:
+            status = app.configure_model_service(
+                "https://example.com/v1",
+                "test-model",
+                "secret-value",
+                runtime,
+            )
+
+        openai_client.assert_called_once_with(
+            api_key="secret-value",
+            base_url="https://example.com/v1",
+        )
+        self.assertIs(runtime.client, openai_client.return_value)
+        self.assertEqual(runtime.config.llm_model, "test-model")
+        self.assertNotIn("secret-value", status)
+
+        with patch("openai.OpenAI") as openai_client:
+            status = app.configure_model_service(
+                "http://localhost:11434/v1",
+                "qwen3:4b-instruct",
+                runtime=runtime,
+            )
+        openai_client.assert_called_once_with(
+            api_key="local",
+            base_url="http://localhost:11434/v1",
+        )
+        self.assertIn("qwen3:4b-instruct", status)
+
+    def test_create_runtime_allows_missing_api_key(self):
+        collection = object()
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("dotenv.load_dotenv"),
+            patch("openai.OpenAI") as openai_client,
+            patch("sentence_transformers.SentenceTransformer") as embedding_model,
+            patch("chromadb.PersistentClient") as chroma_client,
+        ):
+            chroma_client.return_value.get_or_create_collection.return_value = collection
+            runtime = app.create_runtime(app.RuntimeConfig(embedding_model="test-model"))
+
+        openai_client.assert_not_called()
+        embedding_model.assert_called_once_with("test-model")
+        self.assertIsNone(runtime.client)
+        self.assertIs(runtime.collection, collection)
+
+    def test_generation_helpers_share_the_context_limit(self):
+        class Collection:
+            def count(self):
+                return 6
+
+            def get(self, **_kwargs):
+                return {"documents": [f"chunk-{index}" for index in range(6)]}
+
+        class Completions:
+            def __init__(self):
+                self.calls = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                message = type("Message", (), {"content": "ok"})()
+                choice = type("Choice", (), {"message": message})()
+                return type("Response", (), {"choices": [choice]})()
+
+        completions = Completions()
+        chat = type("Chat", (), {"completions": completions})()
+        client = type("Client", (), {"chat": chat})()
+        runtime = app.Runtime(app.RuntimeConfig(), client, object(), Collection())
+
+        self.assertEqual(runtime.config.context_k, 4)
+        self.assertEqual(app.generate_mindmap(runtime), "ok")
+        self.assertEqual(app.generate_quiz(runtime), "ok")
+        for call in completions.calls:
+            self.assertEqual(call["messages"][1]["content"].count("chunk-"), 4)
 
 
 if __name__ == "__main__":

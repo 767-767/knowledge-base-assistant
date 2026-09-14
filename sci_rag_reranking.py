@@ -1,8 +1,7 @@
 """Side-effect-free cross-encoder reranking helpers.
 
-Importing this module does not load Sentence-Transformers or any model.  The
-caller must explicitly construct :class:`CrossEncoderReranker`, which defaults
-to local-files-only loading so an evaluation cannot download weights silently.
+Importing this module does not load Sentence-Transformers or any model. The
+caller must explicitly construct :class:`CrossEncoderReranker`.
 """
 
 from __future__ import annotations

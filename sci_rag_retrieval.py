@@ -1,9 +1,4 @@
-"""Side-effect-free lexical ranking and rank fusion primitives.
-
-The module does not import ChromaDB, Sentence-Transformers, Gradio, or an API
-client.  Both the application runtime and offline benchmark can therefore use
-the same BM25/RRF implementation without creating resources at import time.
-"""
+"""Side-effect-free lexical ranking and rank fusion primitives."""
 
 from __future__ import annotations
 

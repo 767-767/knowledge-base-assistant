@@ -22,7 +22,6 @@ from evaluation.context_coverage import aliases_for_fact, fact_is_present  # noq
 from evaluation.generation_stability import (  # noqa: E402
     build_runtime,
     runtime_config_trace,
-    source_fingerprint,
 )
 
 
@@ -57,11 +56,8 @@ def audit_case(case: dict[str, Any], contexts: list[str]) -> dict[str, Any]:
 def run_gate(
     manifest_path: str | Path,
     db_path: str | Path,
-    *,
-    expected_chunks: int | None = None,
 ) -> dict[str, Any]:
     benchmark = load_benchmark(manifest_path, verify_files=False)
-    os.environ.setdefault("DEEPSEEK_API_KEY", "offline-context-gate")
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     runtime = build_runtime(
         db_path,
@@ -75,8 +71,6 @@ def run_gate(
     )
     runtime.client = _OfflineClient()
     chunk_count = int(runtime.collection.count())
-    if expected_chunks is not None and chunk_count != expected_chunks:
-        raise ValueError(f"隔离数据库块数不符：实际 {chunk_count}，期望 {expected_chunks}")
 
     filenames = {
         str(document["document_id"]): str(document["filename"])
@@ -119,7 +113,6 @@ def run_gate(
         "manifest": str(Path(manifest_path).resolve()),
         "db_chunks": chunk_count,
         "runtime_config": runtime_config_trace(runtime),
-        "source_fingerprint": source_fingerprint(),
         "case_count": len(rows),
         "full_case_count": full,
         "fact_micro": covered_facts / total_facts if total_facts else 1.0,
@@ -132,14 +125,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--db-path", required=True, help="已构建的隔离 ChromaDB 路径")
-    parser.add_argument("--expected-chunks", type=int)
     parser.add_argument("--json-out")
     args = parser.parse_args()
     try:
         report = run_gate(
             args.manifest,
             args.db_path,
-            expected_chunks=args.expected_chunks,
         )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"❌ 真实送模上下文门禁失败：{exc}", file=sys.stderr)

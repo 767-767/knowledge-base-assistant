@@ -8,8 +8,7 @@ equivalence, truth beyond the gold facts, or citation quality; aliases must be
 declared in the case and are validated against gold contexts elsewhere.
 
 The command-line entry point accepts a test set plus a user-produced JSON or
-JSONL answer file.  It never imports an embedding model, ChromaDB, Gradio,
-RAGAS, or an external API.
+JSONL answer file and does not load the application runtime or an external API.
 """
 
 from __future__ import annotations

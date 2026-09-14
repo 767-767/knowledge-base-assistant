@@ -5,14 +5,13 @@
 The runner is deliberately outside the normal UI path. It keeps one runtime
 and one retrieval configuration for every repetition, writes one JSON object
 per case/repetition outside the repository, and can resume after an API error
-or an interrupted process. It does not run RAGAS or judge semantic truth.
+or an interrupted process. It does not judge semantic truth.
 """
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import replace
-import hashlib
 import json
 from pathlib import Path
 import os
@@ -65,12 +64,6 @@ def select_cases(
     return [case for case in case_list if str(case["case_id"]) in requested]
 
 
-def answer_signature(answer: Any) -> str:
-    """Normalize superficial whitespace for exact-repeat diagnostics."""
-
-    return " ".join(str(answer or "").split())
-
-
 def completed_keys(
     rows: Iterable[dict[str, Any]],
     case_sources: dict[str, list[str] | None],
@@ -96,13 +89,13 @@ def runtime_config_trace(runtime: app.Runtime) -> dict[str, Any]:
     Historical traces only recorded the feature switches.  That is not enough
     to prove that two runs used the same embedding/reranker, candidate pool,
     context size, or generation model.  Keep this payload JSON-safe and omit
-    ``DEEPSEEK_API_KEY`` and the client/base URL deliberately.
+    API keys and the client/base URL deliberately.
     """
 
     config = runtime.config
     return {
         "embedding_model": config.embedding_model,
-        "deepseek_model": config.deepseek_model,
+        "llm_model": config.llm_model,
         "db_path": str(Path(config.db_path).expanduser().resolve()),
         "retrieval_k": int(config.retrieval_k),
         "context_k": int(config.context_k),
@@ -123,30 +116,6 @@ def runtime_config_trace(runtime: app.Runtime) -> dict[str, Any]:
         "reranker_device": config.reranker_device,
         "reranker_rrf_k": int(config.reranker_rrf_k),
     }
-
-
-def source_fingerprint() -> str:
-    """Hash retrieval/generation source files used by this runner.
-
-    This is a provenance marker, not a security signature.  It lets an audit
-    distinguish traces generated before and after local code changes without
-    recording the repository path or relying on an existing Git commit.
-    """
-
-    digest = hashlib.sha256()
-    for relative in (
-        "app.py",
-        "sci_rag_core.py",
-        "sci_rag_retrieval.py",
-        "sci_rag_reranking.py",
-        "evaluation/generation_stability.py",
-    ):
-        path = PROJECT_ROOT / relative
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
 
 
 def build_runtime(
@@ -219,7 +188,6 @@ def run_stability(
     reranker_max_length: int | None = None,
     reranker_device: str | None = None,
     reranker_rrf_k: int | None = None,
-    expected_chunks: int | None = None,
     use_source_filter: bool = True,
 ) -> dict[str, Any]:
     """Run repeated generations and return a small execution summary."""
@@ -264,12 +232,7 @@ def run_stability(
         reranker_rrf_k=reranker_rrf_k,
     )
     chunk_count = int(runtime.collection.count())
-    if expected_chunks is not None and chunk_count != int(expected_chunks):
-        raise ValueError(
-            f"隔离数据库块数不符：实际 {chunk_count}，期望 {expected_chunks}"
-        )
     trace_config = runtime_config_trace(runtime)
-    trace_source_fingerprint = source_fingerprint()
 
     if output.exists() and not resume:
         raise ValueError(f"输出文件已存在；如需续跑请不要使用 --no-resume：{output}")
@@ -313,10 +276,8 @@ def run_stability(
                 "source_filter": case_sources[case_id],
                 "question": str(case["question"]),
                 "answer": answer,
-                "answer_signature": answer_signature(answer),
                 "mode": "generation_stability",
                 "runtime_config": trace_config,
-                "source_fingerprint": trace_source_fingerprint,
                 "retrieval_mode": retrieval_mode,
                 "document_routing": bool(document_routing),
                 "query_decomposition": bool(query_decomposition),
@@ -364,7 +325,6 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--case-id", action="append", dest="case_ids")
     parser.add_argument("--no-resume", action="store_true")
-    parser.add_argument("--expected-chunks", type=int)
     parser.add_argument("--retrieval-mode", choices=("dense", "hybrid"), default="hybrid")
     parser.add_argument("--no-document-routing", action="store_true")
     parser.add_argument("--no-query-decomposition", action="store_true")
@@ -416,7 +376,6 @@ def main() -> int:
             reranker_max_length=args.reranker_max_length,
             reranker_device=args.reranker_device,
             reranker_rrf_k=args.reranker_rrf_k,
-            expected_chunks=args.expected_chunks,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"❌ 稳定性复测失败：{exc}", file=sys.stderr)

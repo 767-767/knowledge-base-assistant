@@ -9,7 +9,7 @@ The report keeps three evidence levels separate:
 * gold-context recall checks whether curated evidence snippets were retrieved;
 * human judgments, when supplied, are the only semantic correctness labels.
 
-No embedding model, ChromaDB, Gradio, RAGAS, or external API is loaded.
+No model, database, UI, or external API is loaded.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import argparse
 from collections import Counter
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any, Iterable
 
@@ -31,8 +32,37 @@ from evaluation.answer_audit import (  # noqa: E402
     audit_answer,
     aggregate_answer_audit,
 )
-from evaluation.evaluate import gold_context_recall  # noqa: E402
 from evaluation.review_answers import load_reviews  # noqa: E402
+
+
+_CONTEXT_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9*._+\-]*|[\u3400-\u9fff]")
+
+
+def gold_context_recall(contexts: list[str], case: dict[str, Any]) -> float | None:
+    """Return the fraction of curated evidence snippets found in contexts."""
+
+    gold = case.get("contexts") or []
+    if not gold:
+        return None
+    candidates = [_normalise(context) for context in contexts]
+    hits = 0
+    for reference in gold:
+        reference_text = _normalise(reference)
+        reference_tokens = set(_CONTEXT_TOKEN_RE.findall(reference_text))
+        if any(
+            reference_text in candidate
+            or candidate in reference_text
+            or (
+                reference_tokens
+                and len(reference_tokens & set(_CONTEXT_TOKEN_RE.findall(candidate)))
+                / len(reference_tokens)
+                >= 0.6
+            )
+            for candidate in candidates
+            if candidate
+        ):
+            hits += 1
+    return hits / len(gold)
 
 
 def _normalise(value: Any) -> str:

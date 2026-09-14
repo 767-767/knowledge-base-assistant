@@ -13,7 +13,6 @@ class GenerationTraceAuditTests(unittest.TestCase):
                 "context_ids": ["c1", "c2"],
                 "context_metadatas": [{"page": 1}],
                 "runtime_config": {"retrieval_mode": "hybrid"},
-                "source_fingerprint": "abc",
             },
             {
                 "case_id": "case-1",
@@ -22,7 +21,6 @@ class GenerationTraceAuditTests(unittest.TestCase):
                 "context_ids": ["c1", "c2"],
                 "context_metadatas": [{"page": 1}],
                 "runtime_config": {"retrieval_mode": "hybrid"},
-                "source_fingerprint": "abc",
             },
         ]
         report = audit_generation_trace(rows)

@@ -8,7 +8,7 @@ when the UI is launched from ``main``.  The parsing and table logic lives in
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import html
 import os
@@ -16,7 +16,8 @@ from pathlib import Path
 import random
 import re
 import shutil
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from sci_rag_core import (
     Chunk,
@@ -55,16 +56,27 @@ from sci_rag_retrieval import (
 from sci_rag_vision import complete_vision, render_figure, vision_messages
 
 
+MODEL_SERVICE_PRESETS = {
+    "Ollama（本地）": ("http://localhost:11434/v1", "qwen3:4b-instruct"),
+    "DeepSeek": ("https://api.deepseek.com/v1", "deepseek-v4-flash"),
+    "Gemini": (
+        "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "gemini-2.5-flash-lite",
+    ),
+    "自定义 OpenAI 兼容服务": ("", ""),
+}
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     """Runtime settings, all overridable through environment variables."""
 
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
     db_path: str = "./chroma_db"
-    deepseek_base_url: str = "https://api.deepseek.com/v1"
-    deepseek_model: str = "deepseek-chat"
+    llm_base_url: str = "https://api.deepseek.com/v1"
+    llm_model: str = "deepseek-v4-flash"
     retrieval_k: int = 12
-    context_k: int = 10
+    context_k: int = 4
     retrieval_mode: str = "dense"
     document_routing: bool = False
     query_decomposition: bool = False
@@ -97,44 +109,33 @@ class RuntimeConfig:
             value = os.getenv(name, default or "").strip()
             return value or None
 
+        def enabled(name: str, default: str = "0") -> bool:
+            return os.getenv(name, default).strip().casefold() in {"1", "true", "yes", "on"}
+
         retrieval_mode = os.getenv("SCI_RAG_RETRIEVAL_MODE", cls.retrieval_mode).strip().casefold()
         if retrieval_mode not in {"dense", "hybrid"}:
             retrieval_mode = cls.retrieval_mode
-        document_routing = os.getenv("SCI_RAG_DOCUMENT_ROUTING", "0").strip().casefold() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        query_decomposition = os.getenv(
-            "SCI_RAG_QUERY_DECOMPOSITION", "0"
-        ).strip().casefold() in {"1", "true", "yes", "on"}
-        parent_window = os.getenv("SCI_RAG_PARENT_WINDOW", "0").strip().casefold() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        spatial_figure_evidence = os.getenv(
-            "SCI_RAG_SPATIAL_FIGURE_EVIDENCE", "0"
-        ).strip().casefold() in {"1", "true", "yes", "on"}
-        formula_evidence = os.getenv(
-            "SCI_RAG_FORMULA_EVIDENCE", "0"
-        ).strip().casefold() in {"1", "true", "yes", "on"}
-        formula_evidence_auto = os.getenv(
-            "SCI_RAG_FORMULA_EVIDENCE_AUTO", "1"
-        ).strip().casefold() in {"1", "true", "yes", "on"}
-        answer_validation = os.getenv(
-            "SCI_RAG_ANSWER_VALIDATION", "0"
-        ).strip().casefold() in {"1", "true", "yes", "on"}
-        vision_enabled = os.getenv(
-            "SCI_RAG_VISION_ENABLED", "0"
-        ).strip().casefold() in {"1", "true", "yes", "on"}
+        document_routing = enabled("SCI_RAG_DOCUMENT_ROUTING")
+        query_decomposition = enabled("SCI_RAG_QUERY_DECOMPOSITION")
+        parent_window = enabled("SCI_RAG_PARENT_WINDOW")
+        spatial_figure_evidence = enabled("SCI_RAG_SPATIAL_FIGURE_EVIDENCE")
+        formula_evidence = enabled("SCI_RAG_FORMULA_EVIDENCE")
+        formula_evidence_auto = enabled("SCI_RAG_FORMULA_EVIDENCE_AUTO", "1")
+        answer_validation = enabled("SCI_RAG_ANSWER_VALIDATION")
+        vision_enabled = enabled("SCI_RAG_VISION_ENABLED")
         return cls(
             embedding_model=os.getenv("SCI_RAG_EMBEDDING_MODEL", cls.embedding_model),
             db_path=os.getenv("SCI_RAG_DB_PATH", cls.db_path),
-            deepseek_base_url=os.getenv("DEEPSEEK_BASE_URL", cls.deepseek_base_url),
-            deepseek_model=os.getenv("DEEPSEEK_MODEL", cls.deepseek_model),
+            llm_base_url=(
+                os.getenv("LLM_BASE_URL")
+                or os.getenv("DEEPSEEK_BASE_URL")
+                or cls.llm_base_url
+            ),
+            llm_model=(
+                os.getenv("LLM_MODEL")
+                or os.getenv("DEEPSEEK_MODEL")
+                or cls.llm_model
+            ),
             retrieval_k=positive_int("SCI_RAG_RETRIEVAL_K", cls.retrieval_k),
             context_k=positive_int("SCI_RAG_CONTEXT_K", cls.context_k),
             retrieval_mode=retrieval_mode,
@@ -228,15 +229,13 @@ def create_runtime(config: RuntimeConfig | None = None) -> Runtime:
     config = config or RuntimeConfig.from_env()
     if config.reranker_model and config.retrieval_mode != "hybrid":
         raise ValueError("SCI_RAG_RERANKER_MODEL 需要 SCI_RAG_RETRIEVAL_MODE=hybrid")
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise ValueError("请在 .env 文件中设置 DEEPSEEK_API_KEY")
+    api_key = os.getenv("LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
 
     from openai import OpenAI
     from sentence_transformers import SentenceTransformer
     import chromadb
 
-    client = OpenAI(api_key=api_key, base_url=config.deepseek_base_url)
+    client = OpenAI(api_key=api_key, base_url=config.llm_base_url) if api_key else None
     embedding_model = SentenceTransformer(config.embedding_model)
     reranker = None
     if config.reranker_model:
@@ -255,6 +254,38 @@ def create_runtime(config: RuntimeConfig | None = None) -> Runtime:
         metadata={"hnsw:space": "cosine"},
     )
     return Runtime(config, client, embedding_model, collection, reranker=reranker)
+
+
+def model_service_defaults(service: str) -> tuple[str, str]:
+    """Return the editable URL and model for one UI preset."""
+
+    return MODEL_SERVICE_PRESETS.get(str(service), ("", ""))
+
+
+def configure_model_service(
+    base_url: str,
+    model: str,
+    api_key: str = "",
+    runtime: Runtime | None = None,
+) -> str:
+    """Configure an OpenAI-compatible generation service for this process."""
+
+    runtime = runtime or get_runtime()
+    base_url = str(base_url or "").strip()
+    model = str(model or "").strip()
+    api_key = str(api_key or "").strip()
+    parsed_url = urlsplit(base_url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        return "请输入有效的模型服务 Base URL。"
+    if not model:
+        return "请输入模型名称。"
+    if not api_key and parsed_url.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        return "云端模型服务需要 API Key；Ollama 本地服务可以留空。"
+    from openai import OpenAI
+
+    runtime.client = OpenAI(api_key=api_key or "local", base_url=base_url)
+    runtime.config = replace(runtime.config, llm_base_url=base_url, llm_model=model)
+    return f"✅ 已为当前会话配置模型 {html.escape(model)}；API Key 不会写入知识库。"
 
 
 def get_runtime() -> Runtime:
@@ -459,7 +490,7 @@ def add_document_to_db(file_path: str, runtime: Runtime | None = None) -> str:
 def upload_file(file: Any, runtime: Runtime | None = None) -> str:
     if file is None:
         return "请选择一个文件"
-    return add_document_to_db(file.name, runtime=runtime)
+    return add_document_to_db(str(getattr(file, "name", file)), runtime=runtime)
 
 
 def _vision_pdf_for_question(
@@ -505,6 +536,8 @@ def _vision_answer(
 ) -> tuple[str | None, str | None, dict[str, Any] | None]:
     """Try one full+detail figure request without changing text retrieval."""
 
+    if runtime.client is None:
+        return None, None, None
     selected = _vision_pdf_for_question(message, runtime, source_filter=source_filter)
     if selected is None:
         return None, None, None
@@ -583,6 +616,60 @@ def _flat_result_values(result: dict[str, Any], key: str) -> list[Any]:
     if values and isinstance(values[0], list):
         values = values[0]
     return list(values)
+
+
+def document_inventory(runtime: Runtime | None = None) -> list[tuple[str, int]]:
+    """Return uploaded source names and their chunk counts."""
+
+    runtime = runtime or get_runtime()
+    result = runtime.collection.get(include=["metadatas"])
+    counts: dict[str, int] = {}
+    for metadata in _flat_result_values(result, "metadatas"):
+        source = str(metadata.get("source", "")).strip() if isinstance(metadata, dict) else ""
+        if source:
+            counts[source] = counts.get(source, 0) + 1
+    return sorted(counts.items(), key=lambda item: item[0].casefold())
+
+
+def delete_document(
+    source: str | None,
+    confirmed: bool = False,
+    runtime: Runtime | None = None,
+) -> str:
+    """Delete one source and its persisted vision PDF after explicit confirmation."""
+
+    runtime = runtime or get_runtime()
+    source = str(source or "").strip()
+    if not source:
+        return "请选择要删除的文档。"
+    if not confirmed:
+        return "请先确认删除。"
+
+    result = runtime.collection.get(
+        where={"source": {"$eq": source}},
+        include=["metadatas"],
+    )
+    ids = [str(value) for value in _flat_result_values(result, "ids")]
+    if not ids:
+        return f"未找到文档：{source}"
+    digests = {
+        str(metadata.get("document_sha256", "")).strip().casefold()
+        for metadata in _flat_result_values(result, "metadatas")
+        if isinstance(metadata, dict)
+        and re.fullmatch(r"[0-9a-fA-F]{64}", str(metadata.get("document_sha256", "")).strip())
+    }
+    runtime.collection.delete(ids=ids)
+    runtime.invalidate_lexical_index()
+    for digest in digests:
+        remaining = runtime.collection.get(
+            where={"document_sha256": {"$eq": digest}},
+            include=["metadatas"],
+        )
+        if not _flat_result_values(remaining, "ids"):
+            (Path(runtime.config.db_path) / "source_pdfs" / f"{digest}.pdf").unlink(
+                missing_ok=True
+            )
+    return f"✅ 已删除 {source}（{len(ids)} 个文本块）。"
 
 
 def _normalise_source_filter(value: Any) -> set[str]:
@@ -2278,8 +2365,10 @@ def query_knowledge(
     user_prompt = f"{ledger_text}【参考资料】\n{context}\n\n【问题】\n{message}"
 
     try:
+        if runtime.client is None:
+            raise RuntimeError("请先在“设置”页配置模型服务。")
         response = runtime.client.chat.completions.create(
-            model=runtime.config.deepseek_model,
+            model=runtime.config.llm_model,
             messages=[
                 {"role": "system", "content": SCIENTIFIC_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
@@ -2406,14 +2495,16 @@ def generate_mindmap(runtime: Runtime | None = None) -> str:
     runtime = runtime or get_runtime()
     if runtime.collection.count() == 0:
         return "📚 知识库为空，请先上传文档。"
+    if runtime.client is None:
+        return "⚙️ 请先在“设置”页配置模型服务。"
     all_chunks = runtime.collection.get(include=["documents"])
     documents = all_chunks.get("documents") or []
     if not documents:
         return "无法读取文档内容。"
-    context = "\n\n".join(documents[:15])
+    context = "\n\n".join(documents[: runtime.config.context_k])
     try:
         response = runtime.client.chat.completions.create(
-            model=runtime.config.deepseek_model,
+            model=runtime.config.llm_model,
             messages=[
                 {"role": "system", "content": "你是一位顶级学术助教。请根据提供的课程资料，生成一份层级清晰、结构完整的学习大纲。"},
                 {"role": "user", "content": f"请基于以下资料生成Markdown格式的层级大纲（使用 # ## ### - 表示层级），不要包含任何开场白或结尾总结，直接输出大纲结构。\n\n资料内容：\n{context}"},
@@ -2430,14 +2521,18 @@ def generate_quiz(runtime: Runtime | None = None) -> str:
     runtime = runtime or get_runtime()
     if runtime.collection.count() == 0:
         return "📚 知识库为空，请先上传文档。"
+    if runtime.client is None:
+        return "⚙️ 请先在“设置”页配置模型服务。"
     all_chunks = runtime.collection.get(include=["documents"])
     documents = all_chunks.get("documents") or []
     if not documents:
         return "无法读取文档内容。"
-    sample_chunks = random.sample(documents, min(8, len(documents)))
+    sample_chunks = random.sample(
+        documents, min(runtime.config.context_k, len(documents))
+    )
     try:
         response = runtime.client.chat.completions.create(
-            model=runtime.config.deepseek_model,
+            model=runtime.config.llm_model,
             messages=[
                 {"role": "system", "content": "你是一个严谨的大学教师。请根据资料出5道单项选择题，用于考察学生对知识的掌握程度。"},
                 {"role": "user", "content": "请根据以下资料，生成5道单项选择题。\n输出格式：第1题：[题目]\nA. [A] B. [B] C. [C] D. [D]\n答案：X\n解析：[解释]\n\n资料内容：\n" + "\n\n".join(sample_chunks)},
@@ -2450,33 +2545,117 @@ def generate_quiz(runtime: Runtime | None = None) -> str:
         return f"❌ 出题失败：{exc}"
 
 
-def build_demo(runtime: Runtime | None = None) -> Any:
+def build_demo(
+    runtime: Runtime | None = None,
+    *,
+    managed_local_model: bool = False,
+    on_exit: Callable[[], None] | None = None,
+) -> Any:
     """Build the UI around an explicitly supplied runtime."""
 
     import gradio as gr
 
     runtime = runtime or get_runtime()
-    with gr.Blocks(title="AI 大学生学习工作台", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("# 🎓 AI 大学生学习工作台")
-        gr.Markdown("上传你的课件或论文，用 AI 帮你学！")
+
+    def inventory_view() -> tuple[list[tuple[str, int]], str]:
+        documents = document_inventory(runtime)
+        inventory = (
+            "**已上传文档：**\n" + "\n".join(
+                f"- {source}（{count} 个文本块）" for source, count in documents
+            )
+            if documents
+            else "**已上传文档：** 暂无"
+        )
+        return documents, inventory
+
+    def library_state() -> tuple[str, str, Any, Any]:
+        documents, inventory = inventory_view()
+        sources = [source for source, _count in documents]
+        return (
+            f"**当前知识库文本块数：** {runtime.collection.count()}",
+            inventory,
+            gr.update(choices=sources, value=None),
+            gr.update(choices=sources, value=[]),
+        )
+
+    initial_documents, initial_inventory = inventory_view()
+    initial_sources = [source for source, _count in initial_documents]
+    with gr.Blocks(title="Sci-RAG 本地论文助手") as demo:
+        gr.Markdown("# 📚 Sci-RAG 本地论文助手")
+        gr.Markdown(
+            "本地模型已就绪。上传论文或课件后即可提问、生成大纲和练习题；"
+            "文档与回答均留在这台电脑上。"
+            if managed_local_model
+            else "上传你的课件或论文，用 AI 帮你学！"
+        )
+        if not managed_local_model:
+            initial_service = next(
+                (
+                    name
+                    for name, (base_url, _model) in MODEL_SERVICE_PRESETS.items()
+                    if base_url.rstrip("/") == runtime.config.llm_base_url.rstrip("/")
+                ),
+                "自定义 OpenAI 兼容服务",
+            )
+            with gr.Tab("⚙️ 设置"):
+                gr.Markdown(
+                    "推荐使用本机 Ollama；云端服务使用你自己的 API Key。"
+                    "设置只保留在当前运行进程中，也可以通过 `.env` 配置。"
+                )
+                service_select = gr.Dropdown(
+                    label="模型服务",
+                    choices=list(MODEL_SERVICE_PRESETS),
+                    value=initial_service,
+                )
+                base_url_input = gr.Textbox(
+                    label="Base URL",
+                    value=runtime.config.llm_base_url,
+                )
+                model_input = gr.Textbox(
+                    label="模型名称",
+                    value=runtime.config.llm_model,
+                )
+                api_key_input = gr.Textbox(
+                    label="API Key（Ollama 本地服务可留空）",
+                    type="password",
+                    placeholder="云端服务请输入自己的 Key",
+                )
+                model_service_button = gr.Button("应用模型设置")
+                model_service_status = gr.Markdown(
+                    f"✅ 已从环境变量配置模型 {html.escape(runtime.config.llm_model)}。"
+                    if runtime.client is not None
+                    else "尚未配置模型服务；本地文档管理仍可使用。"
+                )
         with gr.Tab("📤 上传文档"):
             file_input = gr.File(label="选择文档", file_types=[".pdf", ".txt", ".docx"])
             upload_output = gr.Textbox(label="上传状态", lines=3)
             upload_button = gr.Button("添加到知识库")
             count_output = gr.Markdown(f"**当前知识库文本块数：** {runtime.collection.count()}")
-
-            def handle_upload(file: Any) -> tuple[str, str]:
-                status = upload_file(file, runtime)
-                return status, f"**当前知识库文本块数：** {runtime.collection.count()}"
-
-            upload_button.click(
-                handle_upload,
-                inputs=file_input,
-                outputs=[upload_output, count_output],
+            inventory_output = gr.Markdown(initial_inventory)
+            delete_select = gr.Dropdown(
+                label="删除文档",
+                choices=initial_sources,
+                value=None,
             )
+            delete_confirm = gr.Checkbox(label="确认删除所选文档及其本地数据")
+            delete_button = gr.Button("删除所选文档", variant="stop")
+            delete_output = gr.Textbox(label="删除状态", lines=2)
         with gr.Tab("💬 智能问答"):
+            source_select = gr.Dropdown(
+                label="限定回答范围",
+                choices=initial_sources,
+                value=[],
+                multiselect=True,
+                info="不选择时检索全部已上传文档。",
+            )
             gr.ChatInterface(
-                fn=lambda message, history: query_knowledge(message, history, False, runtime),
+                fn=lambda message, history, sources: query_knowledge(
+                    message,
+                    history,
+                    False,
+                    runtime,
+                    source_filter=sources,
+                ),
                 title="📖 基于文档的问答",
                 description="输入问题，AI会从已上传的文档中检索答案。",
                 chatbot=gr.Chatbot(height=450),
@@ -2486,6 +2665,7 @@ def build_demo(runtime: Runtime | None = None) -> Any:
                     submit_btn=True,
                     stop_btn=True,
                 ),
+                additional_inputs=[source_select],
             )
         with gr.Tab("🧠 生成学习大纲"):
             gr.Markdown("### 一键生成层级学习大纲（自动转为脑图结构）")
@@ -2497,8 +2677,65 @@ def build_demo(runtime: Runtime | None = None) -> Any:
             button = gr.Button("📝 生成5道选择题")
             output = gr.Markdown(label="📋 题目与解析", value="点击上方按钮生成...")
             button.click(lambda: generate_quiz(runtime), inputs=[], outputs=output)
+        exit_button = (
+            gr.Button("退出 Sci-RAG", variant="secondary")
+            if managed_local_model and on_exit is not None
+            else None
+        )
+
+        def handle_upload(file: Any) -> tuple[Any, ...]:
+            return (upload_file(file, runtime), *library_state())
+
+        def handle_delete(source: str | None, confirmed: bool) -> tuple[Any, ...]:
+            return (
+                delete_document(source, confirmed, runtime),
+                *library_state(),
+                False,
+            )
+
+        if not managed_local_model:
+            service_select.change(
+                model_service_defaults,
+                inputs=service_select,
+                outputs=[base_url_input, model_input],
+            )
+            model_service_button.click(
+                lambda base_url, model, api_key: (
+                    configure_model_service(base_url, model, api_key, runtime),
+                    "",
+                ),
+                inputs=[base_url_input, model_input, api_key_input],
+                outputs=[model_service_status, api_key_input],
+            )
+
+        upload_button.click(
+            handle_upload,
+            inputs=file_input,
+            outputs=[
+                upload_output,
+                count_output,
+                inventory_output,
+                delete_select,
+                source_select,
+            ],
+        )
+        delete_button.click(
+            handle_delete,
+            inputs=[delete_select, delete_confirm],
+            outputs=[
+                delete_output,
+                count_output,
+                inventory_output,
+                delete_select,
+                source_select,
+                delete_confirm,
+            ],
+        )
+        if exit_button is not None:
+            exit_button.click(on_exit, inputs=[], outputs=[])
     return demo
 
 if __name__ == "__main__":
-    demo = build_demo(create_runtime())
-    demo.launch()
+    import gradio as gr
+
+    build_demo(create_runtime()).launch(theme=gr.themes.Soft())

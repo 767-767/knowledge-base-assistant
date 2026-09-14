@@ -3,8 +3,8 @@
 """Audit repeat-generation traces without calling models or reading gold facts.
 
 The report answers a narrow provenance question: for each case, were the
-retrieval/generation settings and source fingerprint recorded, did the context
-IDs stay stable, and did the answer text vary?  It deliberately does not
+retrieval/generation settings recorded, did the contexts stay stable, and did the answer
+text vary?  It deliberately does not
 judge semantic correctness and does not load the application runtime.
 """
 
@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
-import hashlib
 import json
 from pathlib import Path
 import sys
@@ -39,29 +38,22 @@ def _stable_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
 
 
-def _context_signature(row: dict[str, Any]) -> str:
+def _context_value(row: dict[str, Any]) -> str:
     ids = row.get("context_ids")
     if isinstance(ids, list) and ids:
         return _stable_json([str(value) for value in ids])
     contexts = row.get("contexts")
     if not isinstance(contexts, list):
         contexts = []
-    digest = hashlib.sha256()
-    for context in contexts:
-        digest.update(str(context).encode("utf-8"))
-        digest.update(b"\0")
-    return digest.hexdigest()
+    return _stable_json([str(context) for context in contexts])
 
 
-def _metadata_signature(row: dict[str, Any]) -> str:
+def _metadata_value(row: dict[str, Any]) -> str:
     metadata = row.get("context_metadatas")
     return _stable_json(metadata if isinstance(metadata, list) else [])
 
 
-def _answer_signature(row: dict[str, Any]) -> str:
-    explicit = row.get("answer_signature")
-    if explicit is not None:
-        return " ".join(str(explicit).split())
+def _answer_value(row: dict[str, Any]) -> str:
     return " ".join(str(row.get("answer", "") or "").split())
 
 
@@ -89,18 +81,13 @@ def audit_generation_trace(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
             for row in case_rows
             if isinstance(row.get("runtime_config"), dict)
         }
-        source_fingerprints = {
-            str(row.get("source_fingerprint"))
-            for row in case_rows
-            if row.get("source_fingerprint")
-        }
         missing_provenance_rows = sum(
-            int(not isinstance(row.get("runtime_config"), dict) or not row.get("source_fingerprint"))
+            int(not isinstance(row.get("runtime_config"), dict))
             for row in case_rows
         )
-        context_signatures = {_context_signature(row) for row in case_rows}
-        metadata_signatures = {_metadata_signature(row) for row in case_rows}
-        answer_signatures = {_answer_signature(row) for row in case_rows}
+        context_values = {_context_value(row) for row in case_rows}
+        metadata_values = {_metadata_value(row) for row in case_rows}
+        answer_values = {_answer_value(row) for row in case_rows}
         errors = sum(int(bool(row.get("error"))) for row in case_rows)
         repeated = len(case_rows) > 1
         case_reports.append(
@@ -112,14 +99,13 @@ def audit_generation_trace(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
                 "provenance_complete": missing_provenance_rows == 0,
                 "missing_provenance_rows": missing_provenance_rows,
                 "runtime_config_count": len(config_signatures),
-                "source_fingerprint_count": len(source_fingerprints),
-                "context_signature_count": len(context_signatures),
-                "metadata_signature_count": len(metadata_signatures),
-                "answer_signature_count": len(answer_signatures),
-                "context_stable": repeated and len(context_signatures) == 1,
-                "metadata_stable": repeated and len(metadata_signatures) == 1,
-                "answer_exactly_stable": repeated and len(answer_signatures) == 1,
-                "configuration_stable": repeated and len(config_signatures) == 1 and len(source_fingerprints) == 1,
+                "context_variant_count": len(context_values),
+                "metadata_variant_count": len(metadata_values),
+                "answer_variant_count": len(answer_values),
+                "context_stable": repeated and len(context_values) == 1,
+                "metadata_stable": repeated and len(metadata_values) == 1,
+                "answer_exactly_stable": repeated and len(answer_values) == 1,
+                "configuration_stable": repeated and len(config_signatures) == 1,
                 "errors": errors,
             }
         )
@@ -200,7 +186,7 @@ def main() -> int:
     parser.add_argument(
         "--require-provenance",
         action="store_true",
-        help="若任何行缺少 runtime_config 或 source_fingerprint，则返回失败",
+        help="若任何行缺少 runtime_config，则返回失败",
     )
     args = parser.parse_args()
     try:

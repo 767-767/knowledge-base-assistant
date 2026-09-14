@@ -3,12 +3,10 @@ from unittest.mock import patch
 
 import app
 from evaluation.generation_stability import (
-    answer_signature,
     build_runtime,
     completed_keys,
     runtime_config_trace,
     select_cases,
-    source_fingerprint,
 )
 
 
@@ -25,9 +23,6 @@ class GenerationStabilityTests(unittest.TestCase):
         self.assertEqual([case["case_id"] for case in selected], ["a", "c"])
         with self.assertRaises(ValueError):
             select_cases(cases, ["missing"])
-
-    def test_answer_signature_only_collapses_superficial_whitespace(self):
-        self.assertEqual(answer_signature("  n = 25\n\n n = 38  "), "n = 25 n = 38")
 
     def test_completed_keys_rejects_legacy_rows_without_source_filter(self):
         sources = {"case-1": ["paper.pdf"]}
@@ -68,13 +63,10 @@ class GenerationStabilityTests(unittest.TestCase):
         self.assertEqual(trace["reranker_revision"], "fixed-revision")
         self.assertTrue(trace["formula_evidence"])
         self.assertTrue(trace["formula_evidence_auto"])
+        self.assertEqual(trace["llm_model"], config.llm_model)
+        self.assertNotIn("LLM_API_KEY", trace)
         self.assertNotIn("DEEPSEEK_API_KEY", trace)
-        self.assertNotIn("deepseek_base_url", trace)
-
-    def test_source_fingerprint_is_stable_hex(self):
-        fingerprint = source_fingerprint()
-        self.assertEqual(len(fingerprint), 64)
-        int(fingerprint, 16)
+        self.assertNotIn("llm_base_url", trace)
 
     def test_build_runtime_passes_explicit_reranker_and_formula_settings(self):
         base = app.RuntimeConfig(db_path="./base", retrieval_mode="dense")

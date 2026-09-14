@@ -1,7 +1,7 @@
 # Sci-RAG
 
 面向科学论文的 RAG 原型，支持 PDF/TXT/DOCX 解析、Markdown 表格结构化、ChromaDB
-检索、DeepSeek 生成、Gradio UI，以及离线检索/答案审计和可选 RAGAS 评估。
+检索、OpenAI 兼容模型生成、Gradio UI，以及基准标注和答案审计。
 
 当前定位是研究型可用原型，不是生产系统。默认检索仍为 dense；Hybrid、cross-encoder、
 文档路由和窗口扩展均是可控开关；PDF Figure 的 VLM 路径仅作为默认关闭的 opt-in 实验。
@@ -9,24 +9,70 @@ OCR、图片向量索引、通用工具调用和 Graph-RAG 尚未实现。
 
 ## 快速开始
 
+macOS / Linux 可直接运行：
+
 ```bash
-cd /Users/qinleqi/Desktop/knowledge-base-assistant
-source venv/bin/activate
+./start.sh
+```
+
+首次运行会在项目目录创建 Git 已忽略的 `.venv`、安装依赖，并在应用启动时下载中文
+嵌入模型，因此耗时取决于网络。安装中断时重新运行 `./start.sh` 即可继续补全；已有完整
+`venv` 或 `.venv` 时直接复用。也可以手动启动：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
 python3 test_setup.py
-python3 -m unittest discover -s tests -v
 python3 app.py
 ```
 
-首次配置时复制 `.env.example` 为 `.env`，仅在启动 UI 或调用生成模型时填写
-`DEEPSEEK_API_KEY`。`.env`、本地数据库、PDF、模型缓存和 `/tmp` 评估产物都不应提交。
+应用可以在没有 API Key 时启动、上传和管理本地文档。生成问答前可在“设置”页选择
+Ollama、DeepSeek、Gemini 或自定义 OpenAI 兼容服务；云端 API Key 只保留在当前进程。
+也可以复制 `.env.example` 为 `.env` 做本机持久配置。`.env`、本地数据库、PDF、模型缓存
+和 `/tmp` 评估产物都不应提交。
 
 `app.py` 的导入本身无副作用；模型、API 客户端、ChromaDB 和 Gradio 只在
 `create_runtime()` 或 UI 入口中初始化。
+
+## 模型服务
+
+推荐不产生 API 费用且文档不离开本机的 Ollama：
+
+```bash
+ollama pull qwen3:4b-instruct
+```
+
+确保 Ollama 正在运行，然后在“设置”页选择“Ollama（本地）”并应用；API Key 留空即可。
+DeepSeek、Gemini 和其他远程服务使用用户自己的 Key。环境变量统一为 `LLM_API_KEY`、
+`LLM_BASE_URL` 和 `LLM_MODEL`；已有的 `DEEPSEEK_*` 配置仍可继续使用。
+
+## macOS 桌面构建（开发者）
+
+`desktop.py` 会自行启动打包在应用内的 `llama.cpp`，使用随机本机令牌和动态端口，
+并把知识库保存在用户的 `Library/Application Support/Sci-RAG`。生成的应用不再要求最终
+用户安装 Python、Ollama 或填写 API Key；页面底部的“退出 Sci-RAG”会同时关闭网页服务
+和本地模型进程。
+
+当前构建目标是 Apple Silicon 的内部未签名验收包：
+
+```bash
+venv/bin/python -m pip install pyinstaller
+SCI_RAG_LLAMA_SERVER=/path/to/llama-server \
+SCI_RAG_LOCAL_MODEL=/path/to/qwen3-4b-instruct-q4_k_m.gguf \
+SCI_RAG_EMBEDDING_MODEL=/path/to/bge-small-zh-v1.5 \
+./scripts/build_macos_app.sh
+```
+
+产物位于 `dist/Sci-RAG.app`。对外分发前仍需补齐第三方许可证文件、应用图标、Developer ID
+签名与 Apple 公证；这些只属于正式发布边界，不影响当前本机功能验收。
 
 ## 文档与表格能力
 
 - PDF 使用 `pymupdf4llm` 读取文字层，不写出或持久化图片。
 - TXT 和 DOCX 走本地解析；DOCX 表格会转为 Markdown。
+- 上传页显示已入库文档及文本块数；删除文档需显式确认，并同步清理其本地视觉 PDF。
+- 问答页可选择一篇或多篇文档限定检索范围；不选择时检索整个知识库。
 - 表格独立保存为 canonical table chunks，并保留表号、caption、页码和来源 metadata。
 - 明确给出 `Table N + 行 + 列` 的问题优先执行确定性单元格查找，不调用生成模型猜值。
 - 显式表号无法匹配时不会借用其他表格。
@@ -59,6 +105,7 @@ bash scripts/launch_phase1_ui_test.sh --existing
 完成后在终端按 `Ctrl+C`。默认论文的最小验收项：
 
 - 上传、问答、导图、测验四个页面可用；
+- 文档清单、问答范围选择和确认删除可用；
 - Table 2 / DrugR* / Overall Optimization Score 返回 `0.2060`；
 - Table 2 / DrugR* / Target property F1 返回 `0.3404`；
 - Table 1 / DrugR / Overall Optimization Score 返回 `0.2712`；
@@ -72,7 +119,7 @@ bash scripts/launch_phase1_ui_test.sh --existing
 | --- | --- | --- |
 | `SCI_RAG_RETRIEVAL_MODE` | `dense` | `dense` 或 BM25+dense 的 `hybrid` |
 | `SCI_RAG_RETRIEVAL_K` | `12` | dense 初始候选数 |
-| `SCI_RAG_CONTEXT_K` | `10` | 实际送入生成模型的上下文槽位 |
+| `SCI_RAG_CONTEXT_K` | `4` | 实际送入问答、大纲和测验模型的上下文槽位；可按模型窗口调高 |
 | `SCI_RAG_DOCUMENT_ROUTING` | `false` | 唯一高信号标识符命中时限制来源 |
 | `SCI_RAG_VISION_ENABLED` | `false` | PDF Figure 问题的 opt-in 视觉路径；需同时开启文档路由 |
 | `SCI_RAG_VISION_MODEL` | `deepseek-v4-flash-vision-exp` | 视觉路径使用的模型名 |
@@ -130,29 +177,6 @@ python3 evaluation/validate_benchmark.py \
   --verify-files --require-complete
 ```
 
-不加载 Chroma、模型或 API 的 BM25 基线：
-
-```bash
-python3 evaluation/benchmark_retrieval.py \
-  --papers-dir /Users/qinleqi/Desktop \
-  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
-  --top-k 1,3,5,10 --show-failures
-```
-
-使用已缓存 embedding/reranker 的固定实验路径：
-
-```bash
-HF_HUB_OFFLINE=1 python3 evaluation/benchmark_retrieval.py \
-  --papers-dir /Users/qinleqi/Desktop \
-  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
-  --retriever hybrid --top-k 1,3,5,10 \
-  --reranker-model BAAI/bge-reranker-base \
-  --reranker-revision 2cfc18c9415c912f9d8155881c133215df768a70 \
-  --reranker-fusion rrf --document-routing --query-decomposition \
-  --structured-table-guard --parent-window --formula-evidence \
-  --limitation-evidence --show-failures
-```
-
 如需将已核对的 THINKNOTE（Findings of EACL 2026）加入对照，可显式使用扩展清单；它通过
 `base_manifest` 继承五论文基线，不改变默认 53 题：
 
@@ -199,16 +223,6 @@ python3 evaluation/answer_audit.py \
   --json-out /tmp/sci_rag_answer_audit.json
 ```
 
-比较两个固定题集的回答：
-
-```bash
-python3 evaluation/compare_answer_runs.py \
-  --testset evaluation/benchmark/cases.jsonl \
-  --baseline /tmp/dense.jsonl --candidate /tmp/hybrid.jsonl \
-  --baseline-name dense --candidate-name hybrid \
-  --require-all --json-out /tmp/sci_rag_answer_compare.json
-```
-
 生成并校验人工复核模板：
 
 ```bash
@@ -224,7 +238,7 @@ python3 evaluation/review_answers.py \
 ```
 
 重复生成器 `evaluation/generation_stability.py` 只应连接隔离 ChromaDB。它按
-`(repeat, case_id)` 安全续跑，并记录无密钥的配置、源码指纹、上下文 ID 和 metadata。
+`(repeat, case_id)` 安全续跑，并记录无密钥的配置、上下文 ID 和 metadata。
 对应 trace 可用 `evaluation/audit_generation_trace.py` 与
 `evaluation/validate_answer_evidence.py` 离线检查。
 
@@ -242,31 +256,6 @@ python3 evaluation/ground_truth_audit.py \
 该报告分别输出 required-fact 词面覆盖、人工整理上下文召回和规范化文本一致性；只有附带
 `--reviews` 的人工判断才计入语义正确性，不能把任一自动指标直接称为答案正确率。
 
-## RAGAS 边界
-
-只有明确授权外部调用时才运行：
-
-```bash
-SCI_RAG_DB_PATH=/absolute/path/to/isolated-chroma \
-python3 evaluation/evaluate.py \
-  --testset evaluation/benchmark/cases.jsonl \
-  --report-json /tmp/sci_rag_ragas.json \
-  --report-md /tmp/sci_rag_ragas.md
-```
-
-审计已有报告：
-
-```bash
-python3 evaluation/ragas_preflight.py \
-  --report-json evaluation/evaluation_report.json \
-  --testset evaluation/test_questions.json --require-complete
-```
-
-现有三个 RAGAS 指标不使用 `ground_truth/reference`，因此不能证明答案正确性。高
-Answer Relevance 只说明回答与问题相关；Faithfulness 只检查回答是否由送入评判的上下文
-支持；Context Relevance 只评价上下文与问题的相关程度。单论文 11 题或五论文 53 题也不能
-证明跨领域泛化。
-
 ## 当前证据与边界
 
 - Phase H15 已冻结最终一次性 release-candidate 留出集：3 篇此前未进入任何清单的论文、18 道题，
@@ -275,7 +264,7 @@ Answer Relevance 只说明回答与问题相关；Faithfulness 只检查回答�
   未达到 `18/18`，因此停止在检索层，不进入真实送模上下文或生成；当前线上默认仍为 Dense。
 - 当前公式隔离源码在全新五论文数据库中产生 577 块：455 个正文、24 个表格、23 个 Figure
   坐标文字和 75 个独立公式块；普通检索语料仍为 502 块。
-- 公式隔离版本完成两轮 53 题生成，106/106 次 API 调用成功，provenance、源码指纹和运行配置完整且
+- 公式隔离版本完成两轮 53 题生成，106/106 次 API 调用成功，provenance 和运行配置完整且
   一致。两轮 top-1/3/5 上下文均为 `53/53` 相同；完整 top-10 为 `51/53` 相同，两处变化只发生在
   低位候选，目标证据和答案未受影响。随后仅修改了引用补充门控，未改变检索路径。
 - 两轮词面事实审计分别为 `50/53 full`（macro/micro=`0.9811/0.9795`）和 `52/53 full`
@@ -291,7 +280,7 @@ Answer Relevance 只说明回答与问题相关；Faithfulness 只检查回答�
 - `evaluation/benchmark/manifest_generalization.json` 提供默认关闭的 16 道留出题，覆盖新论文的
   表格、图像空间关系和跨文档证据；最终两轮生成 32/32 行成功，16 个 case 的 context 与 provenance
   均稳定。针对暴露的四类缺口完成通用修复并聚焦复测；人工语义复核记录现为 `16 correct`，详见
-  `evaluation/benchmark/reviews_generalization_16.jsonl`。这不是生产正确率或 RAGAS 结论。表格题的
+  `evaluation/benchmark/reviews_generalization_16.jsonl`。这不是生产正确率结论。表格题的
   模型/数据集与 setting 消歧、同节续块排序、跨来源共享谓词补证据和空间坐标方向均有回归测试。
 - 多模态至少需要 10 道人工核对的 image-only 失败题；Graph-RAG 至少需要 5 道稳定的
   跨文档多跳失败题；通用工具调用至少需要 20 道真实运算题和 5 道可被本地白名单工具
@@ -305,6 +294,6 @@ Answer Relevance 只说明回答与问题相关；Faithfulness 只检查回答�
 - `sci_rag_core.py`：解析、切分、表格/公式/限制证据与答案核对。
 - `sci_rag_retrieval.py`：BM25、文档路由、query variants 和 RRF。
 - `sci_rag_reranking.py`：本地 cross-encoder 封装。
-- `evaluation/`：基准加载、检索、生成、RAGAS 和审计工具。
+- `evaluation/`：基准校验、真实应用上下文模拟、生成和审计工具。
 - `tests/`：离线回归测试。
 - `MODIFICATION_LOG.md`：唯一的阶段修改记录。

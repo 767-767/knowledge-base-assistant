@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """Offline evidence-only validation for generated answer traces.
 
-The validator never loads Chroma, an embedding model, Gradio, RAGAS, or an
-external API. It consumes a JSONL trace containing ``question``, ``answer``,
+The validator does not load the application runtime or an external API. It
+consumes a JSONL trace containing ``question``, ``answer``,
 ``contexts`` and ``context_metadatas`` (as produced by
 ``evaluation/generation_stability.py``), rebuilds the same evidence ledger
 used by the prompt, and emits review signals. It does not read benchmark

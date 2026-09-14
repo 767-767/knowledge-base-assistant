@@ -55,16 +55,6 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$PROJECT_ROOT/.env" ]]; then
-  echo "找不到 $PROJECT_ROOT/.env；请从 .env.example 创建并填写 DEEPSEEK_API_KEY。" >&2
-  exit 1
-fi
-
-if ! grep -Eq '^DEEPSEEK_API_KEY=[^[:space:]]+' "$PROJECT_ROOT/.env"; then
-  echo "$PROJECT_ROOT/.env 中没有可用的 DEEPSEEK_API_KEY。" >&2
-  exit 1
-fi
-
 if [[ "$MODE" == "fresh" && ! -f "$PDF_PATH" ]]; then
   echo "找不到 PDF：$PDF_PATH" >&2
   echo "也可以显式传入 PDF 路径：bash scripts/launch_phase1_ui_test.sh /path/to/paper.pdf" >&2
@@ -117,8 +107,9 @@ echo
 
 "$PYTHON_BIN" - <<'PY'
 import app
+import gradio as gr
 
 runtime = app.create_runtime()
 print(f"当前测试数据库块数：{runtime.collection.count()}")
-app.build_demo(runtime).launch()
+app.build_demo(runtime).launch(theme=gr.themes.Soft())
 PY

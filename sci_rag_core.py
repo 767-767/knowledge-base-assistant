@@ -808,7 +808,7 @@ def supplement_formula_with_evidence(
     query_symbols = {
         token.casefold()
         for token in re.findall(
-            r"(?<![A-Za-z])[A-Za-z](?:_[A-Za-z]+)?(?![A-Za-z])",
+            r"(?<![A-Za-z0-9])[A-Za-z](?:_[A-Za-z]+)?(?![A-Za-z0-9])",
             str(question or ""),
         )
     }
@@ -861,6 +861,8 @@ def supplement_formula_with_evidence(
                 )
                 for label in explicit_formula_labels
             )
+            if query_symbols and not (symbol_hit or explicit_label_hit):
+                continue
             if not symbol_hit and (
                 span_hits < 1 if "∈" in line else span_hits < 2
             ) and not (explicit_label_hit and "=" in line):
@@ -3827,13 +3829,6 @@ def table_label_from_metadata(metadata: dict[str, Any]) -> str | None:
         return str(number).strip()
     caption_match = TABLE_LABEL_RE.search(str(metadata.get("table_caption", "")))
     return caption_match.group(1).upper() if caption_match else None
-
-
-def table_number_from_metadata(metadata: dict[str, Any]) -> int | None:
-    """Read a numeric table number from new or legacy Chroma metadata."""
-
-    label = table_label_from_metadata(metadata)
-    return int(label) if label and label.isdigit() else None
 
 
 def matching_table_indices(
