@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -3778,8 +3779,11 @@ class RuntimeContractTests(unittest.TestCase):
             def count(self):
                 return self.total
 
-            def upsert(self, **_kwargs):
-                self.total += 1
+            def get(self, **_kwargs):
+                return {"ids": [], "metadatas": []}
+
+            def upsert(self, **kwargs):
+                self.total += len(kwargs["ids"])
 
         runtime = app.Runtime(app.RuntimeConfig(), None, Embedding(), Collection())
         runtime._lexical_snapshot = object()
@@ -3792,14 +3796,86 @@ class RuntimeContractTests(unittest.TestCase):
                 app.add_document_to_db(handle.name, runtime=runtime)
         self.assertIsNone(runtime._lexical_snapshot)
 
+    def test_upload_batches_chunks_and_disambiguates_same_named_files(self):
+        class Embedding:
+            def __init__(self):
+                self.batch_sizes = []
+
+            def encode(self, texts):
+                self.batch_sizes.append(len(texts))
+                return [[0.1, 0.2] for _text in texts]
+
+        class Collection:
+            def __init__(self):
+                self.records = {}
+
+            def count(self):
+                return len(self.records)
+
+            def get(self, where=None, **_kwargs):
+                records = list(self.records.items())
+                if where:
+                    field, condition = next(iter(where.items()))
+                    records = [
+                        row
+                        for row in records
+                        if row[1][1].get(field) == condition["$eq"]
+                    ]
+                return {
+                    "ids": [row[0] for row in records],
+                    "documents": [row[1][0] for row in records],
+                    "metadatas": [row[1][1] for row in records],
+                }
+
+            def upsert(self, ids, documents, metadatas, **_kwargs):
+                for doc_id, document, metadata in zip(ids, documents, metadatas):
+                    self.records[doc_id] = (document, metadata)
+
+            def delete(self, ids):
+                for doc_id in ids:
+                    self.records.pop(doc_id, None)
+
+        embedding = Embedding()
+        collection = Collection()
+        runtime = app.Runtime(app.RuntimeConfig(), None, embedding, collection)
+        with tempfile.TemporaryDirectory() as directory:
+            first_dir = Path(directory) / "first"
+            second_dir = Path(directory) / "second"
+            first_dir.mkdir()
+            second_dir.mkdir()
+            first = first_dir / "report.txt"
+            second = second_dir / "report.txt"
+            first.write_text("first", encoding="utf-8")
+            second.write_text("second", encoding="utf-8")
+            with patch.object(
+                app,
+                "load_and_split_document",
+                side_effect=[
+                    [Chunk(f"first-{index}", {}) for index in range(65)],
+                    [Chunk("second", {})],
+                ],
+            ):
+                app.add_document_to_db(str(first), runtime)
+                app.add_document_to_db(str(second), runtime)
+
+        sources = {metadata[1]["source"] for metadata in collection.records.values()}
+        second_source = next(source for source in sources if source != "report.txt")
+        self.assertEqual(embedding.batch_sizes, [64, 1, 1])
+        self.assertTrue(second_source.startswith("report ("))
+        app.delete_document(second_source, True, runtime)
+        self.assertEqual(
+            {metadata[1]["source"] for metadata in collection.records.values()},
+            {"report.txt"},
+        )
+
     def test_formula_storage_keeps_existing_chunk_indices_and_ids(self):
         class Vector(list):
             def tolist(self):
                 return list(self)
 
         class Embedding:
-            def encode(self, _text):
-                return Vector([0.1, 0.2])
+            def encode(self, texts):
+                return [Vector([0.1, 0.2]) for _text in texts]
 
         class Collection:
             def __init__(self):
@@ -3807,6 +3883,9 @@ class RuntimeContractTests(unittest.TestCase):
 
             def count(self):
                 return len(self.records)
+
+            def get(self, **_kwargs):
+                return {"ids": [], "metadatas": []}
 
             def upsert(self, **kwargs):
                 self.records.append(kwargs)
@@ -3824,8 +3903,8 @@ class RuntimeContractTests(unittest.TestCase):
         ), patch.object(app, "file_sha256", return_value="document-hash"):
             app.add_document_to_db(handle.name, runtime=runtime)
 
-        ids = [record["ids"][0] for record in collection.records]
-        metas = [record["metadatas"][0] for record in collection.records]
+        ids = collection.records[0]["ids"]
+        metas = collection.records[0]["metadatas"]
         self.assertEqual([metas[0]["chunk_index"], metas[2]["chunk_index"]], [0, 1])
         self.assertNotIn("chunk_index", metas[1])
         self.assertEqual(
@@ -4044,6 +4123,48 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertFalse(source_pdf.exists())
             self.assertTrue(shared_pdf.exists())
             self.assertIsNone(runtime._lexical_snapshot)
+
+    def test_upload_file_preserves_pathlib_path(self):
+        source = Path("folder") / "document.txt"
+        with patch.object(app, "add_document_to_db", return_value="ok") as add:
+            self.assertEqual(app.upload_file(source), "ok")
+        add.assert_called_once_with(str(source), runtime=None, progress=None)
+
+    def test_upload_file_reports_parser_errors(self):
+        with patch.object(app, "add_document_to_db", side_effect=ValueError("文件损坏")):
+            self.assertEqual(app.upload_file("broken.pdf"), "添加失败：文件损坏")
+
+    def test_quiz_json_is_parsed_and_scored(self):
+        response = json.dumps(
+            [
+                {
+                    "question": f"问题 {index}",
+                    "options": ["甲", "乙", "丙", "丁"],
+                    "answer": "A",
+                    "explanation": f"解析 {index}",
+                }
+                for index in range(1, 6)
+            ],
+            ensure_ascii=False,
+        )
+        items = app.parse_quiz_items(response)
+
+        self.assertEqual(len(items), 5)
+        self.assertIn("得分：4 / 5", app.score_quiz(items, ["A. 甲"] * 4 + ["B. 乙"]))
+        self.assertEqual(app.score_quiz(items, ["A. 甲"] * 4), "请完成全部 5 道题后再提交。")
+
+    def test_evidence_panel_shows_exact_context_and_location(self):
+        panel = app.format_evidence_panel(
+            {
+                "contexts": ["原文第一行\n原文第二行"],
+                "context_metadatas": [
+                    {"source": "paper.pdf", "page": 3, "type": "text"}
+                ],
+            }
+        )
+
+        self.assertIn("paper.pdf，第 3 页", panel)
+        self.assertIn("> 原文第一行", panel)
 
     def test_model_service_can_be_configured_after_local_startup(self):
         class Collection:

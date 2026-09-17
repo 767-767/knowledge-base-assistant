@@ -1,299 +1,118 @@
-# Sci-RAG
+# 文档学习工作台
 
-面向科学论文的 RAG 原型，支持 PDF/TXT/DOCX 解析、Markdown 表格结构化、ChromaDB
-检索、OpenAI 兼容模型生成、Gradio UI，以及基准标注和答案审计。
+把 PDF、TXT 或 DOCX 文档整理成保存在电脑上的资料库，并基于资料进行问答、原文核对、学习大纲整理和自测。
 
-当前定位是研究型可用原型，不是生产系统。默认检索仍为 dense；Hybrid、cross-encoder、
-文档路由和窗口扩展均是可控开关；PDF Figure 的 VLM 路径仅作为默认关闭的 opt-in 实验。
-OCR、图片向量索引、通用工具调用和 Graph-RAG 尚未实现。
+## 主要功能
 
-## 快速开始
+- **文档资料库**：导入和管理本地文档，同名但内容不同的文件可以分别保存。
+- **资料问答与原文比对**：选择一篇或多篇文档提问，同时查看回答实际使用的原文片段和页码。
+- **学习大纲**：根据资料库内容生成 Markdown 层级大纲。
+- **自测习题与测评**：生成 5 道单项选择题，提交后显示得分、答案和解析。
+- **本地保存**：文档索引默认保存在当前电脑，不需要注册账户。
 
-macOS / Linux 可直接运行：
+## 使用前准备
+
+源码版需要：
+
+- Python 3.10 或更高版本；
+- 首次运行时可以连接互联网，用于安装依赖和下载中文嵌入模型；
+- 如需生成回答、大纲和习题，还需使用本机 Ollama，或在页面中填写自己的云端模型 API Key。
+
+仅上传、查看和删除文档不需要 API Key。
+
+## 下载与启动
+
+在 GitHub 仓库页面点击 **Code → Download ZIP**，下载后完整解压，再进入解压后的文件夹。
+
+### macOS / Linux
+
+在该文件夹中打开终端并运行：
 
 ```bash
 ./start.sh
 ```
 
-首次运行会在项目目录创建 Git 已忽略的 `.venv`、安装依赖，并在应用启动时下载中文
-嵌入模型，因此耗时取决于网络。安装中断时重新运行 `./start.sh` 即可继续补全；已有完整
-`venv` 或 `.venv` 时直接复用。也可以手动启动：
+如果系统提示没有执行权限，先运行一次：
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -r requirements.txt
-python3 test_setup.py
-python3 app.py
+chmod +x start.sh
+./start.sh
 ```
 
-应用可以在没有 API Key 时启动、上传和管理本地文档。生成问答前可在“设置”页选择
-Ollama、DeepSeek、Gemini 或自定义 OpenAI 兼容服务；云端 API Key 只保留在当前进程。
-也可以复制 `.env.example` 为 `.env` 做本机持久配置。`.env`、本地数据库、PDF、模型缓存
-和 `/tmp` 评估产物都不应提交。
+### Windows
 
-`app.py` 的导入本身无副作用；模型、API 客户端、ChromaDB 和 Gradio 只在
-`create_runtime()` 或 UI 入口中初始化。
+双击 `start.bat`，或者在解压后的文件夹中打开命令提示符并运行：
 
-## 模型服务
-
-推荐不产生 API 费用且文档不离开本机的 Ollama：
-
-```bash
-ollama pull qwen3:4b-instruct
+```bat
+start.bat
 ```
 
-确保 Ollama 正在运行，然后在“设置”页选择“Ollama（本地）”并应用；API Key 留空即可。
-DeepSeek、Gemini 和其他远程服务使用用户自己的 Key。环境变量统一为 `LLM_API_KEY`、
-`LLM_BASE_URL` 和 `LLM_MODEL`；已有的 `DEEPSEEK_*` 配置仍可继续使用。
+Windows 启动器尚未完成真机验收。如遇问题，请确认已安装 Python 3.10 或更高版本，并允许 Python 加入系统 PATH。
 
-## macOS 桌面构建（开发者）
+首次启动会自动创建独立的 Python 环境并安装依赖，所需时间取决于网络速度。服务就绪后会自动打开默认浏览器，无需手动复制网址。安装中断时，重新运行启动脚本即可继续。
 
-`desktop.py` 会自行启动打包在应用内的 `llama.cpp`，使用随机本机令牌和动态端口，
-并把知识库保存在用户的 `Library/Application Support/Sci-RAG`。生成的应用不再要求最终
-用户安装 Python、Ollama 或填写 API Key；页面底部的“退出 Sci-RAG”会同时关闭网页服务
-和本地模型进程。
+关闭工作台时，在运行启动脚本的终端中按 `Ctrl+C`。
 
-当前构建目标是 Apple Silicon 的内部未签名验收包：
+## 配置模型
 
-```bash
-venv/bin/python -m pip install pyinstaller
-SCI_RAG_LLAMA_SERVER=/path/to/llama-server \
-SCI_RAG_LOCAL_MODEL=/path/to/qwen3-4b-instruct-q4_k_m.gguf \
-SCI_RAG_EMBEDDING_MODEL=/path/to/bge-small-zh-v1.5 \
-./scripts/build_macos_app.sh
-```
+打开页面后，进入“模型设置”。
 
-产物位于 `dist/Sci-RAG.app`。对外分发前仍需补齐第三方许可证文件、应用图标、Developer ID
-签名与 Apple 公证；这些只属于正式发布边界，不影响当前本机功能验收。
+### 使用本机 Ollama
 
-## 文档与表格能力
+Ollama 不需要 API Key，提问内容和检索到的原文不会发送给云端模型服务。
 
-- PDF 使用 `pymupdf4llm` 读取文字层，不写出或持久化图片。
-- TXT 和 DOCX 走本地解析；DOCX 表格会转为 Markdown。
-- 上传页显示已入库文档及文本块数；删除文档需显式确认，并同步清理其本地视觉 PDF。
-- 问答页可选择一篇或多篇文档限定检索范围；不选择时检索整个知识库。
-- 表格独立保存为 canonical table chunks，并保留表号、caption、页码和来源 metadata。
-- 明确给出 `Table N + 行 + 列` 的问题优先执行确定性单元格查找，不调用生成模型猜值。
-- 显式表号无法匹配时不会借用其他表格。
-- born-digital Figure 坐标文字可选启用，但这不是 OCR 或像素级图片理解。
-- 原始 PDF 文字层中被 Markdown 漏掉的等式会作为独立 `formula` 证据块保存；普通 dense/Hybrid
-  候选不会使用它们，只有明确公式问题才在同源范围内补充。
+1. 安装并启动 [Ollama](https://ollama.com/)；
+2. 在终端下载模型：
 
-上传后如需验证新 metadata，应使用新建的隔离数据库。旧 ChromaDB 不会自动迁移或重建。
+   ```bash
+   ollama pull qwen3:4b-instruct
+   ```
 
-## 网页回归
+3. 在“模型设置”中选择“Ollama（本地）”，然后点击“应用模型设置”。
 
-一键使用临时 ChromaDB 导入默认论文并启动正常 UI：
+### 使用云端模型
 
-```bash
-bash scripts/launch_phase1_ui_test.sh
-```
+也可以在“模型设置”中选择 DeepSeek、Gemini 或自定义 OpenAI 兼容服务，并填写自己的 API Key。通过云端模型生成内容时，问题和本次检索到的相关原文会发送给所选服务商；请勿上传或发送不适合交由该服务处理的敏感资料。
 
-使用其他 PDF：
+页面中填写的 API Key 只保留在当前运行进程中，关闭程序后不会保存。
 
-```bash
-bash scripts/launch_phase1_ui_test.sh /absolute/path/to/paper.pdf
-```
+## 基本使用流程
 
-只验证现有数据库兼容性（脚本会先复制数据库，不写原库）：
+1. 在“文档资料库”中添加 PDF、TXT 或 DOCX。
+2. 在“资料问答与原文比对”中选择资料范围并提问。
+3. 对照页面展示的来源、页码和原文片段核查回答。
+4. 根据需要生成学习大纲或自测题。
 
-```bash
-bash scripts/launch_phase1_ui_test.sh --existing
-```
+PDF 需要包含可提取的文字层。扫描件、纯图片 PDF 和图片中的文字目前不会自动进行 OCR 识别。
 
-完成后在终端按 `Ctrl+C`。默认论文的最小验收项：
+## 数据与隐私
 
-- 上传、问答、导图、测验四个页面可用；
-- 文档清单、问答范围选择和确认删除可用；
-- Table 2 / DrugR* / Overall Optimization Score 返回 `0.2060`；
-- Table 2 / DrugR* / Target property F1 返回 `0.3404`；
-- Table 1 / DrugR / Overall Optimization Score 返回 `0.2712`；
-- 普通正文问题和第二篇文档上传不受表格路径影响。
+- 文档索引默认保存在项目文件夹下的 `chroma_db` 中。
+- 中文嵌入模型在本机运行；首次使用时会从 Hugging Face 下载到本机缓存。
+- 使用 Ollama 时，文档问答可以完全在本机完成。
+- 使用云端模型时，只有问题和本次回答所需的检索片段会发送给所选服务商。
+- `.env`、本地资料库、上传文档和模型缓存均已排除在 Git 提交范围之外。
 
-## 检索配置
+如需迁移本地资料库，请在工作台停止运行后备份 `chroma_db` 文件夹。
 
-环境变量的完整默认值和说明见 `.env.example`。常用配置如下：
+## 常见问题
 
-| 配置 | 默认 | 作用 |
-| --- | --- | --- |
-| `SCI_RAG_RETRIEVAL_MODE` | `dense` | `dense` 或 BM25+dense 的 `hybrid` |
-| `SCI_RAG_RETRIEVAL_K` | `12` | dense 初始候选数 |
-| `SCI_RAG_CONTEXT_K` | `4` | 实际送入问答、大纲和测验模型的上下文槽位；可按模型窗口调高 |
-| `SCI_RAG_DOCUMENT_ROUTING` | `false` | 唯一高信号标识符命中时限制来源 |
-| `SCI_RAG_VISION_ENABLED` | `false` | PDF Figure 问题的 opt-in 视觉路径；需同时开启文档路由 |
-| `SCI_RAG_VISION_MODEL` | `deepseek-v4-flash-vision-exp` | 视觉路径使用的模型名 |
-| `SCI_RAG_QUERY_DECOMPOSITION` | `false` | 对复合问题生成有界子查询 |
-| `SCI_RAG_PARENT_WINDOW` | `false` | 为前两个正文锚点拼接同页邻块 |
-| `SCI_RAG_SPATIAL_FIGURE_EVIDENCE` | `false` | 读取 PDF 文字层中的 Figure 坐标证据 |
-| `SCI_RAG_FORMULA_EVIDENCE_AUTO` | `true` | 显式公式/算法问题自动启用窄证据通道 |
-| `SCI_RAG_FORMULA_EVIDENCE` | `false` | 全局公式证据实验开关 |
-| `SCI_RAG_ANSWER_VALIDATION` | `false` | 返回只读证据核对提示，不改写或重试答案 |
+**浏览器没有自动打开怎么办？**
 
-Hybrid 运行示例：
+查看终端中显示的本地地址，通常是 `http://127.0.0.1:7860`。
 
-```bash
-SCI_RAG_RETRIEVAL_MODE=hybrid python3 app.py
-```
+**为什么可以上传文档，但不能生成回答？**
 
-本地 cross-encoder 必须已缓存且固定 revision；运行时使用
-`local_files_only=True`，缺失时直接失败，不会隐式下载：
+文档管理和检索模型可以在本机工作，但回答、大纲和习题需要先在“模型设置”中连接 Ollama 或云端模型服务。
 
-```bash
-HF_HUB_OFFLINE=1 \
-SCI_RAG_RETRIEVAL_MODE=hybrid \
-SCI_RAG_RERANKER_MODEL=BAAI/bge-reranker-base \
-SCI_RAG_RERANKER_REVISION=2cfc18c9415c912f9d8155881c133215df768a70 \
-python3 app.py
-```
+**首次启动安装失败怎么办？**
 
-Hybrid 首次查询会从当前 collection 构建内存 BM25 快照；上传文档后快照自动失效。
-路由只在来源唯一时生效；开启查询分解后，跨论文问题的各子句分别限定到各自来源，并保留有界
-来源内 lexical/同节/数字证据。歧义问题仍回退全库。所有实验检索之后仍执行表号保护和确定性单元格查找。
+确认网络和 Python 版本正常，然后重新运行 `start.sh` 或 `start.bat`。启动器会复用已经安装好的内容并继续补全缺失依赖。
 
-视觉路径默认关闭。开启 `SCI_RAG_VISION_ENABLED=true` 并同时开启
-`SCI_RAG_DOCUMENT_ROUTING=true` 后，上传的 PDF 会按 SHA-256 保存到
-`<SCI_RAG_DB_PATH>/source_pdfs/`；仅明确包含 Figure/Extended Data Figure 且能唯一定位来源的
-问题会发送完整图和局部图。普通问题、表格问题、来源不明确的问题继续使用文本 RAG。
-该路径目前是 opt-in 实验，尚未达到默认推广标准。
+**如何清空某篇资料？**
 
-## 五论文离线基准
+在“文档资料库”中展开“管理已上传文档”，选择文档并确认删除。请优先使用页面提供的删除功能。
 
-`evaluation/benchmark/` 包含 5 篇论文、53 道题的 manifest、人工 gold contexts、
-required facts、别名和版本化复核标签。PDF 不进入 Git，只记录文件名与 SHA-256。
+## 许可证
 
-校验标注：
-
-```bash
-python3 evaluation/validate_benchmark.py
-```
-
-连同仓库外 PDF 一起核验：
-
-```bash
-python3 evaluation/validate_benchmark.py \
-  --papers-dir /Users/qinleqi/Desktop \
-  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
-  --verify-files --require-complete
-```
-
-如需将已核对的 THINKNOTE（Findings of EACL 2026）加入对照，可显式使用扩展清单；它通过
-`base_manifest` 继承五论文基线，不改变默认 53 题：
-
-```bash
-python3 evaluation/validate_benchmark.py \
-  --manifest evaluation/benchmark/manifest_expanded.json \
-  --papers-dir /Users/qinleqi/Desktop \
-  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
-  --verify-files --require-complete
-```
-
-扩展清单当前为 6 篇论文、66 题；13 道 THINKNOTE 用例已逐题对照本地 PDF，结果只作为
-额外基准，不覆盖五论文历史报告。
-
-泛化留出清单 `evaluation/benchmark/manifest_generalization.json` 在此基础上加入 TACL 2025
-TANQ 与 Findings of EMNLP 2025 FigEx，共 8 篇论文、82 题；默认关闭，不改变 53/66 题基线。
-PDF 仍保存在仓库外，校验命令为：
-
-```bash
-python3 evaluation/validate_benchmark.py \
-  --manifest evaluation/benchmark/manifest_generalization.json \
-  --papers-dir /Users/qinleqi/Desktop \
-  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
-  --verify-files --require-complete
-```
-
-这些结果测量上下文中的词面事实覆盖和 provenance，不等于答案正确率。详细标注边界见
-`evaluation/benchmark/README.md` 与 `evaluation/benchmark/PAPER_AUDIT.md`。
-
-## 答案与生成审计
-
-答案文件使用仓库外 JSONL，每行至少包含 `case_id` 和 `answer`：
-
-```json
-{"case_id":"drugr-09","answer":"...","mode":"hybrid"}
-```
-
-词面完整性审计：
-
-```bash
-python3 evaluation/answer_audit.py \
-  --testset evaluation/benchmark/cases.jsonl \
-  --answers /tmp/sci_rag_answers.jsonl --require-all \
-  --json-out /tmp/sci_rag_answer_audit.json
-```
-
-生成并校验人工复核模板：
-
-```bash
-python3 evaluation/review_answers.py \
-  --testset evaluation/benchmark/cases.jsonl \
-  --answers /tmp/hybrid.jsonl --require-all \
-  --template-out /tmp/sci_rag_review.jsonl
-
-python3 evaluation/review_answers.py \
-  --testset evaluation/benchmark/cases.jsonl \
-  --answers /tmp/hybrid.jsonl --reviews /tmp/sci_rag_review.jsonl \
-  --require-all --json-out /tmp/sci_rag_review_summary.json
-```
-
-重复生成器 `evaluation/generation_stability.py` 只应连接隔离 ChromaDB。它按
-`(repeat, case_id)` 安全续跑，并记录无密钥的配置、上下文 ID 和 metadata。
-对应 trace 可用 `evaluation/audit_generation_trace.py` 与
-`evaluation/validate_answer_evidence.py` 离线检查。
-
-答案词面覆盖、拒答风险和证据提示都是诊断信号，不能代替逐题语义复核。
-
-金标准答案审计（不调用模型）：
-
-```bash
-python3 evaluation/ground_truth_audit.py \
-  --testset evaluation/benchmark/cases.jsonl \
-  --answers /tmp/sci_rag_generation_trace.jsonl \
-  --require-all --json-out /tmp/sci_rag_ground_truth_audit.json
-```
-
-该报告分别输出 required-fact 词面覆盖、人工整理上下文召回和规范化文本一致性；只有附带
-`--reviews` 的人工判断才计入语义正确性，不能把任一自动指标直接称为答案正确率。
-
-## 当前证据与边界
-
-- Phase H15 已冻结最终一次性 release-candidate 留出集：3 篇此前未进入任何清单的论文、18 道题，
-  固定使用 Hybrid、文档路由、查询分解、parent-window、表格/公式/空间 Figure 证据且不使用 reranker；
-  真实 PDF 解析门禁为 `18/18 full`。一次性 `@10` 检索为 `14/18 full`、fact macro/micro=`0.831/0.843`，
-  未达到 `18/18`，因此停止在检索层，不进入真实送模上下文或生成；当前线上默认仍为 Dense。
-- 当前公式隔离源码在全新五论文数据库中产生 577 块：455 个正文、24 个表格、23 个 Figure
-  坐标文字和 75 个独立公式块；普通检索语料仍为 502 块。
-- 公式隔离版本完成两轮 53 题生成，106/106 次 API 调用成功，provenance 和运行配置完整且
-  一致。两轮 top-1/3/5 上下文均为 `53/53` 相同；完整 top-10 为 `51/53` 相同，两处变化只发生在
-  低位候选，目标证据和答案未受影响。随后仅修改了引用补充门控，未改变检索路径。
-- 两轮词面事实审计分别为 `50/53 full`（macro/micro=`0.9811/0.9795`）和 `52/53 full`
-  （`0.9937/0.9932`）。逐题语义复核两轮均为 `52 correct / 1 partial`；`mgno-04` 的目标事实正确，
-  但附加的循环方向描述存在混淆。
-- 两轮规范化答案文本只有 `18/53` 完全一致，说明生成措辞仍有随机性；引用补充门控修复后，针对
-  `scidqa-05/06` 和 `table-llm-07` 的 3 题定向复测均不再附加无关证据。
-- evidence-only 检查第一轮为 30 `ok`、23 `not_applicable`，第二轮为 29 `ok`、
-  23 `not_applicable`、1 `review`；这些诊断与人工复核都不能外推为跨领域泛化或生产可靠性。
-- 当前没有图片持久化/OCR、通用工具注册与执行器、图抽取或图数据库。
-- `evaluation/benchmark/manifest_challenge.json` 提供默认关闭的 35 道定向挑战题：10 道
-  image-only、20 道 computation、5 道 cross-document；它们只用于采集缺口，不改变默认基准。
-- `evaluation/benchmark/manifest_generalization.json` 提供默认关闭的 16 道留出题，覆盖新论文的
-  表格、图像空间关系和跨文档证据；最终两轮生成 32/32 行成功，16 个 case 的 context 与 provenance
-  均稳定。针对暴露的四类缺口完成通用修复并聚焦复测；人工语义复核记录现为 `16 correct`，详见
-  `evaluation/benchmark/reviews_generalization_16.jsonl`。这不是生产正确率结论。表格题的
-  模型/数据集与 setting 消歧、同节续块排序、跨来源共享谓词补证据和空间坐标方向均有回归测试。
-- 多模态至少需要 10 道人工核对的 image-only 失败题；Graph-RAG 至少需要 5 道稳定的
-  跨文档多跳失败题；通用工具调用至少需要 20 道真实运算题和 5 道可被本地白名单工具
-  稳定修复的失败题。未满足门槛前不增加子系统。
-
-完整而简明的修改历史统一维护在 `MODIFICATION_LOG.md`，不再新增按 Phase 拆分的交接文档。
-
-## 主要文件
-
-- `app.py`：无副作用入口、运行时、检索编排和 Gradio UI。
-- `sci_rag_core.py`：解析、切分、表格/公式/限制证据与答案核对。
-- `sci_rag_retrieval.py`：BM25、文档路由、query variants 和 RRF。
-- `sci_rag_reranking.py`：本地 cross-encoder 封装。
-- `evaluation/`：基准校验、真实应用上下文模拟、生成和审计工具。
-- `tests/`：离线回归测试。
-- `MODIFICATION_LOG.md`：唯一的阶段修改记录。
+本项目使用 [MIT License](LICENSE)。

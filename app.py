@@ -1,4 +1,4 @@
-"""Sci-RAG application entrypoint.
+"""文档学习工作台应用入口。
 
 Importing this module is intentionally side-effect free.  Models, the OpenAI
 client, ChromaDB, and Gradio are created only by :func:`create_runtime` or
@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import hashlib
 import html
+import json
 import os
 from pathlib import Path
 import random
@@ -56,6 +57,9 @@ from sci_rag_retrieval import (
 from sci_rag_vision import complete_vision, render_figure, vision_messages
 
 
+APP_DISPLAY_NAME = "文档学习工作台"
+
+
 MODEL_SERVICE_PRESETS = {
     "Ollama（本地）": ("http://localhost:11434/v1", "qwen3:4b-instruct"),
     "DeepSeek": ("https://api.deepseek.com/v1", "deepseek-v4-flash"),
@@ -65,6 +69,581 @@ MODEL_SERVICE_PRESETS = {
     ),
     "自定义 OpenAI 兼容服务": ("", ""),
 }
+
+DOCUMENT_BATCH_SIZE = 64
+
+
+APP_CSS = """
+:root {
+    --kb-primary: #17243a;
+    --kb-primary-hover: #223451;
+    --kb-nav-active: #17243a;
+    --kb-accent: #006a61;
+    --kb-accent-hover: #00584f;
+    --kb-accent-soft: #d9f0eb;
+    --kb-text: #132238;
+    --kb-muted: #596579;
+    --kb-canvas: #f4f7fb;
+    --kb-surface: #ffffff;
+    --kb-surface-muted: #edf3fa;
+    --kb-border: #d8e1ec;
+    --kb-danger: #a33a3a;
+    --kb-shadow: 0 10px 28px rgba(31, 49, 76, 0.07);
+}
+
+.dark {
+    --kb-primary: #d9e5f7;
+    --kb-primary-hover: #ffffff;
+    --kb-nav-active: #006a61;
+    --kb-accent: #69d5c7;
+    --kb-accent-hover: #8fe4d8;
+    --kb-accent-soft: #173c3a;
+    --kb-text: #e7edf6;
+    --kb-muted: #a8b4c5;
+    --kb-canvas: #101925;
+    --kb-surface: #172333;
+    --kb-surface-muted: #1d2d42;
+    --kb-border: #304157;
+    --kb-danger: #ffb4ab;
+    --kb-shadow: 0 12px 30px rgba(0, 0, 0, 0.22);
+}
+
+.gradio-container {
+    width: 100% !important;
+    max-width: none !important;
+    min-height: 100vh;
+    padding: 0 0 36px !important;
+    background: var(--kb-canvas) !important;
+    color: var(--kb-text);
+}
+
+.gradio-container .main {
+    width: 100%;
+    padding: 0 24px !important;
+}
+
+#kb-header {
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    margin: 0 -24px 22px;
+}
+
+.kb-header {
+    display: flex;
+    min-height: 68px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    padding: 11px clamp(20px, 3vw, 48px);
+    border-bottom: 1px solid var(--kb-border);
+    background: color-mix(in srgb, var(--kb-surface) 96%, transparent);
+    box-shadow: 0 2px 14px rgba(31, 49, 76, 0.05);
+    backdrop-filter: blur(10px);
+}
+
+.kb-brand {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    gap: 12px;
+}
+
+.kb-mark {
+    display: grid;
+    width: 38px;
+    height: 38px;
+    flex: 0 0 38px;
+    place-items: center;
+    border-radius: 8px;
+    color: #ffffff;
+    background: #17243a;
+    font-size: 18px;
+    font-weight: 700;
+    box-shadow: 0 5px 14px rgba(23, 36, 58, 0.18);
+}
+
+.dark .kb-mark {
+    color: #ffffff !important;
+    background: #006a61 !important;
+}
+
+.kb-title {
+    margin: 0;
+    color: var(--kb-text);
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.25;
+}
+
+.kb-subtitle {
+    margin: 2px 0 0;
+    overflow: hidden;
+    color: var(--kb-muted);
+    font-size: 12px;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.kb-header-meta {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 10px;
+}
+
+.kb-status,
+.kb-local-note {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 30px;
+    padding: 5px 10px;
+    border-radius: 7px;
+    color: var(--kb-muted);
+    background: var(--kb-surface-muted);
+    font-size: 12px;
+    line-height: 1.3;
+}
+
+.kb-status {
+    color: var(--kb-accent);
+    font-weight: 650;
+}
+
+.kb-status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--kb-accent);
+    box-shadow: 0 0 0 3px var(--kb-accent-soft);
+}
+
+#kb-workspace {
+    display: block !important;
+    width: 100%;
+    max-width: 1600px;
+    margin: 0 auto;
+}
+
+#kb-workspace > .tab-wrapper {
+    position: sticky;
+    top: 80px;
+    z-index: 30;
+    display: flex !important;
+    align-items: center;
+    gap: 4px;
+    width: 100%;
+    margin-bottom: 22px;
+    padding: 6px !important;
+    border: 1px solid var(--kb-border) !important;
+    border-radius: 9px !important;
+    background: var(--kb-surface) !important;
+    box-shadow: var(--kb-shadow);
+}
+
+#kb-workspace > .tab-wrapper > .tab-container[role="tablist"] {
+    display: flex;
+    flex: 1 1 auto;
+    gap: 4px;
+}
+
+#kb-workspace > .tab-wrapper [role="tab"],
+#kb-workspace > .tab-wrapper .overflow-menu > button {
+    justify-content: center;
+    width: auto;
+    min-height: 42px;
+    padding: 9px 11px !important;
+    border: 0 !important;
+    border-radius: 7px !important;
+    color: var(--kb-muted) !important;
+    font-size: 13px !important;
+    font-weight: 590 !important;
+    text-align: left;
+}
+
+#kb-workspace > .tab-wrapper [role="tab"]:hover,
+#kb-workspace > .tab-wrapper .overflow-menu > button:hover {
+    color: var(--kb-text) !important;
+    background: var(--kb-surface-muted) !important;
+}
+
+#kb-workspace > .tab-wrapper [role="tab"].selected {
+    color: #ffffff !important;
+    background: var(--kb-nav-active) !important;
+}
+
+#kb-workspace > .tabitem {
+    min-width: 0;
+    padding: 0 !important;
+}
+
+.kb-page-head {
+    margin: 2px 0 18px;
+}
+
+.kb-page-head h1 {
+    margin: 0;
+    color: var(--kb-text);
+    font-size: clamp(23px, 2.2vw, 30px);
+    font-weight: 700;
+    letter-spacing: -0.035em;
+    line-height: 1.2;
+}
+
+.kb-page-head p {
+    max-width: 68ch;
+    margin: 7px 0 0;
+    color: var(--kb-muted);
+    font-size: 14px;
+    line-height: 1.65;
+}
+
+.kb-panel {
+    min-width: 0;
+    padding: 20px !important;
+    border: 1px solid var(--kb-border) !important;
+    border-radius: 9px !important;
+    background: var(--kb-surface) !important;
+    box-shadow: var(--kb-shadow);
+}
+
+.kb-panel-title h3 {
+    margin: 0 0 5px;
+    color: var(--kb-text);
+    font-size: 16px;
+    font-weight: 680;
+    letter-spacing: -0.015em;
+}
+
+.kb-panel-title p {
+    margin: 0 0 14px;
+    color: var(--kb-muted);
+    font-size: 13px;
+    line-height: 1.55;
+}
+
+.kb-library-grid,
+.kb-chat-layout,
+.kb-settings-grid {
+    align-items: stretch;
+    gap: 18px;
+}
+
+.kb-library-panel {
+    min-height: 380px;
+}
+
+.kb-chat-panel {
+    order: 1;
+    overflow: hidden;
+}
+
+.kb-context-panel {
+    order: 2;
+    align-self: stretch;
+}
+
+.kb-context-note {
+    margin-top: 14px;
+    padding: 12px;
+    border-left: 3px solid var(--kb-accent);
+    border-radius: 0 7px 7px 0;
+    color: var(--kb-muted);
+    background: var(--kb-surface-muted);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.kb-evidence {
+    max-height: clamp(300px, 48vh, 620px);
+    overflow: auto;
+    padding-right: 4px;
+}
+
+.kb-evidence h3 {
+    margin-top: 18px;
+    font-size: 14px;
+}
+
+.kb-evidence blockquote {
+    margin: 8px 0 0;
+    padding: 10px 12px;
+    border-left: 2px solid var(--kb-border);
+    color: var(--kb-muted);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.kb-action-bar {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 18px;
+    margin-bottom: 14px;
+    padding: 15px 17px !important;
+}
+
+.kb-action-bar > .column {
+    width: auto !important;
+    min-width: 0 !important;
+    flex: none !important;
+}
+
+.kb-action-copy h3 {
+    margin: 0 0 3px;
+    color: var(--kb-text);
+    font-size: 15px;
+}
+
+.kb-action-copy p {
+    margin: 0;
+    color: var(--kb-muted);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.kb-output {
+    min-height: clamp(300px, 48vh, 660px);
+    padding: 22px !important;
+    border: 1px solid var(--kb-border) !important;
+    border-radius: 9px !important;
+    background: var(--kb-surface) !important;
+    box-shadow: var(--kb-shadow);
+}
+
+.kb-output h1,
+.kb-output h2,
+.kb-output h3 {
+    color: var(--kb-text);
+}
+
+.kb-quiz-stack {
+    gap: 14px;
+}
+
+.kb-quiz-question {
+    padding: 14px !important;
+    border: 1px solid var(--kb-border) !important;
+    border-radius: 8px !important;
+    background: var(--kb-surface-muted) !important;
+}
+
+.kb-quiz-result {
+    margin-top: 14px;
+}
+
+#kb-upload-button,
+#kb-settings-button,
+#kb-mindmap-button,
+#kb-quiz-button {
+    min-height: 40px;
+    font-weight: 650;
+}
+
+#kb-mindmap-button,
+#kb-quiz-button {
+    min-width: 150px;
+}
+
+#kb-exit-button {
+    max-width: 168px;
+    margin: 26px auto 0;
+}
+
+.kb-panel .block,
+.kb-output.block {
+    box-shadow: none;
+}
+
+button,
+input,
+textarea,
+select {
+    transition: border-color 150ms ease, background-color 150ms ease,
+        color 150ms ease, transform 100ms ease !important;
+}
+
+button:active {
+    transform: scale(0.98);
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+    outline: 3px solid var(--kb-accent-soft) !important;
+    outline-offset: 2px;
+}
+
+@media (max-width: 980px) {
+    .kb-library-grid,
+    .kb-chat-layout,
+    .kb-settings-grid {
+        display: grid !important;
+        grid-template-columns: minmax(0, 1fr) !important;
+    }
+
+    .kb-library-grid > .column,
+    .kb-chat-layout > .column,
+    .kb-settings-grid > .column {
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        flex: none !important;
+    }
+
+    #kb-workspace > .tab-wrapper {
+        margin-bottom: 18px;
+    }
+
+    #kb-workspace > .tab-wrapper [role="tab"] {
+        flex: 0 0 auto;
+        width: auto;
+        white-space: nowrap;
+    }
+
+    #kb-workspace > .tabitem {
+        width: 100%;
+    }
+}
+
+@media (max-width: 680px) {
+    .gradio-container .main {
+        padding: 0 13px !important;
+    }
+
+    #kb-header {
+        margin: 0 -13px 14px;
+    }
+
+    .kb-header {
+        min-height: 62px;
+        gap: 12px;
+        padding: 9px 14px;
+    }
+
+    .kb-mark {
+        width: 34px;
+        height: 34px;
+        flex-basis: 34px;
+        font-size: 16px;
+    }
+
+    .kb-title {
+        font-size: 15px;
+    }
+
+    .kb-subtitle,
+    .kb-local-note {
+        display: none;
+    }
+
+    .kb-status {
+        padding: 5px 8px;
+        font-size: 11px;
+    }
+
+    #kb-workspace > .tab-wrapper {
+        top: 72px;
+        margin-bottom: 14px;
+        padding: 7px !important;
+    }
+
+    #kb-workspace > .tab-wrapper [role="tab"],
+    #kb-workspace > .tab-wrapper .overflow-menu > button {
+        min-height: 38px;
+        padding: 7px 9px !important;
+        font-size: 12px !important;
+    }
+
+    .kb-page-head {
+        margin-bottom: 14px;
+    }
+
+    .kb-page-head h1 {
+        font-size: 23px;
+    }
+
+    .kb-panel,
+    .kb-output {
+        padding: 15px !important;
+    }
+
+    .kb-library-panel {
+        min-height: 0;
+    }
+
+    .kb-action-bar {
+        align-items: stretch;
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    button,
+    input,
+    textarea,
+    select {
+        transition: none !important;
+    }
+}
+"""
+
+
+def app_theme(gr: Any) -> Any:
+    return gr.themes.Soft(
+        primary_hue="teal",
+        secondary_hue="slate",
+        neutral_hue="slate",
+        spacing_size="md",
+        radius_size="sm",
+        text_size="md",
+    ).set(
+        body_background_fill="#f4f7fb",
+        body_background_fill_dark="#101925",
+        body_text_color="#132238",
+        body_text_color_dark="#e7edf6",
+        body_text_color_subdued="#596579",
+        body_text_color_subdued_dark="#a8b4c5",
+        background_fill_primary="#ffffff",
+        background_fill_primary_dark="#172333",
+        background_fill_secondary="#edf3fa",
+        background_fill_secondary_dark="#1d2d42",
+        border_color_primary="#d8e1ec",
+        border_color_primary_dark="#304157",
+        input_background_fill="#ffffff",
+        input_background_fill_dark="#172333",
+        input_border_color="#cbd6e3",
+        input_border_color_dark="#3a4d65",
+        input_border_color_focus="#006a61",
+        input_border_color_focus_dark="#69d5c7",
+        input_placeholder_color="#687489",
+        input_placeholder_color_dark="#a8b4c5",
+        button_primary_background_fill="#17243a",
+        button_primary_background_fill_hover="#223451",
+        button_primary_background_fill_dark="#69d5c7",
+        button_primary_background_fill_hover_dark="#8fe4d8",
+        button_primary_text_color="#ffffff",
+        button_primary_text_color_dark="#101925",
+        button_transform_active="scale(0.98)",
+        block_radius="8px",
+        block_label_background_fill="transparent",
+        block_label_background_fill_dark="transparent",
+        block_label_border_width="0px",
+        block_label_border_width_dark="0px",
+        block_label_padding="4px 0",
+        block_label_text_color="#006a61",
+        block_label_text_color_dark="#69d5c7",
+        input_radius="7px",
+        button_large_radius="7px",
+        button_medium_radius="7px",
+        button_small_radius="6px",
+        block_shadow="none",
+        block_shadow_dark="none",
+    )
 
 
 @dataclass(frozen=True)
@@ -441,19 +1020,50 @@ def _metadata_for_chroma(metadata: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in metadata.items() if value is not None}
 
 
-def add_document_to_db(file_path: str, runtime: Runtime | None = None) -> str:
+def _source_name_for_upload(file_path: str, document_hash: str, runtime: Runtime) -> str:
+    """Keep different files with the same basename independently selectable."""
+
+    source = os.path.basename(file_path)
+    existing = runtime.collection.get(
+        where={"source": {"$eq": source}},
+        include=["metadatas"],
+    )
+    if not _flat_result_values(existing, "ids"):
+        return source
+    existing_hashes = {
+        str(metadata.get("document_sha256", ""))
+        for metadata in _flat_result_values(existing, "metadatas")
+        if isinstance(metadata, dict)
+    }
+    if document_hash in existing_hashes:
+        return source
+    path = Path(source)
+    return f"{path.stem} ({document_hash[:12]}){path.suffix}"
+
+
+def add_document_to_db(
+    file_path: str,
+    runtime: Runtime | None = None,
+    progress: Callable[..., Any] | None = None,
+) -> str:
     runtime = runtime or get_runtime()
+    if progress is not None:
+        progress(0.05, desc="正在读取文档")
+    document_hash = file_sha256(file_path)
+    source = _source_name_for_upload(file_path, document_hash, runtime)
+    if progress is not None:
+        progress(0.1, desc="正在解析文档")
     chunks = load_and_split_document(
         file_path,
         include_spatial_figures=runtime.config.spatial_figure_evidence,
     )
-    document_hash = file_sha256(file_path)
     if runtime.config.vision_enabled and Path(file_path).suffix.lower() == ".pdf":
         source_dir = Path(runtime.config.db_path) / "source_pdfs"
         source_dir.mkdir(parents=True, exist_ok=True)
         source_pdf = source_dir / f"{document_hash}.pdf"
         if not source_pdf.exists():
             shutil.copyfile(file_path, source_pdf)
+    records: list[tuple[str, str, dict[str, Any]]] = []
     normal_chunk_index = 0
     for index, chunk in enumerate(chunks):
         text = chunk.page_content
@@ -462,7 +1072,7 @@ def add_document_to_db(file_path: str, runtime: Runtime | None = None) -> str:
         stable_index: int | str = f"formula:{index}" if is_formula else normal_chunk_index
         metadata.update(
             {
-                "source": os.path.basename(file_path),
+                "source": source,
                 "document_sha256": document_hash,
             }
         )
@@ -476,21 +1086,49 @@ def add_document_to_db(file_path: str, runtime: Runtime | None = None) -> str:
             f"{document_hash}:{stable_index}:{metadata.get('type', 'text')}:{text}".encode("utf-8")
         ).hexdigest()
         metadata["chunk_id"] = stable_id
-        embedding = runtime.embedding_model.encode(text).tolist()
+        records.append((stable_id, text, _metadata_for_chroma(metadata)))
+
+    for start in range(0, len(records), DOCUMENT_BATCH_SIZE):
+        batch = records[start : start + DOCUMENT_BATCH_SIZE]
+        texts = [record[1] for record in batch]
+        embeddings = runtime.embedding_model.encode(texts)
+        if hasattr(embeddings, "tolist"):
+            embeddings = embeddings.tolist()
+        if len(texts) == 1 and embeddings and not isinstance(embeddings[0], (list, tuple)):
+            embeddings = [embeddings]
         runtime.collection.upsert(
-            ids=[stable_id],
-            embeddings=[embedding],
-            documents=[text],
-            metadatas=[_metadata_for_chroma(metadata)],
+            ids=[record[0] for record in batch],
+            embeddings=embeddings,
+            documents=texts,
+            metadatas=[record[2] for record in batch],
         )
+        if progress is not None:
+            progress(
+                0.1 + 0.85 * min(start + len(batch), len(records)) / max(len(records), 1),
+                desc=f"正在写入知识库（{min(start + len(batch), len(records))}/{len(records)}）",
+            )
     runtime.invalidate_lexical_index()
-    return f"✅ 成功添加 {len(chunks)} 个文本块到知识库，当前共 {runtime.collection.count()} 个。"
+    if progress is not None:
+        progress(1, desc="文档已添加")
+    return f"成功添加 {source}，共 {len(chunks)} 个文本块；知识库现有 {runtime.collection.count()} 个。"
 
 
-def upload_file(file: Any, runtime: Runtime | None = None) -> str:
+def upload_file(
+    file: Any,
+    runtime: Runtime | None = None,
+    progress: Callable[..., Any] | None = None,
+) -> str:
     if file is None:
         return "请选择一个文件"
-    return add_document_to_db(str(getattr(file, "name", file)), runtime=runtime)
+    file_path = (
+        os.fspath(file)
+        if isinstance(file, os.PathLike)
+        else str(getattr(file, "name", file))
+    )
+    try:
+        return add_document_to_db(file_path, runtime=runtime, progress=progress)
+    except Exception as exc:
+        return f"添加失败：{exc}"
 
 
 def _vision_pdf_for_question(
@@ -2441,7 +3079,7 @@ def query_knowledge(
     return answer + "\n\n📌 **参考来源：**\n" + "\n".join(unique_sources)
 
 
-SCIENTIFIC_SYSTEM_PROMPT = """你是一个面向科学论文的严谨学术问答引擎（Sci-RAG），职责是从给定的参考片段中抽取事实、数值与实验方法论。必须遵守以下规则：
+SCIENTIFIC_SYSTEM_PROMPT = """你是文档学习工作台中的严谨学术问答助手，职责是从给定的参考片段中抽取事实、数值与实验方法论。必须遵守以下规则：
 
 【强制规则 1：数值必须原样引用并指明出处】
 - 若参考文本中存在具体数值，回答时必须原样引用，不得四舍五入、改写或推算。
@@ -2491,6 +3129,34 @@ SCIENTIFIC_SYSTEM_PROMPT = """你是一个面向科学论文的严谨学术问�
 - 若参考片段无法回答问题，请如实说明“资料未提供相关信息”，严禁编造。"""
 
 
+def format_evidence_panel(result: dict[str, Any]) -> str:
+    """Render the exact contexts used for an answer as readable source excerpts."""
+
+    contexts = list(result.get("contexts") or [])
+    metadatas = list(result.get("context_metadatas") or [])
+    if not contexts:
+        return "提问后，这里会显示回答实际使用的原文片段。"
+    sections = []
+    for index, context in enumerate(contexts, start=1):
+        metadata = metadatas[index - 1] if index <= len(metadatas) else {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+        source = html.escape(str(metadata.get("source") or "未知来源"))
+        page = metadata.get("page")
+        location = f"，第 {page} 页" if page is not None else ""
+        kind = {
+            "table": "表格",
+            "figure": "图形文字",
+            "formula": "公式",
+        }.get(str(metadata.get("type", "text")), "正文")
+        quoted = "\n".join(
+            f"> {line}" if line else ">" for line in str(context).strip().splitlines()
+        )
+        sections.append(
+            f"### 片段 {index}\n**{source}{location} · {kind}**\n\n{quoted}"
+        )
+    return "\n\n".join(sections)
+
+
 def generate_mindmap(runtime: Runtime | None = None) -> str:
     runtime = runtime or get_runtime()
     if runtime.collection.count() == 0:
@@ -2535,14 +3201,80 @@ def generate_quiz(runtime: Runtime | None = None) -> str:
             model=runtime.config.llm_model,
             messages=[
                 {"role": "system", "content": "你是一个严谨的大学教师。请根据资料出5道单项选择题，用于考察学生对知识的掌握程度。"},
-                {"role": "user", "content": "请根据以下资料，生成5道单项选择题。\n输出格式：第1题：[题目]\nA. [A] B. [B] C. [C] D. [D]\n答案：X\n解析：[解释]\n\n资料内容：\n" + "\n\n".join(sample_chunks)},
+                {
+                    "role": "user",
+                    "content": (
+                        "请根据以下资料生成5道单项选择题。只输出合法 JSON 数组，不要使用 Markdown 代码块。"
+                        "每项必须包含 question、options、answer、explanation；options 是4个选项文本组成的数组，"
+                        "answer 只能是 A、B、C、D。\n\n资料内容：\n"
+                        + "\n\n".join(sample_chunks)
+                    ),
+                },
             ],
             temperature=0.4,
             max_tokens=2000,
         )
         return response.choices[0].message.content
     except Exception as exc:
-        return f"❌ 出题失败：{exc}"
+        return f"出题失败：{exc}"
+
+
+def parse_quiz_items(response: str) -> list[dict[str, Any]]:
+    """Parse the small, fixed JSON shape requested from the model."""
+
+    text = str(response or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
+    payload = json.loads(text)
+    if not isinstance(payload, list) or len(payload) != 5:
+        raise ValueError("题目数量不是 5 道")
+    items = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("题目格式不正确")
+        question = str(item.get("question") or "").strip()
+        options = item.get("options")
+        answer = str(item.get("answer") or "").strip().upper()
+        explanation = str(item.get("explanation") or "").strip()
+        if (
+            not question
+            or not isinstance(options, list)
+            or len(options) != 4
+            or any(not str(option).strip() for option in options)
+            or answer not in {"A", "B", "C", "D"}
+            or not explanation
+        ):
+            raise ValueError("题目字段不完整")
+        items.append(
+            {
+                "question": question,
+                "options": [str(option).strip() for option in options],
+                "answer": answer,
+                "explanation": explanation,
+            }
+        )
+    return items
+
+
+def score_quiz(quiz_items: list[dict[str, Any]], answers: list[Any]) -> str:
+    if not quiz_items:
+        return "请先生成题目。"
+    if len(answers) < len(quiz_items) or any(not answer for answer in answers):
+        return "请完成全部 5 道题后再提交。"
+    selected = [str(answer).strip()[:1].upper() for answer in answers]
+    score = sum(
+        answer == str(item["answer"]).upper()
+        for item, answer in zip(quiz_items, selected)
+    )
+    details = [f"## 得分：{score} / {len(quiz_items)}"]
+    for index, (item, answer) in enumerate(zip(quiz_items, selected), start=1):
+        status = "正确" if answer == item["answer"] else "错误"
+        details.append(
+            f"### 第 {index} 题：{status}\n"
+            f"你的答案：{answer}　正确答案：{item['answer']}\n\n"
+            f"{item['explanation']}"
+        )
+    return "\n\n".join(details)
 
 
 def build_demo(
@@ -2578,113 +3310,406 @@ def build_demo(
             gr.update(choices=sources, value=[]),
         )
 
+    def page_header(title: str, description: str) -> None:
+        gr.HTML(
+            f"""
+            <section class="kb-page-head">
+                <h1>{title}</h1>
+                <p>{description}</p>
+            </section>
+            """,
+            apply_default_css=False,
+        )
+
+    def answer_with_evidence(
+        message: str,
+        history: Any,
+        sources: list[str] | None,
+    ) -> tuple[str, str]:
+        result = query_knowledge(
+            message,
+            history,
+            True,
+            runtime,
+            source_filter=sources,
+        )
+        return str(result["answer"]), format_evidence_panel(result)
+
+    def prepare_quiz() -> tuple[Any, ...]:
+        response = generate_quiz(runtime)
+        try:
+            items = parse_quiz_items(response)
+        except (json.JSONDecodeError, ValueError):
+            status = (
+                response
+                if response.startswith(("📚", "⚙️", "出题失败"))
+                else "题目格式不完整，请重新生成。"
+            )
+            hidden = [
+                gr.update(choices=[], value=None, visible=False) for _ in range(5)
+            ]
+            return (
+                status,
+                *hidden,
+                [],
+                gr.update(interactive=False),
+                gr.update(value="", visible=False),
+            )
+        updates = []
+        for index, item in enumerate(items, start=1):
+            choices = [
+                f"{letter}. {option}"
+                for letter, option in zip("ABCD", item["options"])
+            ]
+            updates.append(
+                gr.update(
+                    choices=choices,
+                    label=f"第 {index} 题：{item['question']}",
+                    value=None,
+                    visible=True,
+                )
+            )
+        return (
+            "已生成 5 道题。完成作答后提交，即可查看得分与解析。",
+            *updates,
+            items,
+            gr.update(interactive=True),
+            gr.update(value="", visible=False),
+        )
+
     initial_documents, initial_inventory = inventory_view()
     initial_sources = [source for source, _count in initial_documents]
-    with gr.Blocks(title="Sci-RAG 本地论文助手") as demo:
-        gr.Markdown("# 📚 Sci-RAG 本地论文助手")
-        gr.Markdown(
-            "本地模型已就绪。上传论文或课件后即可提问、生成大纲和练习题；"
-            "文档与回答均留在这台电脑上。"
-            if managed_local_model
-            else "上传你的课件或论文，用 AI 帮你学！"
+    with gr.Blocks(title=APP_DISPLAY_NAME) as demo:
+        model_state = "本地模型已就绪" if managed_local_model else "模型服务可配置"
+        gr.HTML(
+            f"""
+            <header class="kb-header">
+                <div class="kb-brand">
+                    <span class="kb-mark" aria-hidden="true">文</span>
+                    <div>
+                        <h1 class="kb-title">{APP_DISPLAY_NAME}</h1>
+                        <p class="kb-subtitle">导入本地文档，进行资料问答、大纲整理和练习题生成</p>
+                    </div>
+                </div>
+                <div class="kb-header-meta">
+                    <span class="kb-status"><span class="kb-status-dot" aria-hidden="true"></span>{model_state}</span>
+                    <span class="kb-local-note">资料保存在当前设备</span>
+                </div>
+            </header>
+            """,
+            elem_id="kb-header",
+            apply_default_css=False,
         )
-        if not managed_local_model:
-            initial_service = next(
-                (
-                    name
-                    for name, (base_url, _model) in MODEL_SERVICE_PRESETS.items()
-                    if base_url.rstrip("/") == runtime.config.llm_base_url.rstrip("/")
-                ),
-                "自定义 OpenAI 兼容服务",
-            )
-            with gr.Tab("⚙️ 设置"):
-                gr.Markdown(
-                    "推荐使用本机 Ollama；云端服务使用你自己的 API Key。"
-                    "设置只保留在当前运行进程中，也可以通过 `.env` 配置。"
+        with gr.Tabs(elem_id="kb-workspace"):
+            with gr.Tab("文档资料库"):
+                page_header(
+                    "文档资料库",
+                    "导入 PDF、TXT 或 DOCX，建立只保存在当前设备上的检索资料库。",
                 )
-                service_select = gr.Dropdown(
-                    label="模型服务",
-                    choices=list(MODEL_SERVICE_PRESETS),
-                    value=initial_service,
+                with gr.Row(equal_height=True, elem_classes="kb-library-grid"):
+                    with gr.Column(
+                        scale=3,
+                        elem_classes=["kb-panel", "kb-library-panel"],
+                    ):
+                        gr.HTML(
+                            """
+                            <div class="kb-panel-title">
+                                <h3>添加本地资料</h3>
+                                <p>选择一个文档，确认后加入知识库。</p>
+                            </div>
+                            """,
+                            apply_default_css=False,
+                        )
+                        file_input = gr.File(
+                            label="选择文档",
+                            file_types=[".pdf", ".txt", ".docx"],
+                        )
+                        upload_button = gr.Button(
+                            "添加到知识库",
+                            variant="primary",
+                            elem_id="kb-upload-button",
+                        )
+                        upload_output = gr.Textbox(
+                            label="上传状态",
+                            lines=3,
+                            interactive=False,
+                        )
+                    with gr.Column(
+                        scale=2,
+                        elem_classes=["kb-panel", "kb-library-panel"],
+                    ):
+                        gr.HTML(
+                            """
+                            <div class="kb-panel-title">
+                                <h3>知识库概览</h3>
+                                <p>查看已解析资料，并在需要时移除单个文档。</p>
+                            </div>
+                            """,
+                            apply_default_css=False,
+                        )
+                        count_output = gr.Markdown(
+                            f"**当前知识库文本块数：** {runtime.collection.count()}"
+                        )
+                        inventory_output = gr.Markdown(initial_inventory)
+                        with gr.Accordion("管理已上传文档", open=False):
+                            delete_select = gr.Dropdown(
+                                label="选择要删除的文档",
+                                choices=initial_sources,
+                                value=None,
+                            )
+                            delete_confirm = gr.Checkbox(
+                                label="确认删除所选文档及其本地数据"
+                            )
+                            delete_button = gr.Button(
+                                "删除所选文档",
+                                variant="stop",
+                            )
+                            delete_output = gr.Textbox(
+                                label="删除状态",
+                                lines=2,
+                                interactive=False,
+                            )
+            with gr.Tab("资料问答与原文比对"):
+                page_header(
+                    "资料问答与原文比对",
+                    "限定资料范围后提问，并对照回答实际使用的原文片段与页码。",
                 )
-                base_url_input = gr.Textbox(
-                    label="Base URL",
-                    value=runtime.config.llm_base_url,
+                source_select = gr.Dropdown(
+                    label="限定回答范围",
+                    choices=initial_sources,
+                    value=[],
+                    multiselect=True,
+                    info="范围会应用到下一次提问。",
+                    render=False,
                 )
-                model_input = gr.Textbox(
-                    label="模型名称",
-                    value=runtime.config.llm_model,
+                with gr.Row(equal_height=True, elem_classes="kb-chat-layout"):
+                    with gr.Column(
+                        scale=3,
+                        elem_classes=["kb-panel", "kb-context-panel"],
+                    ):
+                        gr.HTML(
+                            """
+                            <div class="kb-panel-title">
+                                <h3>资料范围与原文</h3>
+                                <p>不选择文档时检索全部资料。</p>
+                            </div>
+                            """,
+                            apply_default_css=False,
+                        )
+                        source_select.render()
+                        gr.HTML(
+                            """
+                            <div class="kb-context-note">
+                                下方内容是本次回答实际使用的检索片段，不是模型重新生成的摘要。
+                            </div>
+                            """,
+                            apply_default_css=False,
+                        )
+                        evidence_output = gr.Markdown(
+                            "提问后，这里会显示回答实际使用的原文片段。",
+                            elem_classes="kb-evidence",
+                        )
+                    with gr.Column(
+                        scale=7,
+                        elem_classes=["kb-panel", "kb-chat-panel"],
+                    ):
+                        gr.HTML(
+                            """
+                            <div class="kb-panel-title">
+                                <h3>向资料库提问</h3>
+                                <p>回答仅基于当前知识库中的可检索内容。</p>
+                            </div>
+                            """,
+                            apply_default_css=False,
+                        )
+                        gr.ChatInterface(
+                            fn=answer_with_evidence,
+                            title=None,
+                            description=None,
+                            chatbot=gr.Chatbot(
+                                height="clamp(300px, 48vh, 620px)",
+                                label="对话",
+                            ),
+                            textbox=gr.Textbox(
+                                label="问题",
+                                show_label=False,
+                                placeholder="例如：这篇论文的核心结论是什么？",
+                                scale=7,
+                                submit_btn=True,
+                                stop_btn=True,
+                            ),
+                            additional_inputs=[source_select],
+                            additional_outputs=[evidence_output],
+                        )
+            with gr.Tab("学习大纲"):
+                page_header(
+                    "学习大纲",
+                    "根据当前知识库整理层级结构，帮助快速复习和梳理资料之间的关系。",
                 )
-                api_key_input = gr.Textbox(
-                    label="API Key（Ollama 本地服务可留空）",
-                    type="password",
-                    placeholder="云端服务请输入自己的 Key",
+                with gr.Row(elem_classes=["kb-panel", "kb-action-bar"]):
+                    with gr.Column(scale=4):
+                        gr.HTML(
+                            """
+                            <div class="kb-action-copy">
+                                <h3>从全部资料生成大纲</h3>
+                                <p>生成结果采用 Markdown 层级，可继续复制到笔记工具中整理。</p>
+                            </div>
+                            """,
+                            apply_default_css=False,
+                        )
+                    with gr.Column(scale=1, min_width=150):
+                        button = gr.Button(
+                            "生成学习大纲",
+                            variant="primary",
+                            elem_id="kb-mindmap-button",
+                        )
+                output = gr.Markdown(
+                    label="大纲内容",
+                    value="生成结果会显示在这里。",
+                    elem_classes="kb-output",
                 )
-                model_service_button = gr.Button("应用模型设置")
-                model_service_status = gr.Markdown(
-                    f"✅ 已从环境变量配置模型 {html.escape(runtime.config.llm_model)}。"
-                    if runtime.client is not None
-                    else "尚未配置模型服务；本地文档管理仍可使用。"
+                button.click(lambda: generate_mindmap(runtime), inputs=[], outputs=output)
+            with gr.Tab("自测习题与测评"):
+                page_header(
+                    "自测习题与测评",
+                    "基于当前知识库生成 5 道单项选择题，提交后显示得分与解析。",
                 )
-        with gr.Tab("📤 上传文档"):
-            file_input = gr.File(label="选择文档", file_types=[".pdf", ".txt", ".docx"])
-            upload_output = gr.Textbox(label="上传状态", lines=3)
-            upload_button = gr.Button("添加到知识库")
-            count_output = gr.Markdown(f"**当前知识库文本块数：** {runtime.collection.count()}")
-            inventory_output = gr.Markdown(initial_inventory)
-            delete_select = gr.Dropdown(
-                label="删除文档",
-                choices=initial_sources,
-                value=None,
-            )
-            delete_confirm = gr.Checkbox(label="确认删除所选文档及其本地数据")
-            delete_button = gr.Button("删除所选文档", variant="stop")
-            delete_output = gr.Textbox(label="删除状态", lines=2)
-        with gr.Tab("💬 智能问答"):
-            source_select = gr.Dropdown(
-                label="限定回答范围",
-                choices=initial_sources,
-                value=[],
-                multiselect=True,
-                info="不选择时检索全部已上传文档。",
-            )
-            gr.ChatInterface(
-                fn=lambda message, history, sources: query_knowledge(
-                    message,
-                    history,
-                    False,
-                    runtime,
-                    source_filter=sources,
-                ),
-                title="📖 基于文档的问答",
-                description="输入问题，AI会从已上传的文档中检索答案。",
-                chatbot=gr.Chatbot(height=450),
-                textbox=gr.Textbox(
-                    placeholder="例如：这篇论文的核心创新点是什么？",
-                    scale=7,
-                    submit_btn=True,
-                    stop_btn=True,
-                ),
-                additional_inputs=[source_select],
-            )
-        with gr.Tab("🧠 生成学习大纲"):
-            gr.Markdown("### 一键生成层级学习大纲（自动转为脑图结构）")
-            button = gr.Button("🚀 生成大纲与脑图")
-            output = gr.Markdown(label="📋 大纲内容", value="点击上方按钮生成...")
-            button.click(lambda: generate_mindmap(runtime), inputs=[], outputs=output)
-        with gr.Tab("📝 智能出题"):
-            gr.Markdown("### 基于当前知识库自动生成练习题（含解析）")
-            button = gr.Button("📝 生成5道选择题")
-            output = gr.Markdown(label="📋 题目与解析", value="点击上方按钮生成...")
-            button.click(lambda: generate_quiz(runtime), inputs=[], outputs=output)
+                with gr.Row(elem_classes=["kb-panel", "kb-action-bar"]):
+                    with gr.Column(scale=4):
+                        gr.HTML(
+                            """
+                            <div class="kb-action-copy">
+                                <h3>生成一组资料自测题</h3>
+                                <p>作答前不会显示答案，提交后逐题核对。</p>
+                            </div>
+                            """,
+                            apply_default_css=False,
+                        )
+                    with gr.Column(scale=1, min_width=150):
+                        quiz_generate_button = gr.Button(
+                            "生成 5 道练习题",
+                            variant="primary",
+                            elem_id="kb-quiz-button",
+                        )
+                quiz_status = gr.Markdown("生成题目后开始作答。")
+                quiz_state = gr.State([])
+                with gr.Column(elem_classes=["kb-panel", "kb-quiz-stack"]):
+                    quiz_answers = [
+                        gr.Radio(
+                            choices=[],
+                            label=f"第 {index} 题",
+                            visible=False,
+                            elem_classes="kb-quiz-question",
+                        )
+                        for index in range(1, 6)
+                    ]
+                    quiz_submit_button = gr.Button(
+                        "提交答案",
+                        variant="primary",
+                        interactive=False,
+                    )
+                quiz_result = gr.Markdown(
+                    elem_classes=["kb-output", "kb-quiz-result"],
+                    visible=False,
+                )
+                quiz_generate_button.click(
+                    prepare_quiz,
+                    inputs=[],
+                    outputs=[
+                        quiz_status,
+                        *quiz_answers,
+                        quiz_state,
+                        quiz_submit_button,
+                        quiz_result,
+                    ],
+                )
+                quiz_submit_button.click(
+                    lambda items, *answers: gr.update(
+                        value=score_quiz(items, list(answers)),
+                        visible=True,
+                    ),
+                    inputs=[quiz_state, *quiz_answers],
+                    outputs=quiz_result,
+                )
+            if not managed_local_model:
+                initial_service = next(
+                    (
+                        name
+                        for name, (base_url, _model) in MODEL_SERVICE_PRESETS.items()
+                        if base_url.rstrip("/") == runtime.config.llm_base_url.rstrip("/")
+                    ),
+                    "自定义 OpenAI 兼容服务",
+                )
+                with gr.Tab("模型设置"):
+                    page_header(
+                        "模型设置",
+                        "优先使用本机 Ollama；也可以连接你自己的 OpenAI 兼容模型服务。",
+                    )
+                    with gr.Row(equal_height=True, elem_classes="kb-settings-grid"):
+                        with gr.Column(scale=2, elem_classes="kb-panel"):
+                            gr.HTML(
+                                """
+                                <div class="kb-panel-title">
+                                    <h3>选择模型</h3>
+                                    <p>切换预设后仍可手动调整模型名称。</p>
+                                </div>
+                                """,
+                                apply_default_css=False,
+                            )
+                            service_select = gr.Dropdown(
+                                label="模型服务",
+                                choices=list(MODEL_SERVICE_PRESETS),
+                                value=initial_service,
+                            )
+                            model_input = gr.Textbox(
+                                label="模型名称",
+                                value=runtime.config.llm_model,
+                            )
+                        with gr.Column(scale=3, elem_classes="kb-panel"):
+                            gr.HTML(
+                                """
+                                <div class="kb-panel-title">
+                                    <h3>连接信息</h3>
+                                    <p>API Key 仅保留在当前运行进程中。</p>
+                                </div>
+                                """,
+                                apply_default_css=False,
+                            )
+                            base_url_input = gr.Textbox(
+                                label="Base URL",
+                                value=runtime.config.llm_base_url,
+                            )
+                            api_key_input = gr.Textbox(
+                                label="API Key（Ollama 本地服务可留空）",
+                                type="password",
+                                placeholder="云端服务请输入自己的 Key",
+                            )
+                    model_service_button = gr.Button(
+                        "应用模型设置",
+                        variant="primary",
+                        elem_id="kb-settings-button",
+                    )
+                    model_service_status = gr.Markdown(
+                        f"✅ 已从环境变量配置模型 {html.escape(runtime.config.llm_model)}。"
+                        if runtime.client is not None
+                        else "尚未配置模型服务；本地文档管理仍可使用。"
+                    )
         exit_button = (
-            gr.Button("退出 Sci-RAG", variant="secondary")
+            gr.Button(
+                "退出工作台",
+                variant="secondary",
+                size="sm",
+                elem_id="kb-exit-button",
+            )
             if managed_local_model and on_exit is not None
             else None
         )
 
-        def handle_upload(file: Any) -> tuple[Any, ...]:
-            return (upload_file(file, runtime), *library_state())
+        def handle_upload(
+            file: Any,
+            progress: Any = gr.Progress(),
+        ) -> tuple[Any, ...]:
+            return (upload_file(file, runtime, progress), *library_state())
 
         def handle_delete(source: str | None, confirmed: bool) -> tuple[Any, ...]:
             return (
@@ -2738,4 +3763,8 @@ def build_demo(
 if __name__ == "__main__":
     import gradio as gr
 
-    build_demo(create_runtime()).launch(theme=gr.themes.Soft())
+    build_demo(create_runtime()).launch(
+        theme=app_theme(gr),
+        css=APP_CSS,
+        inbrowser=True,
+    )

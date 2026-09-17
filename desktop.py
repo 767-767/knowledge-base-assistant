@@ -1,4 +1,4 @@
-"""Launch Sci-RAG with its packaged local model server."""
+"""Launch 文档学习工作台 with its packaged local model server."""
 
 from __future__ import annotations
 
@@ -16,7 +16,8 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
-APP_NAME = "Sci-RAG"
+DISPLAY_NAME = "文档学习工作台"
+DATA_DIR_NAME = "Sci-RAG"
 MODEL_NAME = "qwen3:4b-instruct"
 
 
@@ -40,9 +41,9 @@ def packaged_model_paths() -> tuple[Path, Path]:
 
 def application_data_dir() -> Path:
     if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / APP_NAME
+        return Path.home() / "Library" / "Application Support" / DATA_DIR_NAME
     if os.name == "nt":
-        return Path(os.getenv("LOCALAPPDATA", Path.home())) / APP_NAME
+        return Path(os.getenv("LOCALAPPDATA", Path.home())) / DATA_DIR_NAME
     return Path(os.getenv("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "sci-rag"
 
 
@@ -50,14 +51,18 @@ def _startup_window():
     import tkinter as tk
 
     window = tk.Tk()
-    window.title(APP_NAME)
+    window.title(DISPLAY_NAME)
     window.resizable(False, False)
-    tk.Label(window, text="Sci-RAG 正在启动", font=("Helvetica", 20, "bold")).pack(
+    tk.Label(
+        window,
+        text=f"{DISPLAY_NAME}正在启动",
+        font=("Helvetica", 20, "bold"),
+    ).pack(
         padx=48, pady=(28, 10)
     )
     tk.Label(
         window,
-        text="正在加载本地模型，首次打开通常需要 30–60 秒。",
+        text="正在加载本地模型，首次打开通常需要 30 至 60 秒。",
         font=("Helvetica", 13),
     ).pack(padx=48, pady=(0, 28))
     window.update_idletasks()
@@ -165,7 +170,7 @@ def main() -> None:
 
             import gradio as gr
 
-            from app import build_demo, create_runtime
+            from app import APP_CSS, app_theme, build_demo, create_runtime
 
             shutdown_requested = threading.Event()
 
@@ -187,7 +192,8 @@ def main() -> None:
                 inbrowser=True,
                 prevent_thread_lock=True,
                 server_name="127.0.0.1",
-                theme=gr.themes.Soft(),
+                theme=app_theme(gr),
+                css=APP_CSS,
             )
             shutdown_requested.wait()
             demo.close()
@@ -197,7 +203,7 @@ def main() -> None:
         if getattr(sys, "frozen", False):
             from tkinter import messagebox
 
-            messagebox.showerror("Sci-RAG 无法启动", str(exc))
+            messagebox.showerror(f"{DISPLAY_NAME}无法启动", str(exc))
         raise
 
 
