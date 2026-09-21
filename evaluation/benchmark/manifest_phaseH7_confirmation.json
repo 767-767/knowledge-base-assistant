@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-phaseH7-confirmation-v1",
+  "description": "Development regression set from two ACL 2025 open-access papers. The set was frozen before retrieval, then used to diagnose generic table, formula, and multi-fact retrieval gaps.",
+  "status": "development-regression",
+  "freeze_date": "2026-09-06",
+  "reclassification_date": "2026-09-06",
+  "reclassification_reason": "The H7 context gate found generic failures in split table headers, multi-column row extraction, formula evidence, and multi-fact experiment retrieval; a fresh H8 set is required for unseen confirmation.",
+  "freeze_policy": "Do not tune retrieval or answer formatting against this set. If a failure is found, reclassify this set as development-regression and create a fresh unseen set for confirmation.",
+  "minimum_documents": 2,
+  "cases_path": "cases_phaseH7_confirmation.jsonl",
+  "documents": [
+    {
+      "document_id": "tcrag-acl-2025",
+      "filename": "2025.acl-long.558.pdf",
+      "sha256": "5e49fb2960a7bd444bbcec6e84cbae1f1f99753f6c05a15a7e992792c3fe3253",
+      "title": "TC–RAG: Turing–Complete RAG’s Case study on Medical LLM Systems",
+      "venue": "Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+      "year": 2025,
+      "pages": 27,
+      "domain": "retrieval-augmented medical language models",
+      "layout_tags": ["two-column", "tables", "figures", "appendix", "formulas", "RAG"],
+      "source_url": "https://aclanthology.org/2025.acl-long.558/",
+      "pdf_url": "https://aclanthology.org/2025.acl-long.558.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "development-regression"
+    },
+    {
+      "document_id": "chartcoder-acl-2025",
+      "filename": "2025.acl-long.363.pdf",
+      "sha256": "0f629f2b69bd8721ca022d0082e6f463d5456ebbece706079450372baed5e8d2",
+      "title": "ChartCoder: Advancing Multimodal Large Language Model for Chart-to-Code Generation",
+      "venue": "Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+      "year": 2025,
+      "pages": 16,
+      "domain": "multimodal chart-to-code generation",
+      "layout_tags": ["two-column", "tables", "figures", "appendix", "charts", "multimodal"],
+      "source_url": "https://aclanthology.org/2025.acl-long.363/",
+      "pdf_url": "https://aclanthology.org/2025.acl-long.363.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "development-regression"
+    }
+  ]
+}

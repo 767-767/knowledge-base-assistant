@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-phaseH10-unseen-v1",
+  "description": "Three new open-access ACL 2025 papers covering scientific table/text QA, multimodal retrieval, and hierarchical table reasoning.",
+  "status": "development-regression",
+  "freeze_date": "2026-09-07",
+  "reclassification_date": "2026-09-07",
+  "reclassification_reason": "The first isolated Hybrid retrieval diagnostic reached target-document hit rate 1.000 but only 8/12 complete required-fact cases at @50 (macro 0.694, micro 0.658). Four cases exposed unresolved wide-table statistics and multi-column value coverage gaps; this set is no longer an unseen confirmation set.",
+  "freeze_policy": "Do not tune retrieval, parsing, or answer formatting against this set. Any failure discovered after retrieval or generation requires reclassification as development-regression and a new unseen set.",
+  "minimum_documents": 3,
+  "cases_path": "cases_phaseH10_unseen.jsonl",
+  "documents": [
+    {
+      "document_id": "scitat-acl-2025",
+      "filename": "2025.findings-acl.199.pdf",
+      "sha256": "8609be38bbcc0a9224429578c3fcf49143635865d5ed317135681c39f87a4001",
+      "title": "SCITAT: A Question Answering Benchmark for Scientific Tables and Text Covering Diverse Reasoning Types",
+      "venue": "Findings of the Association for Computational Linguistics: ACL 2025",
+      "year": 2025,
+      "pages": 23,
+      "domain": "scientific table and text question answering",
+      "layout_tags": ["two-column", "tables", "figures", "text-table reasoning", "appendix"],
+      "source_url": "https://aclanthology.org/2025.findings-acl.199/",
+      "pdf_url": "https://aclanthology.org/2025.findings-acl.199.pdf",
+      "access": "ACL Anthology official free PDF"
+    },
+    {
+      "document_id": "real-mm-rag-acl-2025",
+      "filename": "2025.acl-long.1528.pdf",
+      "sha256": "6876cc59861da690da83978d5897a44bbf87bbc1f8a6a8145966002c41bb98ad",
+      "title": "REAL-MM-RAG: A Real-World Multi-Modal Retrieval Benchmark",
+      "venue": "Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+      "year": 2025,
+      "pages": 24,
+      "domain": "multimodal document retrieval",
+      "layout_tags": ["two-column", "tables", "figures", "multimodal", "retrieval", "appendix"],
+      "source_url": "https://aclanthology.org/2025.acl-long.1528/",
+      "pdf_url": "https://aclanthology.org/2025.acl-long.1528.pdf",
+      "access": "ACL Anthology official free PDF"
+    },
+    {
+      "document_id": "realhitbench-acl-2025",
+      "filename": "2025.findings-acl.371.pdf",
+      "sha256": "3ec01a3071f2331566460101f97b7ad32062c54ff4e5d263352948e40587f0d2",
+      "title": "RealHiTBench: A Comprehensive Realistic Hierarchical Table Benchmark",
+      "venue": "Findings of the Association for Computational Linguistics: ACL 2025",
+      "year": 2025,
+      "pages": 33,
+      "domain": "hierarchical table question answering",
+      "layout_tags": ["two-column", "hierarchical tables", "figures", "chart generation", "TreeThinker", "appendix"],
+      "source_url": "https://aclanthology.org/2025.findings-acl.371/",
+      "pdf_url": "https://aclanthology.org/2025.findings-acl.371.pdf",
+      "access": "ACL Anthology official free PDF"
+    }
+  ]
+}

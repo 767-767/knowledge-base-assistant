@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-phaseH15-unseen-v1",
+  "description": "Final one-shot release-candidate holdout across RAG hallucination analysis, medical QA, and multimodal long-document understanding.",
+  "status": "frozen-unseen",
+  "candidate_date": "2026-09-10",
+  "freeze_date": "2026-09-10",
+  "freeze_policy": "All facts must pass page-scoped PDF parser preflight before freezing. After freezing, any implementation, prompt, case, gold, or retrieval-configuration change motivated by H15 reclassifies the set as development-regression; no immediate H16 replacement is allowed.",
+  "stop_rule": "Run the frozen gate sequence once. On pass, end this development cycle. On failure, record the boundary and move it to backlog without repairing against H15; reopen shared fixes only when the same failure appears in at least two unrelated papers.",
+  "release_candidate_config": {
+    "embedding_model": "BAAI/bge-small-zh-v1.5",
+    "retrieval_mode": "hybrid",
+    "retrieval_k": 12,
+    "context_k": 10,
+    "hybrid_candidate_k": 50,
+    "hybrid_rrf_k": 60,
+    "document_routing": true,
+    "query_decomposition": true,
+    "parent_window": true,
+    "spatial_figure_evidence": true,
+    "formula_evidence": true,
+    "formula_evidence_auto": true,
+    "reranker_model": null,
+    "vision_enabled": false
+  },
+  "acceptance": {
+    "parser_fact_full": "18/18",
+    "retrieval_at_10_fact_full": "18/18",
+    "app_context_fact_full": "18/18",
+    "generation_min_correct": 15,
+    "generation_max_incorrect": 1,
+    "generation_repeats": 1
+  },
+  "minimum_documents": 3,
+  "cases_path": "cases_phaseH15_unseen.jsonl",
+  "documents": [
+    {
+      "document_id": "ragtruth-acl-2024",
+      "filename": "2024.acl-long.585.pdf",
+      "sha256": "17afb377ca5ea8cf672efa9a95fca5889713e94c6fd0355f89f8e01651ddfd4d",
+      "title": "RAGTruth: A Hallucination Corpus for Developing Trustworthy Retrieval-Augmented Language Models",
+      "venue": "Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics",
+      "year": 2024,
+      "pages": 17,
+      "domain": "retrieval-augmented generation hallucination detection",
+      "layout_tags": ["two-column", "tables", "annotation pipeline", "limitations"],
+      "source_url": "https://aclanthology.org/2024.acl-long.585/",
+      "pdf_url": "https://aclanthology.org/2024.acl-long.585.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "frozen-unseen"
+    },
+    {
+      "document_id": "medexqa-bionlp-2024",
+      "filename": "2024.bionlp-1.14.pdf",
+      "sha256": "8d490bceb306f5812a1ee5b61f3c59eefa085b3016e3cf7b6954fa3209b55c0a",
+      "title": "MedExQA: Medical Question Answering Benchmark with Multiple Explanations",
+      "venue": "Proceedings of the 23rd Workshop on Biomedical Language Processing",
+      "year": 2024,
+      "pages": 15,
+      "domain": "medical question answering and explanation evaluation",
+      "layout_tags": ["two-column", "wide tables", "medical QA", "limitations"],
+      "source_url": "https://aclanthology.org/2024.bionlp-1.14/",
+      "pdf_url": "https://aclanthology.org/2024.bionlp-1.14.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "frozen-unseen"
+    },
+    {
+      "document_id": "mlongdoc-emnlp-2025",
+      "filename": "2025.emnlp-main.469.pdf",
+      "sha256": "300e952ccf72c0de26071dd80236132564163330909ab9406e6dad94b393b468",
+      "title": "M-LongDoc: A Benchmark For Multimodal Super-Long Document Understanding And A Retrieval-Aware Tuning Framework",
+      "venue": "Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing",
+      "year": 2025,
+      "pages": 18,
+      "domain": "multimodal long-document understanding",
+      "layout_tags": ["two-column", "figures", "grouped tables", "formula", "appendix"],
+      "source_url": "https://aclanthology.org/2025.emnlp-main.469/",
+      "pdf_url": "https://aclanthology.org/2025.emnlp-main.469.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "frozen-unseen"
+    }
+  ]
+}

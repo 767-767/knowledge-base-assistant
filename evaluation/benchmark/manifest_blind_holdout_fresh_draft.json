@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-multipaper-fresh-evaluation-v1",
+  "description": "Consumed fresh-evaluation set from three peer-reviewed open PDFs. E1 retrieval diagnostics and E2b generation were run before this set was moved to development regression; it must not be used as a future unseen holdout.",
+  "status": "development-regression",
+  "freeze_date": "2026-09-05",
+  "freeze_policy": "The original E2b freeze is preserved by the SHA recorded in PAPER_AUDIT.md. This consumed set may guide regression fixes, but it cannot provide future unseen-evaluation evidence.",
+  "minimum_documents": 3,
+  "cases_path": "cases_blind_holdout_fresh_draft.jsonl",
+  "documents": [
+    {
+      "document_id": "spiqa-neurips-2024",
+      "filename": "2024.neurips-datasets.spiqa.pdf",
+      "sha256": "45eaa54208b42bf419643c87188adda1c244bea0c38a3b6eae8e7a7e5982f7b2",
+      "title": "SPIQA: A Dataset for Multimodal Question Answering on Scientific Papers",
+      "venue": "NeurIPS 2024 Datasets and Benchmarks Track",
+      "year": 2024,
+      "domain": "scientific paper multimodal question answering",
+      "layout_tags": ["two-column", "figures", "tables", "captions", "appendix"],
+      "source_url": "https://proceedings.neurips.cc/paper_files/paper/2024/hash/d74033a247989e8f6f3bf9e0c9629fb5-Abstract-Datasets_and_Benchmarks_Track.html",
+      "pdf_url": "https://proceedings.neurips.cc/paper_files/paper/2024/file/d74033a247989e8f6f3bf9e0c9629fb5-Paper-Datasets_and_Benchmarks_Track.pdf",
+      "access": "official free PDF",
+      "status": "development-regression"
+    },
+    {
+      "document_id": "uda-neurips-2024",
+      "filename": "2024.neurips-datasets.uda.pdf",
+      "sha256": "956f18c4450718fd5f6b98b51bd52eb5191ac7302f14778569ed415de5c95bf0",
+      "title": "UDA: A Benchmark Suite for Retrieval Augmented Generation in Real-world Document Analysis",
+      "venue": "NeurIPS 2024 Datasets and Benchmarks Track",
+      "year": 2024,
+      "domain": "retrieval augmented generation and document analysis",
+      "layout_tags": ["two-column", "tables", "figures", "arithmetic", "appendix"],
+      "source_url": "https://proceedings.neurips.cc/paper_files/paper/2024/file/7c06759d1a8567f087b02e8589454917-Paper-Datasets_and_Benchmarks_Track.pdf",
+      "pdf_url": "https://proceedings.neurips.cc/paper_files/paper/2024/file/7c06759d1a8567f087b02e8589454917-Paper-Datasets_and_Benchmarks_Track.pdf",
+      "access": "official free PDF",
+      "status": "development-regression"
+    },
+    {
+      "document_id": "livexiv-iclr-2025",
+      "filename": "2025.iclr.livexiv.pdf",
+      "sha256": "cdc0f5d49e6d299a949c7d714100acb5066e6f1c319c9185b91fde661a88ef5f",
+      "title": "LiveXiv - A Multi-Modal Live Benchmark Based on ArXiv Papers Content",
+      "venue": "ICLR 2025",
+      "year": 2025,
+      "domain": "scientific multimodal benchmark and contamination-aware evaluation",
+      "layout_tags": ["two-column", "figures", "tables", "charts", "appendix"],
+      "source_url": "https://proceedings.iclr.cc/paper_files/paper/2025/hash/1eaa1373fe55b223c2dfe1fd29a277d7-Abstract-Conference.html",
+      "pdf_url": "https://openreview.net/pdf/a0cc12fc066ae2f5df41d6d271e6e9fc01c62164.pdf",
+      "access": "official free PDF",
+      "status": "development-regression"
+    }
+  ]
+}

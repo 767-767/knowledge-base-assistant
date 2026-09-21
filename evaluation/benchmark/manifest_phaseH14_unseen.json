@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-phaseH14-unseen-v1",
+  "description": "Two previously unused ACL Anthology papers prepared for parser-first, app-context-gated evaluation.",
+  "status": "development-regression",
+  "freeze_date": "2026-09-09",
+  "reclassification_date": "2026-09-09",
+  "reclassification_reason": "Parser, retrieval, and exact app-context gates all passed 12/12, but the first application-answer run produced only 7 correct and 5 partial cases. The deterministic structured-table answer path omitted requested rows or columns in five multi-value questions, so this set is no longer unseen.",
+  "freeze_policy": "The candidate must pass PDF parser evidence preflight before being marked frozen-unseen. After freezing, any implementation, prompt, case, or retrieval configuration change motivated by H14 reclassifies it as development-regression.",
+  "minimum_documents": 2,
+  "cases_path": "cases_phaseH14_unseen.jsonl",
+  "documents": [
+    {
+      "document_id": "bergen-emnlp-2024",
+      "filename": "2024.findings-emnlp.449.pdf",
+      "sha256": "e94b9f862f921a41ccd346226d73663b8e417bead69cbab81820c2dbf8ff97fe",
+      "title": "BERGEN: A Benchmarking Library for Retrieval-Augmented Generation",
+      "venue": "Findings of the Association for Computational Linguistics: EMNLP 2024",
+      "year": 2024,
+      "pages": 24,
+      "domain": "retrieval-augmented generation benchmarking",
+      "layout_tags": ["two-column", "tables", "multilingual retrieval", "retrievers", "appendix"],
+      "source_url": "https://aclanthology.org/2024.findings-emnlp.449/",
+      "pdf_url": "https://aclanthology.org/2024.findings-emnlp.449.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "development-regression"
+    },
+    {
+      "document_id": "mirage-acl-2024",
+      "filename": "2024.findings-acl.372.pdf",
+      "sha256": "b8f47826d8a20a02c81644ff6b1d43bea5c0e5b7187da590edb015cab28f4640",
+      "title": "Benchmarking Retrieval-Augmented Generation for Medicine",
+      "venue": "Findings of the Association for Computational Linguistics: ACL 2024",
+      "year": 2024,
+      "pages": 19,
+      "domain": "medical retrieval-augmented generation evaluation",
+      "layout_tags": ["two-column", "tables", "medical QA", "retrieval", "corpora"],
+      "source_url": "https://aclanthology.org/2024.findings-acl.372/",
+      "pdf_url": "https://aclanthology.org/2024.findings-acl.372.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "development-regression"
+    }
+  ]
+}

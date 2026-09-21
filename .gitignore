@@ -157,6 +157,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Local source PDFs persisted for opt-in vision queries
+**/source_pdfs/
+
 # Spyder project settings
 .spyderproject
 .spyproject

@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-phaseG-confirmation-v1",
+  "description": "Post-F4B set from three previously unused, openly downloadable ACL Anthology papers. It was frozen before retrieval/generation and is now a development-regression set after its generation trace was audited.",
+  "status": "development-regression",
+  "freeze_date": "2026-09-06",
+  "reclassification_date": "2026-09-06",
+  "reclassification_reason": "Phase G generation contexts were inspected and exposed a mismatch with the offline retrieval proxy; this set must not be used as unseen confirmation after failure-guided fixes.",
+  "freeze_policy": "The original questions, gold answers, required facts, and aliases remain frozen. After reclassification, this set may be used for development regression only; any final confirmation requires a new unseen set.",
+  "minimum_documents": 3,
+  "cases_path": "cases_phaseG_confirmation.jsonl",
+  "documents": [
+    {
+      "document_id": "mtraig-acl-2025",
+      "filename": "2025.acl-long.1128.pdf",
+      "sha256": "a260e15eb654f9bd4757e2a31a1bc08d6a1759a22cdf75eea4b58f26ef8504ac",
+      "title": "MT-RAIG: Novel Benchmark and Evaluation Framework for Retrieval-Augmented Insight Generation over Multiple Tables",
+      "venue": "ACL 2025 Long Paper",
+      "year": 2025,
+      "pages": 31,
+      "domain": "multi-table retrieval and insight generation",
+      "layout_tags": ["two-column", "tables", "figures", "appendix", "multi-hop"],
+      "source_url": "https://aclanthology.org/2025.acl-long.1128/",
+      "pdf_url": "https://aclanthology.org/2025.acl-long.1128.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "development-regression"
+    },
+    {
+      "document_id": "wikimixqa-acl-2025",
+      "filename": "2025.findings-acl.1280.pdf",
+      "sha256": "43c62d2956fa641d0a5e3add15ab1eefa24c4d2e00a5390650772d92094a3a50",
+      "title": "WikiMixQA: A Multimodal Benchmark for Question Answering over Tables and Charts",
+      "venue": "Findings of ACL 2025",
+      "year": 2025,
+      "pages": 18,
+      "domain": "multimodal table and chart question answering",
+      "layout_tags": ["two-column", "tables", "charts", "figures", "appendix", "multimodal"],
+      "source_url": "https://aclanthology.org/2025.findings-acl.1280/",
+      "pdf_url": "https://aclanthology.org/2025.findings-acl.1280.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "development-regression"
+    },
+    {
+      "document_id": "tableeval-trl-2025",
+      "filename": "2025.trl-1.10.pdf",
+      "sha256": "033f4e0d1d59d8ec19003c883db106c5f35910497950f12c9b829544068dea9d",
+      "title": "Table Understanding and (Multimodal) LLMs: A Cross-Domain Case Study on Scientific vs. Non-Scientific Data",
+      "venue": "Table Representation Learning Workshop 2025",
+      "year": 2025,
+      "pages": 34,
+      "domain": "scientific table understanding and multimodal representations",
+      "layout_tags": ["two-column", "tables", "figures", "appendix", "scientific-tables", "multimodal"],
+      "source_url": "https://aclanthology.org/2025.trl-1.10/",
+      "pdf_url": "https://aclanthology.org/2025.trl-1.10.pdf",
+      "access": "ACL Anthology official free PDF; PyMuPDF-readable despite pdfinfo xref warnings",
+      "status": "development-regression"
+    }
+  ]
+}

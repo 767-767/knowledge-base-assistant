@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-multipaper-blind-holdout-draft-v1",
+  "description": "Development regression set from the former blind-holdout candidates. It has been inspected and used for targeted fixes; do not treat it as an untouched blind generalization set.",
+  "base_manifest": "manifest_generalization.json",
+  "minimum_documents": 10,
+  "cases_path": "cases_blind_holdout_draft.jsonl",
+  "documents": [
+    {
+      "document_id": "scidc-arxiv-2604-06603",
+      "filename": "2604.06603v1.pdf",
+      "sha256": "e3a4416cb5b94b85c9b3d5c629612976f02aede772b98f3f9c57dbfacaf50ed6",
+      "title": "Scientific Knowledge-driven Decoding Constraints Improving the Reliability of LLMs",
+      "venue": "arXiv preprint",
+      "year": 2026,
+      "domain": "scientific LLM reasoning / constrained decoding",
+      "layout_tags": ["two-column", "figures", "tables", "formulas", "algorithms", "appendix"],
+      "source_url": "https://arxiv.org/abs/2604.06603",
+      "pdf_url": "https://arxiv.org/pdf/2604.06603",
+      "access": "free arXiv PDF; local candidate",
+      "status": "development-regression"
+    },
+    {
+      "document_id": "navirag-arxiv-2604-12766",
+      "filename": "2604.12766v2.pdf",
+      "sha256": "692c51c1925a8dc0395da09217f8a63235a4a351d58015de612edd89700a8350",
+      "title": "NaviRAG: Towards Active Knowledge Navigation for Retrieval-Augmented Generation",
+      "venue": "arXiv preprint",
+      "year": 2026,
+      "domain": "retrieval-augmented generation / hierarchical navigation",
+      "layout_tags": ["two-column", "figures", "tables", "formulas", "algorithms", "appendix"],
+      "source_url": "https://arxiv.org/abs/2604.12766",
+      "pdf_url": "https://arxiv.org/pdf/2604.12766",
+      "access": "free arXiv PDF; local candidate",
+      "status": "development-regression"
+    }
+  ]
+}

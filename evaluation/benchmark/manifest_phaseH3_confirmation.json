@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-phaseH3-confirmation-v1",
+  "description": "Frozen confirmation set from two previously unused, openly downloadable 2025 papers. Questions and gold evidence were frozen before isolated retrieval and generation.",
+  "status": "development-regression",
+  "freeze_date": "2026-09-06",
+  "reclassification_date": "2026-09-06",
+  "reclassification_reason": "H3 generation trace was consumed and manually audited; the set is retained for regression only after a table-extraction failure.",
+  "freeze_policy": "The original questions, gold answers, required facts, and aliases remain frozen. After reclassification, this set may guide development regression only; any confirmation after a fix requires a new unseen set.",
+  "minimum_documents": 2,
+  "cases_path": "cases_phaseH3_confirmation.jsonl",
+  "documents": [
+    {
+      "document_id": "mebench-emnlp-2025",
+      "filename": "2025.emnlp-main.77.pdf",
+      "sha256": "399951b507c5cdd7de37c169fbff9e8d36b4d3d9b37d9fd911d5e388ad92d7af",
+      "title": "MEBench: Benchmarking Large Language Models for Cross-Document Multi-Entity Question Answering",
+      "venue": "EMNLP 2025",
+      "year": 2025,
+      "pages": 14,
+      "domain": "cross-document multi-entity question answering",
+      "layout_tags": ["two-column", "tables", "figures", "appendix", "multi-entity"],
+      "source_url": "https://aclanthology.org/2025.emnlp-main.77/",
+      "pdf_url": "https://aclanthology.org/2025.emnlp-main.77.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "development-regression"
+    },
+    {
+      "document_id": "medicalqa-naacl-2025",
+      "filename": "2025.naacl-long.182.pdf",
+      "sha256": "7a136b45c53d1b4d36696c5525ec57051e0e0245f677825755635c38bdacabbe",
+      "title": "Benchmarking Large Language Models on Answering and Explaining Challenging Medical Questions",
+      "venue": "NAACL 2025 Long Paper",
+      "year": 2025,
+      "pages": 37,
+      "domain": "medical question answering and explanation evaluation",
+      "layout_tags": ["two-column", "tables", "figures", "appendix", "multiple-choice"],
+      "source_url": "https://aclanthology.org/2025.naacl-long.182/",
+      "pdf_url": "https://aclanthology.org/2025.naacl-long.182.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "development-regression"
+    }
+  ]
+}

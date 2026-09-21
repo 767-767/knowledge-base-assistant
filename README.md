@@ -1,143 +1,121 @@
-# Sci-RAG
+# 个人知识库助手
 
-Scientific-paper RAG prototype with PDF/TXT/DOCX ingestion, canonical Markdown
-table chunks, Chroma retrieval, DeepSeek generation, and optional RAGAS
-evaluation.
+把 PDF、TXT 或 DOCX 文档整理成保存在电脑上的资料库，并基于资料进行问答、原文核对、学习大纲整理和自测。
 
-## Quick start
+## 主要功能
 
-1. Use the pinned dependencies in `requirements.txt` with a supported Python
-   environment.
-2. Copy `.env.example` to `.env` and set `DEEPSEEK_API_KEY` only when using
-   generation or the Gradio UI.  Parsing and unit tests do not require an API
-   key.
-3. Run offline checks with `./venv/bin/python test_setup.py` and
-   `./venv/bin/python -m unittest discover -s tests -v`.
-4. Launch the UI with `./venv/bin/python app.py`.
-5. Run the RAGAS evaluator only when external model calls are authorized:
-   `./venv/bin/python evaluation/evaluate.py`.
+- **文档资料库**：导入和管理本地文档，同名但内容不同的文件可以分别保存。
+- **资料问答与原文比对**：选择一篇或多篇文档提问，同时查看回答实际使用的原文片段和页码。
+- **学习大纲**：选择一篇或多篇资料，生成 Markdown 层级大纲。
+- **自测习题与测评**：选择资料范围，生成 5 道单项选择题，提交后显示得分、答案和解析。
+- **本地保存**：文档索引默认保存在当前电脑，不需要注册账户。
 
-Importing `app.py` is side-effect free.  Models, ChromaDB, the OpenAI client,
-and Gradio are initialized only by `create_runtime()`/the UI entrypoint.
+## 使用前准备
 
-For questions that explicitly name a table, row, and column (for example,
-`Table 2` + `DrugR*` + `Target property F1 score`), the application parses the
-Markdown table cell deterministically. This prevents a similarly worded Table
-1 narrative from overriding the requested Table 2 value. A fresh database is
-recommended when validating the new indexing metadata; the existing local
-`chroma_db/` is intentionally ignored and is not rebuilt automatically.
+源码版需要：
 
-## Phase 1 UI validation
+- Python 3.10 或更高版本；
+- 首次运行时可以连接互联网，用于安装依赖和下载中文嵌入模型；
+- 如需生成回答、大纲和习题，还需使用本机 Ollama，或在页面中填写自己的云端模型 API Key。
 
-The one-command validation launcher keeps the repository database untouched. It
-creates a temporary empty ChromaDB, imports the default paper from
-`../2602.08213v1.pdf`, and starts the normal UI:
+仅上传、查看和删除文档不需要 API Key。
+
+## 下载与启动
+
+在 GitHub 仓库页面点击 **Code → Download ZIP**，下载后完整解压，再进入解压后的文件夹。
+
+### macOS / Linux
+
+在该文件夹中打开终端并运行：
 
 ```bash
-bash scripts/launch_phase1_ui_test.sh
+./start.sh
 ```
 
-The launcher reads the local `.env` for `DEEPSEEK_API_KEY`. It does not copy the
-key into the temporary directory. After the browser checks, press `Ctrl+C` in
-the terminal; the temporary database is removed automatically.
-
-To test only compatibility with the existing local index, use:
+如果系统提示没有执行权限，先运行一次：
 
 ```bash
-bash scripts/launch_phase1_ui_test.sh --existing
+chmod +x start.sh
+./start.sh
 ```
 
-To use a different PDF in the fresh-index test:
+### Windows
 
-```bash
-bash scripts/launch_phase1_ui_test.sh /absolute/path/to/paper.pdf
+双击 `start.bat`，或者在解压后的文件夹中打开命令提示符并运行：
+
+```bat
+start.bat
 ```
 
-Acceptance checks for the default paper:
+Windows 启动器尚未完成真机验收。如遇问题，请确认已安装 Python 3.10 或更高版本，并允许 Python 加入系统 PATH。
 
-- the upload, chat, outline, and quiz tabs are present;
-- Table 2 + `DrugR*` + Overall Optimization Score returns `0.2060`;
-- Table 2 + `DrugR*` + Target property F1 score returns `0.3404`;
-- Table 1 + `DrugR` + Overall Optimization Score returns `0.2712`;
-- the answer does not substitute Table 1 for an explicit Table 2 question;
-- a normal narrative question, outline generation, quiz generation, and a
-  second document upload still complete normally.
+首次启动会自动创建独立的 Python 环境并安装依赖，所需时间取决于网络速度。服务就绪后会自动打开默认浏览器，无需手动复制网址。安装中断时，重新运行启动脚本即可继续。
 
-## Multi-paper benchmark (Phase 2)
+关闭工作台时，在运行启动脚本的终端中按 `Ctrl+C`。
 
-The benchmark manifest is in `evaluation/benchmark/`. It currently contains
-five papers and 53 cases (11 existing DrugR cases plus independently curated
-cases for four additional papers). Each external PDF is represented by its
-SHA-256 without storing the PDF in Git. Validate the manifest offline with:
+## 配置模型
 
-```bash
-./venv/bin/python evaluation/validate_benchmark.py
-```
+打开页面后，进入“模型设置”。
 
-To verify the seed PDF and the four new PDFs against recorded hashes, pass both
-external directories (the flag may be repeated):
+### 使用本机 Ollama
 
-```bash
-./venv/bin/python evaluation/validate_benchmark.py \
-  --papers-dir /Users/qinleqi/Desktop \
-  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
-  --verify-files --require-complete
-```
+Ollama 不需要 API Key，提问内容和检索到的原文不会发送给云端模型服务。
 
-Add future PDFs outside the repository, then add their metadata and cases to the
-manifest/JSONL files before implementing or comparing new retrieval methods.
+1. 安装并启动 [Ollama](https://ollama.com/)；
+2. 在终端下载模型：
 
-The current Phase 2 parser regression suite is offline and does not rebuild the
-database:
+   ```bash
+   ollama pull qwen3:4b-instruct
+   ```
 
-```bash
-./venv/bin/python -m unittest discover -s tests -v
-```
+3. 在“模型设置”中选择“Ollama（本地）”，然后点击“应用模型设置”。
 
-The suite covers caption placement, grouped/unit table headers, PDF markup
-boundaries, and layout-table false positives. A local PDF smoke check confirms
-that the same ingestion path can recover table numbers and deterministic cells;
-it does not prove retrieval or answer-generation quality.
+### 使用云端模型
 
-For a no-API, no-Chroma multi-paper retrieval baseline, run:
+也可以在“模型设置”中选择 DeepSeek、Gemini 或自定义 OpenAI 兼容服务，并填写自己的 API Key。通过云端模型生成内容时，问题和本次检索到的相关原文会发送给所选服务商；请勿上传或发送不适合交由该服务处理的敏感资料。
 
-```bash
-./venv/bin/python evaluation/benchmark_retrieval.py \
-  --papers-dir /Users/qinleqi/Desktop \
-  --papers-dir /Users/qinleqi/Desktop/sci-rag-benchmark-papers \
-  --top-k 1,3,5,10
-```
+页面中填写的 API Key 只保留在当前运行进程中，关闭程序后不会保存。
 
-This BM25-lite diagnostic ranks one global in-memory index and reports document,
-reference-context, page, and table-number proxies. It is the fixed comparison
-baseline for Hybrid/RRF; it does not call DeepSeek or prove answer correctness.
+## 基本使用流程
 
-For a local-only Hybrid/RRF comparison (the embedding model must already be
-cached), use `--retriever hybrid` with `HF_HUB_OFFLINE=1`. The diagnostic does
-not change the app's default dense retrieval path or the existing ChromaDB.
+1. 在“文档资料库”中添加 PDF、TXT 或 DOCX。
+2. 在“资料问答与原文比对”中选择资料范围并提问。
+3. 对照页面展示的来源、页码和原文片段核查回答。
+4. 根据需要生成学习大纲或自测题。
 
-## Experimental Hybrid runtime
+PDF 需要包含可提取的文字层。扫描件、纯图片 PDF 和图片中的文字目前不会自动进行 OCR 识别。
 
-The application still defaults to the original Chroma dense retrieval. To test
-the experimental BM25 + dense Reciprocal Rank Fusion path for one process, run:
+大纲和自测各自提供资料范围选择，不选择时使用全部资料。更改范围后需重新生成。
+目前大纲使用范围内的部分开头片段，自测从范围内抽取部分片段，结果不保证覆盖论文全部内容。
 
-```bash
-SCI_RAG_RETRIEVAL_MODE=hybrid ./venv/bin/python app.py
-```
+## 数据与隐私
 
-The first Hybrid question reads the current collection once and builds an
-in-memory BM25 snapshot. Later questions reuse it, and a document upload through
-this runtime invalidates it. `SCI_RAG_HYBRID_CANDIDATE_K` controls candidates
-from each ranking (default `50`), `SCI_RAG_HYBRID_RRF_K` controls the RRF
-constant (default `60`), and `SCI_RAG_CONTEXT_K` still caps generation context.
-No new dependency or database rebuild is required.
+- 文档索引默认保存在项目文件夹下的 `chroma_db` 中。
+- 中文嵌入模型在本机运行；首次使用时会从 Hugging Face 下载到本机缓存。
+- 使用 Ollama 时，文档问答可以完全在本机完成。
+- 使用云端模型时，只有问题和本次回答所需的检索片段会发送给所选服务商。
+- `.env`、本地资料库、上传文档和模型缓存均已排除在 Git 提交范围之外。
 
-Explicit `Table N` handling runs after fusion: all structured table chunks are
-still checked, another table cannot replace the requested one, and a resolvable
-row/column question still uses deterministic cell lookup without calling the
-generation model. Generic quantity phrases such as “how many samples” do not
-trigger an all-table scan unless the question explicitly refers to a table.
-This is an opt-in retrieval experiment, not a learned
-cross-encoder reranker. The current 5-paper/53-case proxy metrics do not justify
-making Hybrid the default; see `evaluation/benchmark/README.md` and
-`PHASE2_HYBRID_HANDOFF.md` for results and limitations.
+如需迁移本地资料库，请在工作台停止运行后备份 `chroma_db` 文件夹。
+
+## 常见问题
+
+**浏览器没有自动打开怎么办？**
+
+查看终端中显示的本地地址，通常是 `http://127.0.0.1:7860`。
+
+**为什么可以上传文档，但不能生成回答？**
+
+文档管理和检索模型可以在本机工作，但回答、大纲和习题需要先在“模型设置”中连接 Ollama 或云端模型服务。
+
+**首次启动安装失败怎么办？**
+
+确认网络和 Python 版本正常，然后重新运行 `start.sh` 或 `start.bat`。启动器会复用已经安装好的内容并继续补全缺失依赖。
+
+**如何清空某篇资料？**
+
+在“文档资料库”中展开“管理已上传文档”，选择文档并确认删除。请优先使用页面提供的删除功能。
+
+## 许可证
+
+本项目使用 [MIT License](LICENSE)。

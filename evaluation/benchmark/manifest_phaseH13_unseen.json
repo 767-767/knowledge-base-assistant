@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-phaseH13-unseen-v1",
+  "description": "Two previously unused open-access retrieval papers prepared with parser-evidence preflight before freezing.",
+  "status": "development-regression",
+  "freeze_date": "2026-09-09",
+  "reclassification_date": "2026-09-09",
+  "reclassification_reason": "The first real generation trace had 11/12 complete送模事实上下文; G-Retriever Table 11 omitted the KAPING row although the raw parser preflight and offline diagnostic passed. This set is no longer an unseen confirmation set.",
+  "freeze_policy": "The candidate must pass PDF parser evidence preflight before being marked frozen-unseen. After freezing, any implementation or prompt change motivated by H13 reclassifies it as development-regression.",
+  "minimum_documents": 2,
+  "cases_path": "cases_phaseH13_unseen.jsonl",
+  "documents": [
+    {
+      "document_id": "bright-arxiv-2407-12883",
+      "filename": "2024.arxiv.2407.12883.pdf",
+      "sha256": "d8f4c96884077559f4b6adc2b6b4ece57c7f5b614b6839fb958916f3eaf68745",
+      "title": "BRIGHT: A Realistic and Challenging Benchmark for Reasoning-Intensive Retrieval",
+      "venue": "arXiv preprint",
+      "year": 2024,
+      "pages": 51,
+      "domain": "reasoning-intensive information retrieval",
+      "layout_tags": ["two-column", "tables", "retrieval", "StackExchange", "theorems", "appendix"],
+      "source_url": "https://arxiv.org/abs/2407.12883",
+      "pdf_url": "https://arxiv.org/pdf/2407.12883",
+      "access": "free arXiv PDF",
+      "status": "development-regression"
+    },
+    {
+      "document_id": "gretriever-arxiv-2402-07630",
+      "filename": "2024.arxiv.2402.07630.pdf",
+      "sha256": "c88093cd95417a12b8c7166ecc1132c9b52d077a4f73f84e7100e25722902b98",
+      "title": "G-Retriever: Retrieval-Augmented Generation for Textual Graph Understanding and Question Answering",
+      "venue": "arXiv preprint",
+      "year": 2024,
+      "pages": 23,
+      "domain": "textual graph retrieval augmented generation",
+      "layout_tags": ["two-column", "tables", "graphs", "retrieval", "efficiency", "appendix"],
+      "source_url": "https://arxiv.org/abs/2402.07630",
+      "pdf_url": "https://arxiv.org/pdf/2402.07630",
+      "access": "free arXiv PDF",
+      "status": "development-regression"
+    }
+  ]
+}

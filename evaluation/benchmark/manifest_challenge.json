@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-multipaper-challenge-v1",
+  "description": "Opt-in challenge set for image-only evidence, numerical computation, and cross-document multi-hop retrieval.",
+  "base_manifest": "manifest_expanded.json",
+  "minimum_documents": 6,
+  "cases_path": "cases_challenge.jsonl",
+  "documents": []
+}

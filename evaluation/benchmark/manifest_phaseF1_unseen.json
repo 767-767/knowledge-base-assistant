@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-phaseF1-unseen-v1",
+  "description": "Post-E3b validation set consumed by the F2 offline retrieval gate; retained as a development regression set after evidence-alignment fixes.",
+  "status": "development-regression",
+  "freeze_date": "2026-09-05",
+  "freeze_policy": "Do not change questions, gold answers, required facts, or retrieval settings in response to failures on this set. If a failure guides a code change, relabel this set as development-regression and create a new confirmation set.",
+  "minimum_documents": 2,
+  "cases_path": "cases_phaseF1_unseen.jsonl",
+  "documents": [
+    {
+      "document_id": "tablerag-emnlp-2025",
+      "filename": "2025.emnlp-main.710.pdf",
+      "sha256": "f388e3af1397055b2c5fda06831f373c23826cda4b4a395a38070bcf3edee4b1",
+      "title": "TableRAG: A Retrieval Augmented Generation Framework for Heterogeneous Document Reasoning",
+      "venue": "EMNLP 2025",
+      "year": 2025,
+      "domain": "heterogeneous document reasoning / tables and text",
+      "layout_tags": ["two-column", "tables", "figures", "appendix", "multi-hop"],
+      "source_url": "https://aclanthology.org/2025.emnlp-main.710/",
+      "pdf_url": "https://aclanthology.org/2025.emnlp-main.710.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "frozen-unseen"
+    },
+    {
+      "document_id": "curie-iclr-2025",
+      "filename": "2025.iclr.curie.pdf",
+      "sha256": "4416483d8380052f6fae90657c36a0857f33d3a2933162edaa007d4072841a07",
+      "title": "CURIE: Evaluating LLMs on Multitask Scientific Long-Context Understanding and Reasoning",
+      "venue": "ICLR 2025",
+      "year": 2025,
+      "domain": "scientific long-context reasoning / multimodal tasks",
+      "layout_tags": ["two-column", "tables", "figures", "maps", "appendix", "long-context"],
+      "source_url": "https://proceedings.iclr.cc/paper_files/paper/2025/hash/1ae4999aefb509d75d8608e07280922c-Abstract-Conference.html",
+      "pdf_url": "https://arxiv.org/pdf/2503.13517",
+      "access": "free arXiv copy of the ICLR 2025 conference paper",
+      "status": "frozen-unseen"
+    }
+  ]
+}

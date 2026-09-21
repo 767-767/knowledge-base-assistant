@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "sci-rag-phaseH5-confirmation-v1",
+  "description": "Development regression set from two ACL Anthology 2025 papers. Questions and gold evidence were frozen before generation, but the set was used for offline retrieval diagnosis before the generation run.",
+  "status": "development-regression",
+  "freeze_date": "2026-09-06",
+  "reclassification_date": "2026-09-06",
+  "reclassification_reason": "H5 was used for offline retrieval diagnosis and generic table/routing fixes before generation; it cannot serve as an unseen confirmation set. The set is retained for regression only.",
+  "freeze_policy": "Do not tune retrieval or answer formatting against this set. If a failure is found, reclassify this set as development-regression and create a fresh unseen set for confirmation.",
+  "minimum_documents": 2,
+  "cases_path": "cases_phaseH5_confirmation.jsonl",
+  "documents": [
+    {
+      "document_id": "sciassess-findings-naacl-2025",
+      "filename": "2025.findings-naacl.125.pdf",
+      "sha256": "acab525af0ce2576e58658a76b56354e3f15e94aa507e0b1f2ad32b0207c67df",
+      "title": "SciAssess: Benchmarking LLM Proficiency in Scientific Literature Analysis",
+      "venue": "Findings of NAACL 2025",
+      "year": 2025,
+      "pages": 23,
+      "domain": "scientific literature analysis benchmarking",
+      "layout_tags": ["two-column", "tables", "figures", "appendix", "multimodal"],
+      "source_url": "https://aclanthology.org/2025.findings-naacl.125/",
+      "pdf_url": "https://aclanthology.org/2025.findings-naacl.125.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "development-regression"
+    },
+    {
+      "document_id": "yescieval-acl-2025",
+      "filename": "2025.acl-long.675.pdf",
+      "sha256": "40f201887a3f052be7afde16547ff29d2d4ab8d5cb2e2f2029b4c6f842d23058",
+      "title": "YESciEval: A Framework for Robust and Cost-Free LLM-as-a-Judge Evaluation in Science Q&A",
+      "venue": "Proceedings of ACL 2025 (Long Papers)",
+      "year": 2025,
+      "pages": 35,
+      "domain": "science question answering evaluation",
+      "layout_tags": ["two-column", "tables", "figures", "appendix", "rubrics", "adversarial-evaluation"],
+      "source_url": "https://aclanthology.org/2025.acl-long.675/",
+      "pdf_url": "https://aclanthology.org/2025.acl-long.675.pdf",
+      "access": "ACL Anthology official free PDF",
+      "status": "development-regression"
+    }
+  ]
+}

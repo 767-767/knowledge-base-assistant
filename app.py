@@ -1,4 +1,4 @@
-"""Sci-RAG application entrypoint.
+"""个人知识库助手应用入口。
 
 Importing this module is intentionally side-effect free.  Models, the OpenAI
 client, ChromaDB, and Gradio are created only by :func:`create_runtime` or
@@ -8,23 +8,640 @@ when the UI is launched from ``main``.  The parsing and table logic lives in
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
+import html
+import json
 import os
 from pathlib import Path
 import random
-from typing import Any
+import re
+import shutil
+from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from sci_rag_core import (
     Chunk,
+    build_evidence_ledger,
+    extract_spatial_figure_chunks,
+    file_sha256,
+    formula_evidence_indices,
     find_table_cell_in_chunks,
+    figure_reference_from_question,
+    is_formula_question,
+    is_limitation_question,
     is_table_question,
+    limitation_evidence_indices,
+    missing_pdf_formula_blocks,
+    matching_figure_indices,
     matching_table_indices,
+    normalize_for_match,
     rerank_table_first,
     split_to_chunks,
+    supplement_answer_with_evidence,
+    supplement_formula_with_evidence,
     table_number_from_question,
+    validate_answer_against_evidence,
 )
-from sci_rag_retrieval import BM25Index, reciprocal_rank_fusion
+from sci_rag_reranking import CrossEncoderReranker, reranker_document_text
+from sci_rag_retrieval import (
+    BM25Index,
+    DocumentRoute,
+    DocumentRouter,
+    RankedItem,
+    ensure_source_coverage,
+    query_variants,
+    reciprocal_rank_fusion,
+    tokenize,
+)
+from sci_rag_vision import complete_vision, render_figure, vision_messages
+
+
+APP_DISPLAY_NAME = "个人知识库助手"
+
+
+MODEL_SERVICE_PRESETS = {
+    "Ollama（本地）": ("http://localhost:11434/v1", "qwen3:4b-instruct"),
+    "DeepSeek": ("https://api.deepseek.com/v1", "deepseek-v4-flash"),
+    "Gemini": (
+        "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "gemini-2.5-flash-lite",
+    ),
+    "自定义 OpenAI 兼容服务": ("", ""),
+}
+
+DOCUMENT_BATCH_SIZE = 64
+
+
+APP_CSS = """
+:root {
+    --kb-primary: #17243a;
+    --kb-primary-hover: #223451;
+    --kb-nav-active: #17243a;
+    --kb-accent: #006a61;
+    --kb-accent-hover: #00584f;
+    --kb-accent-soft: #d9f0eb;
+    --kb-text: #132238;
+    --kb-muted: #596579;
+    --kb-canvas: #f4f7fb;
+    --kb-surface: #ffffff;
+    --kb-surface-muted: #edf3fa;
+    --kb-border: #d8e1ec;
+    --kb-danger: #a33a3a;
+    --kb-shadow: 0 10px 28px rgba(31, 49, 76, 0.07);
+}
+
+.dark {
+    --kb-primary: #d9e5f7;
+    --kb-primary-hover: #ffffff;
+    --kb-nav-active: #006a61;
+    --kb-accent: #69d5c7;
+    --kb-accent-hover: #8fe4d8;
+    --kb-accent-soft: #173c3a;
+    --kb-text: #e7edf6;
+    --kb-muted: #a8b4c5;
+    --kb-canvas: #101925;
+    --kb-surface: #172333;
+    --kb-surface-muted: #1d2d42;
+    --kb-border: #304157;
+    --kb-danger: #ffb4ab;
+    --kb-shadow: 0 12px 30px rgba(0, 0, 0, 0.22);
+}
+
+.gradio-container {
+    width: 100% !important;
+    max-width: none !important;
+    min-height: 100vh;
+    padding: 0 0 36px !important;
+    background: var(--kb-canvas) !important;
+    color: var(--kb-text);
+}
+
+.gradio-container .main {
+    width: 100%;
+    padding: 0 24px !important;
+}
+
+#kb-header {
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    margin: 0 -24px 22px;
+}
+
+.kb-header {
+    display: flex;
+    min-height: 68px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    padding: 11px clamp(20px, 3vw, 48px);
+    border-bottom: 1px solid var(--kb-border);
+    background: color-mix(in srgb, var(--kb-surface) 96%, transparent);
+    box-shadow: 0 2px 14px rgba(31, 49, 76, 0.05);
+    backdrop-filter: blur(10px);
+}
+
+.kb-brand {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    gap: 12px;
+}
+
+.kb-mark {
+    display: grid;
+    width: 38px;
+    height: 38px;
+    flex: 0 0 38px;
+    place-items: center;
+    border-radius: 8px;
+    color: #ffffff;
+    background: #17243a;
+    font-size: 18px;
+    font-weight: 700;
+    box-shadow: 0 5px 14px rgba(23, 36, 58, 0.18);
+}
+
+.dark .kb-mark {
+    color: #ffffff !important;
+    background: #006a61 !important;
+}
+
+.kb-title {
+    margin: 0;
+    color: var(--kb-text);
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.25;
+}
+
+.kb-subtitle {
+    margin: 2px 0 0;
+    overflow: hidden;
+    color: var(--kb-muted);
+    font-size: 12px;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.kb-header-meta {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 10px;
+}
+
+.kb-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 30px;
+    padding: 5px 10px;
+    border-radius: 7px;
+    color: var(--kb-muted);
+    background: var(--kb-surface-muted);
+    font-size: 12px;
+    line-height: 1.3;
+}
+
+.kb-status {
+    color: var(--kb-accent);
+    font-weight: 650;
+}
+
+.kb-status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--kb-accent);
+    box-shadow: 0 0 0 3px var(--kb-accent-soft);
+}
+
+#kb-workspace {
+    display: block !important;
+    width: 100%;
+    max-width: 1600px;
+    margin: 0 auto;
+}
+
+#kb-workspace > .tab-wrapper {
+    position: sticky;
+    top: 80px;
+    z-index: 30;
+    display: flex !important;
+    align-items: center;
+    gap: 4px;
+    width: 100%;
+    margin-bottom: 22px;
+    padding: 6px !important;
+    border: 1px solid var(--kb-border) !important;
+    border-radius: 9px !important;
+    background: var(--kb-surface) !important;
+    box-shadow: var(--kb-shadow);
+}
+
+#kb-workspace > .tab-wrapper > .tab-container[role="tablist"] {
+    display: flex;
+    flex: 1 1 auto;
+    gap: 4px;
+}
+
+#kb-workspace > .tab-wrapper [role="tab"],
+#kb-workspace > .tab-wrapper .overflow-menu > button {
+    justify-content: center;
+    width: auto;
+    min-height: 42px;
+    padding: 9px 11px !important;
+    border: 0 !important;
+    border-radius: 7px !important;
+    color: var(--kb-muted) !important;
+    font-size: 13px !important;
+    font-weight: 590 !important;
+    text-align: left;
+}
+
+#kb-workspace > .tab-wrapper [role="tab"]:hover,
+#kb-workspace > .tab-wrapper .overflow-menu > button:hover {
+    color: var(--kb-text) !important;
+    background: var(--kb-surface-muted) !important;
+}
+
+#kb-workspace > .tab-wrapper [role="tab"].selected {
+    color: #ffffff !important;
+    background: var(--kb-nav-active) !important;
+}
+
+#kb-workspace > .tabitem {
+    min-width: 0;
+    padding: 0 !important;
+}
+
+.kb-page-head {
+    margin: 2px 0 18px;
+}
+
+.kb-page-head h1 {
+    margin: 0;
+    color: var(--kb-text);
+    font-size: clamp(23px, 2.2vw, 30px);
+    font-weight: 700;
+    letter-spacing: -0.035em;
+    line-height: 1.2;
+}
+
+.kb-page-head p {
+    max-width: 68ch;
+    margin: 7px 0 0;
+    color: var(--kb-muted);
+    font-size: 14px;
+    line-height: 1.65;
+}
+
+.kb-panel {
+    min-width: 0;
+    padding: 20px !important;
+    border: 1px solid var(--kb-border) !important;
+    border-radius: 9px !important;
+    background: var(--kb-surface) !important;
+    box-shadow: var(--kb-shadow);
+}
+
+.kb-panel-title h3 {
+    margin: 0 0 5px;
+    color: var(--kb-text);
+    font-size: 16px;
+    font-weight: 680;
+    letter-spacing: -0.015em;
+}
+
+.kb-panel-title p {
+    margin: 0 0 14px;
+    color: var(--kb-muted);
+    font-size: 13px;
+    line-height: 1.55;
+}
+
+.kb-library-grid,
+.kb-chat-layout,
+.kb-settings-grid {
+    align-items: stretch;
+    gap: 18px;
+}
+
+.kb-library-panel {
+    min-height: 380px;
+}
+
+.kb-chat-panel {
+    order: 1;
+    overflow: hidden;
+}
+
+.kb-context-panel {
+    order: 2;
+    align-self: stretch;
+}
+
+.kb-context-note {
+    margin-top: 14px;
+    padding: 12px;
+    border-left: 3px solid var(--kb-accent);
+    border-radius: 0 7px 7px 0;
+    color: var(--kb-muted);
+    background: var(--kb-surface-muted);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.kb-evidence {
+    max-height: clamp(300px, 48vh, 620px);
+    overflow: auto;
+    padding-right: 4px;
+}
+
+.kb-evidence h3 {
+    margin-top: 18px;
+    font-size: 14px;
+}
+
+.kb-evidence blockquote {
+    margin: 8px 0 0;
+    padding: 10px 12px;
+    border-left: 2px solid var(--kb-border);
+    color: var(--kb-muted);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.kb-action-bar {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 18px;
+    margin-bottom: 14px;
+    padding: 15px 17px !important;
+}
+
+.kb-action-bar > .column {
+    width: auto !important;
+    min-width: 0 !important;
+    flex: none !important;
+}
+
+.kb-action-copy h3 {
+    margin: 0 0 3px;
+    color: var(--kb-text);
+    font-size: 15px;
+}
+
+.kb-action-copy p {
+    margin: 0;
+    color: var(--kb-muted);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.kb-output {
+    min-height: clamp(300px, 48vh, 660px);
+    padding: 22px !important;
+    border: 1px solid var(--kb-border) !important;
+    border-radius: 9px !important;
+    background: var(--kb-surface) !important;
+    box-shadow: var(--kb-shadow);
+}
+
+.kb-output h1,
+.kb-output h2,
+.kb-output h3 {
+    color: var(--kb-text);
+}
+
+.kb-quiz-stack {
+    gap: 14px;
+}
+
+.kb-quiz-question {
+    padding: 14px !important;
+    border: 1px solid var(--kb-border) !important;
+    border-radius: 8px !important;
+    background: var(--kb-surface-muted) !important;
+}
+
+.kb-quiz-result {
+    margin-top: 14px;
+}
+
+#kb-upload-button,
+#kb-settings-button,
+#kb-mindmap-button,
+#kb-quiz-button {
+    min-height: 40px;
+    font-weight: 650;
+}
+
+#kb-mindmap-button,
+#kb-quiz-button {
+    min-width: 150px;
+}
+
+#kb-exit-button {
+    max-width: 168px;
+    margin: 26px auto 0;
+}
+
+.kb-panel .block,
+.kb-output.block {
+    box-shadow: none;
+}
+
+button,
+input,
+textarea,
+select {
+    transition: border-color 150ms ease, background-color 150ms ease,
+        color 150ms ease, transform 100ms ease !important;
+}
+
+button:active {
+    transform: scale(0.98);
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+    outline: 3px solid var(--kb-accent-soft) !important;
+    outline-offset: 2px;
+}
+
+@media (max-width: 980px) {
+    .kb-library-grid,
+    .kb-chat-layout,
+    .kb-settings-grid {
+        display: grid !important;
+        grid-template-columns: minmax(0, 1fr) !important;
+    }
+
+    .kb-library-grid > .column,
+    .kb-chat-layout > .column,
+    .kb-settings-grid > .column {
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        flex: none !important;
+    }
+
+    #kb-workspace > .tab-wrapper {
+        margin-bottom: 18px;
+    }
+
+    #kb-workspace > .tab-wrapper [role="tab"] {
+        flex: 0 0 auto;
+        width: auto;
+        white-space: nowrap;
+    }
+
+    #kb-workspace > .tabitem {
+        width: 100%;
+    }
+}
+
+@media (max-width: 680px) {
+    .gradio-container .main {
+        padding: 0 13px !important;
+    }
+
+    #kb-header {
+        margin: 0 -13px 14px;
+    }
+
+    .kb-header {
+        min-height: 62px;
+        gap: 12px;
+        padding: 9px 14px;
+    }
+
+    .kb-mark {
+        width: 34px;
+        height: 34px;
+        flex-basis: 34px;
+        font-size: 16px;
+    }
+
+    .kb-title {
+        font-size: 15px;
+    }
+
+    .kb-subtitle {
+        display: none;
+    }
+
+    .kb-status {
+        padding: 5px 8px;
+        font-size: 11px;
+    }
+
+    #kb-workspace > .tab-wrapper {
+        top: 72px;
+        margin-bottom: 14px;
+        padding: 7px !important;
+    }
+
+    #kb-workspace > .tab-wrapper [role="tab"],
+    #kb-workspace > .tab-wrapper .overflow-menu > button {
+        min-height: 38px;
+        padding: 7px 9px !important;
+        font-size: 12px !important;
+    }
+
+    .kb-page-head {
+        margin-bottom: 14px;
+    }
+
+    .kb-page-head h1 {
+        font-size: 23px;
+    }
+
+    .kb-panel,
+    .kb-output {
+        padding: 15px !important;
+    }
+
+    .kb-library-panel {
+        min-height: 0;
+    }
+
+    .kb-action-bar {
+        align-items: stretch;
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    button,
+    input,
+    textarea,
+    select {
+        transition: none !important;
+    }
+}
+"""
+
+
+def app_theme(gr: Any) -> Any:
+    return gr.themes.Soft(
+        primary_hue="teal",
+        secondary_hue="slate",
+        neutral_hue="slate",
+        spacing_size="md",
+        radius_size="sm",
+        text_size="md",
+    ).set(
+        body_background_fill="#f4f7fb",
+        body_background_fill_dark="#101925",
+        body_text_color="#132238",
+        body_text_color_dark="#e7edf6",
+        body_text_color_subdued="#596579",
+        body_text_color_subdued_dark="#a8b4c5",
+        background_fill_primary="#ffffff",
+        background_fill_primary_dark="#172333",
+        background_fill_secondary="#edf3fa",
+        background_fill_secondary_dark="#1d2d42",
+        border_color_primary="#d8e1ec",
+        border_color_primary_dark="#304157",
+        input_background_fill="#ffffff",
+        input_background_fill_dark="#172333",
+        input_border_color="#cbd6e3",
+        input_border_color_dark="#3a4d65",
+        input_border_color_focus="#006a61",
+        input_border_color_focus_dark="#69d5c7",
+        input_placeholder_color="#687489",
+        input_placeholder_color_dark="#a8b4c5",
+        button_primary_background_fill="#17243a",
+        button_primary_background_fill_hover="#223451",
+        button_primary_background_fill_dark="#69d5c7",
+        button_primary_background_fill_hover_dark="#8fe4d8",
+        button_primary_text_color="#ffffff",
+        button_primary_text_color_dark="#101925",
+        button_transform_active="scale(0.98)",
+        block_radius="8px",
+        block_label_background_fill="transparent",
+        block_label_background_fill_dark="transparent",
+        block_label_border_width="0px",
+        block_label_border_width_dark="0px",
+        block_label_padding="4px 0",
+        block_label_text_color="#006a61",
+        block_label_text_color_dark="#69d5c7",
+        input_radius="7px",
+        button_large_radius="7px",
+        button_medium_radius="7px",
+        button_small_radius="6px",
+        block_shadow="none",
+        block_shadow_dark="none",
+    )
 
 
 @dataclass(frozen=True)
@@ -33,13 +650,28 @@ class RuntimeConfig:
 
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
     db_path: str = "./chroma_db"
-    deepseek_base_url: str = "https://api.deepseek.com/v1"
-    deepseek_model: str = "deepseek-chat"
+    llm_base_url: str = "https://api.deepseek.com/v1"
+    llm_model: str = "deepseek-v4-flash"
     retrieval_k: int = 12
-    context_k: int = 10
+    context_k: int = 4
     retrieval_mode: str = "dense"
+    document_routing: bool = False
+    query_decomposition: bool = False
+    parent_window: bool = False
+    spatial_figure_evidence: bool = False
+    formula_evidence: bool = False
+    formula_evidence_auto: bool = True
+    answer_validation: bool = False
     hybrid_candidate_k: int = 50
     hybrid_rrf_k: int = 60
+    reranker_model: str | None = None
+    reranker_revision: str | None = None
+    reranker_batch_size: int = 8
+    reranker_max_length: int = 512
+    reranker_device: str = "cpu"
+    reranker_rrf_k: int = 60
+    vision_enabled: bool = False
+    vision_model: str = "deepseek-v4-flash-vision-exp"
 
     @classmethod
     def from_env(cls) -> "RuntimeConfig":
@@ -50,47 +682,116 @@ class RuntimeConfig:
                 return default
             return value if value > 0 else default
 
+        def optional_text(name: str, default: str | None = None) -> str | None:
+            value = os.getenv(name, default or "").strip()
+            return value or None
+
+        def enabled(name: str, default: str = "0") -> bool:
+            return os.getenv(name, default).strip().casefold() in {"1", "true", "yes", "on"}
+
         retrieval_mode = os.getenv("SCI_RAG_RETRIEVAL_MODE", cls.retrieval_mode).strip().casefold()
         if retrieval_mode not in {"dense", "hybrid"}:
             retrieval_mode = cls.retrieval_mode
+        document_routing = enabled("SCI_RAG_DOCUMENT_ROUTING")
+        query_decomposition = enabled("SCI_RAG_QUERY_DECOMPOSITION")
+        parent_window = enabled("SCI_RAG_PARENT_WINDOW")
+        spatial_figure_evidence = enabled("SCI_RAG_SPATIAL_FIGURE_EVIDENCE")
+        formula_evidence = enabled("SCI_RAG_FORMULA_EVIDENCE")
+        formula_evidence_auto = enabled("SCI_RAG_FORMULA_EVIDENCE_AUTO", "1")
+        answer_validation = enabled("SCI_RAG_ANSWER_VALIDATION")
+        vision_enabled = enabled("SCI_RAG_VISION_ENABLED")
         return cls(
             embedding_model=os.getenv("SCI_RAG_EMBEDDING_MODEL", cls.embedding_model),
             db_path=os.getenv("SCI_RAG_DB_PATH", cls.db_path),
-            deepseek_base_url=os.getenv("DEEPSEEK_BASE_URL", cls.deepseek_base_url),
-            deepseek_model=os.getenv("DEEPSEEK_MODEL", cls.deepseek_model),
+            llm_base_url=(
+                os.getenv("LLM_BASE_URL")
+                or os.getenv("DEEPSEEK_BASE_URL")
+                or cls.llm_base_url
+            ),
+            llm_model=(
+                os.getenv("LLM_MODEL")
+                or os.getenv("DEEPSEEK_MODEL")
+                or cls.llm_model
+            ),
             retrieval_k=positive_int("SCI_RAG_RETRIEVAL_K", cls.retrieval_k),
             context_k=positive_int("SCI_RAG_CONTEXT_K", cls.context_k),
             retrieval_mode=retrieval_mode,
+            document_routing=document_routing,
+            query_decomposition=query_decomposition,
+            parent_window=parent_window,
+            spatial_figure_evidence=spatial_figure_evidence,
+            formula_evidence=formula_evidence,
+            formula_evidence_auto=formula_evidence_auto,
+            answer_validation=answer_validation,
             hybrid_candidate_k=positive_int(
                 "SCI_RAG_HYBRID_CANDIDATE_K", cls.hybrid_candidate_k
             ),
             hybrid_rrf_k=positive_int("SCI_RAG_HYBRID_RRF_K", cls.hybrid_rrf_k),
+            reranker_model=optional_text("SCI_RAG_RERANKER_MODEL"),
+            reranker_revision=optional_text("SCI_RAG_RERANKER_REVISION"),
+            reranker_batch_size=positive_int(
+                "SCI_RAG_RERANKER_BATCH_SIZE", cls.reranker_batch_size
+            ),
+            reranker_max_length=positive_int(
+                "SCI_RAG_RERANKER_MAX_LENGTH", cls.reranker_max_length
+            ),
+            reranker_device=os.getenv(
+                "SCI_RAG_RERANKER_DEVICE", cls.reranker_device
+            ).strip()
+            or cls.reranker_device,
+            reranker_rrf_k=positive_int(
+                "SCI_RAG_RERANKER_RRF_K", cls.reranker_rrf_k
+            ),
+            vision_enabled=vision_enabled,
+            vision_model=os.getenv("SCI_RAG_VISION_MODEL", cls.vision_model).strip()
+            or cls.vision_model,
         )
 
 
 @dataclass
 class LexicalSnapshot:
-    """Cached collection text used only when hybrid retrieval is enabled."""
+    """Cached collection text used by optional lexical and source routing."""
 
     collection_count: int
     ids: list[str]
     texts: list[str]
     metadatas: list[dict[str, Any]]
     index: BM25Index
+    lexical_indices: list[int]
+    router: DocumentRouter | None = None
 
 
 class Runtime:
     """Explicitly initialized model/API/database resources."""
 
-    def __init__(self, config: RuntimeConfig, client: Any, embedding_model: Any, collection: Any):
+    def __init__(
+        self,
+        config: RuntimeConfig,
+        client: Any,
+        embedding_model: Any,
+        collection: Any,
+        reranker: Any | None = None,
+    ):
+        if reranker is not None and config.retrieval_mode != "hybrid":
+            raise ValueError("cross-encoder reranker 只能与 hybrid 检索一起启用")
         self.config = config
         self.client = client
         self.embedding_model = embedding_model
         self.collection = collection
+        self.reranker = reranker
         self._lexical_snapshot: LexicalSnapshot | None = None
 
     def invalidate_lexical_index(self) -> None:
         self._lexical_snapshot = None
+
+
+def formula_evidence_enabled(question: str, config: RuntimeConfig) -> bool:
+    """Return whether the formula evidence path should run for one question."""
+
+    return bool(
+        config.formula_evidence
+        or (config.formula_evidence_auto and is_formula_question(question))
+    )
 
 
 _runtime: Runtime | None = None
@@ -103,22 +804,65 @@ def create_runtime(config: RuntimeConfig | None = None) -> Runtime:
 
     load_dotenv()
     config = config or RuntimeConfig.from_env()
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise ValueError("请在 .env 文件中设置 DEEPSEEK_API_KEY")
+    if config.reranker_model and config.retrieval_mode != "hybrid":
+        raise ValueError("SCI_RAG_RERANKER_MODEL 需要 SCI_RAG_RETRIEVAL_MODE=hybrid")
+    api_key = os.getenv("LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
 
     from openai import OpenAI
     from sentence_transformers import SentenceTransformer
     import chromadb
 
-    client = OpenAI(api_key=api_key, base_url=config.deepseek_base_url)
+    client = OpenAI(api_key=api_key, base_url=config.llm_base_url) if api_key else None
     embedding_model = SentenceTransformer(config.embedding_model)
+    reranker = None
+    if config.reranker_model:
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        reranker = CrossEncoderReranker(
+            config.reranker_model,
+            revision=config.reranker_revision,
+            batch_size=config.reranker_batch_size,
+            max_length=config.reranker_max_length,
+            device=config.reranker_device,
+            local_files_only=True,
+        )
     chroma_client = chromadb.PersistentClient(path=config.db_path)
     collection = chroma_client.get_or_create_collection(
         name="knowledge_base",
         metadata={"hnsw:space": "cosine"},
     )
-    return Runtime(config, client, embedding_model, collection)
+    return Runtime(config, client, embedding_model, collection, reranker=reranker)
+
+
+def model_service_defaults(service: str) -> tuple[str, str]:
+    """Return the editable URL and model for one UI preset."""
+
+    return MODEL_SERVICE_PRESETS.get(str(service), ("", ""))
+
+
+def configure_model_service(
+    base_url: str,
+    model: str,
+    api_key: str = "",
+    runtime: Runtime | None = None,
+) -> str:
+    """Configure an OpenAI-compatible generation service for this process."""
+
+    runtime = runtime or get_runtime()
+    base_url = str(base_url or "").strip()
+    model = str(model or "").strip()
+    api_key = str(api_key or "").strip()
+    parsed_url = urlsplit(base_url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        return "请输入有效的模型服务 Base URL。"
+    if not model:
+        return "请输入模型名称。"
+    if not api_key and parsed_url.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        return "云端模型服务需要 API Key；Ollama 本地服务可以留空。"
+    from openai import OpenAI
+
+    runtime.client = OpenAI(api_key=api_key or "local", base_url=base_url)
+    runtime.config = replace(runtime.config, llm_base_url=base_url, llm_model=model)
+    return f"✅ 已为当前会话配置模型 {html.escape(model)}；API Key 不会写入知识库。"
 
 
 def get_runtime() -> Runtime:
@@ -147,8 +891,50 @@ def _docx_to_markdown(file_path: str) -> str:
     return "\n\n".join(parts)
 
 
-def load_and_split_document(file_path: str) -> list[Chunk]:
-    """Load PDF/TXT/DOCX and return canonical, page-aware chunks."""
+def _pdf_text_layer_for_formula_recovery(page: Any) -> str:
+    """Keep equation text in visual order when PyMuPDF's plain text flattens it."""
+
+    lines: list[tuple[tuple[float, float, float, float], str]] = []
+    for block in page.get_text("dict", sort=True).get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            text = "".join(str(span.get("text", "")) for span in line.get("spans", []))
+            if text.strip():
+                lines.append((tuple(float(value) for value in line["bbox"]), text))
+    lines.sort(key=lambda item: (item[0][1], item[0][0]))
+
+    merged: list[list[Any]] = []
+    for bbox, text in lines:
+        center = (bbox[1] + bbox[3]) / 2
+        if merged:
+            previous_bbox, previous_text, previous_center = merged[-1]
+            gap = bbox[0] - previous_bbox[2]
+            if abs(center - previous_center) <= 4 and 0 <= gap <= 8:
+                merged[-1] = [
+                    (previous_bbox[0], min(previous_bbox[1], bbox[1]), bbox[2], max(previous_bbox[3], bbox[3])),
+                    previous_text + text,
+                    (previous_center + center) / 2,
+                ]
+                continue
+        merged.append([bbox, text, center])
+
+    return "\n".join(
+        text.replace("\x10", "(").replace("\x11", ")")
+        for _bbox, text, _center in merged
+    )
+
+
+def load_and_split_document(
+    file_path: str,
+    include_spatial_figures: bool = False,
+) -> list[Chunk]:
+    """Load PDF/TXT/DOCX and return canonical, page-aware chunks.
+
+    Spatial figure evidence is experimental and opt-in. It reads coordinates
+    already present in a born-digital PDF text layer; it neither persists nor
+    interprets image pixels.
+    """
 
     source = os.path.basename(file_path)
     suffix = Path(file_path).suffix.lower()
@@ -183,8 +969,35 @@ def load_and_split_document(file_path: str) -> list[Chunk]:
                                 metadata={"source": source, "page": page_number},
                             )
                         )
+                        for formula_text in missing_pdf_formula_blocks(
+                            text,
+                            _pdf_text_layer_for_formula_recovery(
+                                document[page_number - 1]
+                            ),
+                        ):
+                            documents.append(
+                                Chunk(
+                                    page_content=formula_text,
+                                    metadata={
+                                        "source": source,
+                                        "page": page_number,
+                                        "type": "formula",
+                                    },
+                                )
+                            )
             else:
                 documents.append(Chunk(str(page_chunks), {"source": source}))
+            if include_spatial_figures:
+                for page_number, page in enumerate(document, start=1):
+                    documents.extend(
+                        extract_spatial_figure_chunks(
+                            page.get_text("blocks", sort=True),
+                            source,
+                            page_number,
+                            float(page.rect.width),
+                            float(page.rect.height),
+                        )
+                    )
         finally:
             document.close()
     elif suffix == ".txt":
@@ -205,52 +1018,200 @@ def _metadata_for_chroma(metadata: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in metadata.items() if value is not None}
 
 
-def _sha256(file_path: str) -> str:
-    digest = hashlib.sha256()
-    with open(file_path, "rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+def _source_name_for_upload(file_path: str, document_hash: str, runtime: Runtime) -> str:
+    """Keep different files with the same basename independently selectable."""
+
+    source = os.path.basename(file_path)
+    existing = runtime.collection.get(
+        where={"source": {"$eq": source}},
+        include=["metadatas"],
+    )
+    if not _flat_result_values(existing, "ids"):
+        return source
+    existing_hashes = {
+        str(metadata.get("document_sha256", ""))
+        for metadata in _flat_result_values(existing, "metadatas")
+        if isinstance(metadata, dict)
+    }
+    if document_hash in existing_hashes:
+        return source
+    path = Path(source)
+    return f"{path.stem} ({document_hash[:12]}){path.suffix}"
 
 
-def add_document_to_db(file_path: str, runtime: Runtime | None = None) -> str:
+def add_document_to_db(
+    file_path: str,
+    runtime: Runtime | None = None,
+    progress: Callable[..., Any] | None = None,
+) -> str:
     runtime = runtime or get_runtime()
-    chunks = load_and_split_document(file_path)
-    document_hash = _sha256(file_path)
+    if progress is not None:
+        progress(0.05, desc="正在读取文档")
+    document_hash = file_sha256(file_path)
+    source = _source_name_for_upload(file_path, document_hash, runtime)
+    if progress is not None:
+        progress(0.1, desc="正在解析文档")
+    chunks = load_and_split_document(
+        file_path,
+        include_spatial_figures=runtime.config.spatial_figure_evidence,
+    )
+    if runtime.config.vision_enabled and Path(file_path).suffix.lower() == ".pdf":
+        source_dir = Path(runtime.config.db_path) / "source_pdfs"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        source_pdf = source_dir / f"{document_hash}.pdf"
+        if not source_pdf.exists():
+            shutil.copyfile(file_path, source_pdf)
+    records: list[tuple[str, str, dict[str, Any]]] = []
+    normal_chunk_index = 0
     for index, chunk in enumerate(chunks):
         text = chunk.page_content
         metadata = dict(chunk.metadata)
+        is_formula = metadata.get("type") == "formula"
+        stable_index: int | str = f"formula:{index}" if is_formula else normal_chunk_index
         metadata.update(
             {
-                "source": os.path.basename(file_path),
+                "source": source,
                 "document_sha256": document_hash,
-                "chunk_index": index,
             }
         )
+        if not is_formula:
+            # Formula evidence is intentionally outside the ordinary document
+            # sequence, so it cannot change parent-window neighbors or IDs of
+            # pre-existing prose/table chunks.
+            metadata["chunk_index"] = normal_chunk_index
+            normal_chunk_index += 1
         stable_id = hashlib.sha256(
-            f"{document_hash}:{index}:{metadata.get('type', 'text')}:{text}".encode("utf-8")
+            f"{document_hash}:{stable_index}:{metadata.get('type', 'text')}:{text}".encode("utf-8")
         ).hexdigest()
         metadata["chunk_id"] = stable_id
-        embedding = runtime.embedding_model.encode(text).tolist()
+        records.append((stable_id, text, _metadata_for_chroma(metadata)))
+
+    for start in range(0, len(records), DOCUMENT_BATCH_SIZE):
+        batch = records[start : start + DOCUMENT_BATCH_SIZE]
+        texts = [record[1] for record in batch]
+        embeddings = runtime.embedding_model.encode(texts)
+        if hasattr(embeddings, "tolist"):
+            embeddings = embeddings.tolist()
+        if len(texts) == 1 and embeddings and not isinstance(embeddings[0], (list, tuple)):
+            embeddings = [embeddings]
         runtime.collection.upsert(
-            ids=[stable_id],
-            embeddings=[embedding],
-            documents=[text],
-            metadatas=[_metadata_for_chroma(metadata)],
+            ids=[record[0] for record in batch],
+            embeddings=embeddings,
+            documents=texts,
+            metadatas=[record[2] for record in batch],
         )
+        if progress is not None:
+            progress(
+                0.1 + 0.85 * min(start + len(batch), len(records)) / max(len(records), 1),
+                desc=f"正在写入知识库（{min(start + len(batch), len(records))}/{len(records)}）",
+            )
     runtime.invalidate_lexical_index()
-    return f"✅ 成功添加 {len(chunks)} 个文本块到知识库，当前共 {runtime.collection.count()} 个。"
+    if progress is not None:
+        progress(1, desc="文档已添加")
+    return f"成功添加 {source}，共 {len(chunks)} 个文本块；知识库现有 {runtime.collection.count()} 个。"
 
 
-def upload_file(file: Any, runtime: Runtime | None = None) -> str:
+def upload_file(
+    file: Any,
+    runtime: Runtime | None = None,
+    progress: Callable[..., Any] | None = None,
+) -> str:
     if file is None:
         return "请选择一个文件"
-    return add_document_to_db(file.name, runtime=runtime)
+    file_path = (
+        os.fspath(file)
+        if isinstance(file, os.PathLike)
+        else str(getattr(file, "name", file))
+    )
+    try:
+        return add_document_to_db(file_path, runtime=runtime, progress=progress)
+    except Exception as exc:
+        return f"添加失败：{exc}"
+
+
+def _vision_pdf_for_question(
+    message: str,
+    runtime: Runtime,
+    source_filter: str | set[str] | None = None,
+) -> tuple[Path, str] | None:
+    """Resolve one persisted PDF for a routed, explicit figure question."""
+
+    if (
+        not runtime.config.vision_enabled
+        or not runtime.config.document_routing
+        or figure_reference_from_question(message) is None
+        or is_table_question(message)
+    ):
+        return None
+    snapshot = _get_lexical_snapshot(runtime)
+    route = snapshot.router.route(message) if snapshot.router else None
+    allowed_sources = _normalise_source_filter(source_filter)
+    source = str(getattr(route, "document_id", "") or "").strip()
+    if source and allowed_sources and source not in allowed_sources:
+        source = ""
+    if not source and len(allowed_sources) == 1:
+        source = next(iter(allowed_sources))
+    if not source or not source.casefold().endswith(".pdf"):
+        return None
+    hashes = {
+        str(metadata.get("document_sha256", "")).strip()
+        for metadata in snapshot.metadatas
+        if str(metadata.get("source", "")).strip() == source
+        and str(metadata.get("document_sha256", "")).strip()
+    }
+    if len(hashes) != 1:
+        return None
+    source_pdf = Path(runtime.config.db_path) / "source_pdfs" / f"{next(iter(hashes))}.pdf"
+    return (source_pdf, source)
+
+
+def _vision_answer(
+    message: str,
+    runtime: Runtime,
+    source_filter: str | set[str] | None = None,
+) -> tuple[str | None, str | None, dict[str, Any] | None]:
+    """Try one full+detail figure request without changing text retrieval."""
+
+    if runtime.client is None:
+        return None, None, None
+    selected = _vision_pdf_for_question(message, runtime, source_filter=source_filter)
+    if selected is None:
+        return None, None, None
+    source_pdf, source = selected
+    if not source_pdf.is_file():
+        return None, "视觉源 PDF 不存在，已回退文本检索。", None
+    reference = figure_reference_from_question(message)
+    assert reference is not None
+    try:
+        image = render_figure(source_pdf, reference, include_detail=True)
+        detail = image.get("detail")
+        answer = complete_vision(
+            runtime.client,
+            runtime.config.vision_model,
+            vision_messages(
+                message,
+                str(image["data_url"]),
+                str(detail["data_url"]) if isinstance(detail, dict) else None,
+            ),
+        )
+    except Exception as exc:
+        return None, f"视觉问答不可用，已回退文本检索（{type(exc).__name__}）。", None
+    label = (
+        f"Extended Data Figure {reference[1]}"
+        if reference[0] == "extended_data_figure"
+        else f"Figure {reference[1]}"
+    )
+    page = image.get("page")
+    page_text = f"，第 {page} 页" if page else ""
+    answer += f"\n\n📌 **参考来源：**\n- {source}{page_text}（{label}）"
+    metadata = {"source": source, "page": page, "type": "vision", "figure_label": label}
+    return answer, None, metadata
 
 
 def _merge_results(
     dense: dict[str, Any],
     tables: dict[str, Any] | None,
+    additional_results: list[dict[str, Any]] | None = None,
 ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
     texts: list[str] = []
     ids: list[str] = []
@@ -269,7 +1230,8 @@ def _merge_results(
             texts.append(result_docs[index] if index < len(result_docs) else "")
             metas.append(result_metas[index] if index < len(result_metas) else {})
 
-    add(dense)
+    for result in [*(additional_results or []), dense]:
+        add(result)
     if tables:
         # Collection.get() returns flat lists, unlike query()'s nested lists.
         flat_ids = tables.get("ids") or []
@@ -292,6 +1254,77 @@ def _flat_result_values(result: dict[str, Any], key: str) -> list[Any]:
     return list(values)
 
 
+def document_inventory(runtime: Runtime | None = None) -> list[tuple[str, int]]:
+    """Return uploaded source names and their chunk counts."""
+
+    runtime = runtime or get_runtime()
+    result = runtime.collection.get(include=["metadatas"])
+    counts: dict[str, int] = {}
+    for metadata in _flat_result_values(result, "metadatas"):
+        source = str(metadata.get("source", "")).strip() if isinstance(metadata, dict) else ""
+        if source:
+            counts[source] = counts.get(source, 0) + 1
+    return sorted(counts.items(), key=lambda item: item[0].casefold())
+
+
+def delete_document(
+    source: str | None,
+    confirmed: bool = False,
+    runtime: Runtime | None = None,
+) -> str:
+    """Delete one source and its persisted vision PDF after explicit confirmation."""
+
+    runtime = runtime or get_runtime()
+    source = str(source or "").strip()
+    if not source:
+        return "请选择要删除的文档。"
+    if not confirmed:
+        return "请先确认删除。"
+
+    result = runtime.collection.get(
+        where={"source": {"$eq": source}},
+        include=["metadatas"],
+    )
+    ids = [str(value) for value in _flat_result_values(result, "ids")]
+    if not ids:
+        return f"未找到文档：{source}"
+    digests = {
+        str(metadata.get("document_sha256", "")).strip().casefold()
+        for metadata in _flat_result_values(result, "metadatas")
+        if isinstance(metadata, dict)
+        and re.fullmatch(r"[0-9a-fA-F]{64}", str(metadata.get("document_sha256", "")).strip())
+    }
+    runtime.collection.delete(ids=ids)
+    runtime.invalidate_lexical_index()
+    for digest in digests:
+        remaining = runtime.collection.get(
+            where={"document_sha256": {"$eq": digest}},
+            include=["metadatas"],
+        )
+        if not _flat_result_values(remaining, "ids"):
+            (Path(runtime.config.db_path) / "source_pdfs" / f"{digest}.pdf").unlink(
+                missing_ok=True
+            )
+    return f"✅ 已删除 {source}（{len(ids)} 个文本块）。"
+
+
+def _normalise_source_filter(value: Any) -> set[str]:
+    values = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+    return {
+        str(item).strip()
+        for item in values
+        if item is not None and str(item).strip()
+    }
+
+
+def _source_where_clause(sources: set[str]) -> dict[str, Any] | None:
+    if not sources:
+        return None
+    if len(sources) == 1:
+        return {"source": {"$eq": next(iter(sources))}}
+    return {"source": {"$in": sorted(sources)}}
+
+
 def _lexical_search_text(text: str, metadata: dict[str, Any]) -> str:
     return "\n".join(
         [
@@ -303,8 +1336,104 @@ def _lexical_search_text(text: str, metadata: dict[str, Any]) -> str:
     )
 
 
+_TABLE_UNIT_HINT_RE = re.compile(
+    r"(?:[×x]\s*10|%|Å|kcal(?:\s*/\s*mol)?|s\s*/\s*iter|\bunits?\b)",
+    re.IGNORECASE,
+)
+
+
+def _table_caption_unit_note(metadata: dict[str, Any]) -> str:
+    """Return a concise table-note suffix when the caption declares units.
+
+    Deterministic table-cell lookup otherwise returns only the row/column value.
+    Captions are the authoritative place where some scientific tables declare a
+    shared scale (for example ``×10^-2``), so preserve that note without
+    inventing or converting a value.  Captions without an explicit unit hint
+    are intentionally omitted to keep existing concise answers unchanged.
+    """
+
+    caption = str(metadata.get("table_caption", "") or "")
+    if not caption:
+        return ""
+    plain = html.unescape(re.sub(r"<[^>]*>", " ", caption))
+    plain = re.sub(r"\s+", " ", plain).strip()
+    if not plain or not _TABLE_UNIT_HINT_RE.search(plain):
+        return ""
+    body = re.sub(
+        r"^(?:extended\s+data\s+)?table\s*[A-Za-z]?\d+[A-Za-z]?\s*[:.]?\s*",
+        "",
+        plain,
+        flags=re.IGNORECASE,
+    ).strip()
+    return f"（表注：{body or plain}）"
+
+
+def _table_caption_metric_note(metadata: dict[str, Any], question: str) -> str:
+    """Preserve a caption-declared metric when the question names it."""
+
+    caption = str(metadata.get("table_caption", "") or "")
+    plain = html.unescape(re.sub(r"<[^>]*>", " ", caption))
+    match = re.search(
+        r"(?:measured|evaluated|based)\s+(?:by|using|on)\s+([^.;]+)",
+        plain,
+        re.IGNORECASE,
+    )
+    metric = re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
+    if not metric or normalize_for_match(metric) not in normalize_for_match(question):
+        return ""
+    return f"（表格指标：{metric}）"
+
+
+def _attach_table_caption(text: str, metadata: dict[str, Any]) -> str:
+    """Keep a table's caption beside its body in the generation context."""
+
+    caption = str(metadata.get("table_caption", "") or "").strip()
+    if metadata.get("type") != "table" or not caption or caption in text:
+        return text
+    return f"{caption}\n\n{text}"
+
+
+def _fuse_dense_results(
+    results: list[dict[str, Any]],
+    limit: int,
+    rrf_k: int,
+) -> dict[str, Any]:
+    """Fuse dense rankings produced for deterministic query variants."""
+
+    if not results:
+        return {"ids": [[]], "documents": [[]], "metadatas": [[]]}
+    id_lists = [
+        [str(value) for value in _flat_result_values(result, "ids")]
+        for result in results
+    ]
+    fused = reciprocal_rank_fusion(id_lists, rrf_k=rrf_k, limit=limit)
+    payloads: dict[str, tuple[str, dict[str, Any]]] = {}
+    for result in results:
+        ids = [str(value) for value in _flat_result_values(result, "ids")]
+        texts = _flat_result_values(result, "documents")
+        metas = _flat_result_values(result, "metadatas")
+        for index, doc_id in enumerate(ids):
+            if doc_id in payloads:
+                continue
+            metadata = metas[index] if index < len(metas) and isinstance(metas[index], dict) else {}
+            text = str(texts[index]) if index < len(texts) else ""
+            payloads[doc_id] = (text, dict(metadata))
+    ids: list[str] = []
+    texts: list[str] = []
+    metadatas: list[dict[str, Any]] = []
+    for item in fused:
+        doc_id = str(item.key)
+        payload = payloads.get(doc_id)
+        if payload is None:
+            continue
+        ids.append(doc_id)
+        texts.append(payload[0])
+        metadatas.append(payload[1])
+    return {"ids": [ids], "documents": [texts], "metadatas": [metadatas]}
+
+
 def _get_lexical_snapshot(runtime: Runtime) -> LexicalSnapshot:
-    """Build or reuse a BM25 snapshot of the current Chroma collection."""
+    """Build or reuse lexical indexes for the current Chroma collection."""
 
     collection_count = runtime.collection.count()
     cached = runtime._lexical_snapshot
@@ -321,15 +1450,50 @@ def _get_lexical_snapshot(runtime: Runtime) -> LexicalSnapshot:
         dict(raw_metas[index]) if index < len(raw_metas) and isinstance(raw_metas[index], dict) else {}
         for index in range(len(ids))
     ]
-    search_documents = [
-        _lexical_search_text(text, metadata) for text, metadata in zip(texts, metadatas)
+    lexical_indices = [
+        index
+        for index, metadata in enumerate(metadatas)
+        if (
+            metadata.get("type") != "formula"
+            and (
+                not runtime.config.spatial_figure_evidence
+                or metadata.get("type") != "figure"
+            )
+        )
     ]
+    search_documents = [
+        _lexical_search_text(texts[index], metadatas[index])
+        for index in lexical_indices
+    ]
+    source_profiles: dict[str, list[str]] = {}
+    for text, metadata in zip(texts, metadatas):
+        if (
+            metadata.get("type") == "formula"
+            or (
+                runtime.config.spatial_figure_evidence
+                and metadata.get("type") == "figure"
+            )
+        ):
+            continue
+        source = str(metadata.get("source", "")).strip()
+        if source:
+            source_profiles.setdefault(source, []).append(
+                _lexical_search_text(text, metadata)
+            )
+    router = None
+    if len(source_profiles) >= 1:
+        router = DocumentRouter(
+            source_profiles.keys(),
+            ("\n".join(parts) for parts in source_profiles.values()),
+        )
     snapshot = LexicalSnapshot(
         collection_count=collection_count,
         ids=ids,
         texts=texts,
         metadatas=metadatas,
         index=BM25Index(search_documents),
+        lexical_indices=lexical_indices,
+        router=router,
     )
     runtime._lexical_snapshot = snapshot
     return snapshot
@@ -340,6 +1504,8 @@ def _hybrid_fused_result(
     dense: dict[str, Any],
     runtime: Runtime,
     candidate_k: int,
+    source_filter: str | set[str] | None = None,
+    lexical_queries: list[str] | None = None,
 ) -> dict[str, Any]:
     """Fuse Chroma dense results with a cached lexical ranking using RRF."""
 
@@ -357,12 +1523,54 @@ def _hybrid_fused_result(
     }
 
     snapshot = _get_lexical_snapshot(runtime)
-    lexical = (
-        snapshot.index.retrieve(question, candidate_k)
-        if snapshot.index.has_lexical_signal(question)
+    allowed_sources = _normalise_source_filter(source_filter)
+    lexical_indices = [
+        index
+        for index, metadata in enumerate(snapshot.metadatas)
+        if (
+            metadata.get("type") != "formula"
+            and (
+                not allowed_sources
+                or str(metadata.get("source", "")).strip() in allowed_sources
+            )
+            and (
+                not runtime.config.spatial_figure_evidence
+                or metadata.get("type") != "figure"
+            )
+        )
+    ]
+    lexical_positions = {
+        index: position for position, index in enumerate(snapshot.lexical_indices)
+    }
+    lexical_positions_for_query = [
+        lexical_positions[index]
+        for index in lexical_indices
+        if index in lexical_positions
+    ]
+    lexical_rankings: list[list[str]] = []
+    for lexical_query in lexical_queries or [question]:
+        if not snapshot.index.has_lexical_signal(lexical_query):
+            continue
+        lexical_rankings.append(
+            [
+                snapshot.ids[snapshot.lexical_indices[int(item.key)]]
+                for item in snapshot.index.retrieve(
+                    lexical_query, candidate_k, indices=lexical_positions_for_query
+                )
+            ]
+        )
+    lexical_ids = (
+        [
+            str(item.key)
+            for item in reciprocal_rank_fusion(
+                lexical_rankings,
+                rrf_k=runtime.config.hybrid_rrf_k,
+                limit=candidate_k,
+            )
+        ]
+        if lexical_rankings
         else []
     )
-    lexical_ids = [snapshot.ids[int(item.key)] for item in lexical]
     snapshot_by_id = {
         doc_id: (snapshot.texts[index], snapshot.metadatas[index])
         for index, doc_id in enumerate(snapshot.ids)
@@ -388,18 +1596,796 @@ def _hybrid_fused_result(
     return {"ids": [ids], "documents": [texts], "metadatas": [metadatas]}
 
 
+def _cross_encoder_reranked_result(
+    question: str,
+    result: dict[str, Any],
+    runtime: Runtime,
+) -> dict[str, Any]:
+    """Rerank Hybrid candidates, then conservatively fuse the original order."""
+
+    if runtime.reranker is None:
+        return result
+    ids = [str(value) for value in _flat_result_values(result, "ids")]
+    raw_texts = _flat_result_values(result, "documents")
+    raw_metas = _flat_result_values(result, "metadatas")
+    texts = [str(raw_texts[index]) if index < len(raw_texts) else "" for index in range(len(ids))]
+    metadatas = [
+        dict(raw_metas[index])
+        if index < len(raw_metas) and isinstance(raw_metas[index], dict)
+        else {}
+        for index in range(len(ids))
+    ]
+    candidates = [RankedItem(index, 0.0) for index in range(len(ids))]
+    passages = [
+        reranker_document_text(text, metadata)
+        for text, metadata in zip(texts, metadatas)
+    ]
+    reranked = runtime.reranker.rerank(question, candidates, passages).ranked
+    fused = reciprocal_rank_fusion(
+        [reranked, candidates],
+        rrf_k=runtime.config.reranker_rrf_k,
+        limit=len(candidates),
+    )
+    order = [int(item.key) for item in fused]
+    return {
+        "ids": [[ids[index] for index in order]],
+        "documents": [[texts[index] for index in order]],
+        "metadatas": [[metadatas[index] for index in order]],
+    }
+
+
+_COMPOSITE_FACT_CUE_RE = re.compile(
+    r"多少|哪些|如何|管道|步骤|阶段|效率|代价|开销|以及|并且|同时|与|和|"
+    r"(?:[一二三四五六七八九十0-9]+种|多个|两种|若干).{0,20}(?:什么|哪些|分别)|"
+    r"\b(?:what|which|how|and|pipeline|dataset)\b",
+    re.IGNORECASE,
+)
+_LISTED_FACT_QUESTION_RE = re.compile(
+    r"(?:[一二三四五六七八九十0-9]+种|多个|两种|若干).{0,20}(?:什么|哪些|分别)",
+    re.IGNORECASE,
+)
+_REFERENCE_HEADER_RE = re.compile(
+    r"(?:references?|bibliography|参考文献)", re.IGNORECASE
+)
+_PICTURE_TEXT_MARKER_RE = re.compile(
+    r"<!--\s*(?:start|end) of picture text\s*-->|<img\b",
+    re.IGNORECASE,
+)
+_SPATIAL_COORDINATE_RE = re.compile(
+    r"\[x\s*=\s*(?P<x0>[-+]?\d+(?:\.\d+)?)\s*-\s*(?P<x1>[-+]?\d+(?:\.\d+)?)%?;\s*"
+    r"y\s*=\s*(?P<y0>[-+]?\d+(?:\.\d+)?)\s*-\s*(?P<y1>[-+]?\d+(?:\.\d+)?)%?\]",
+    re.IGNORECASE,
+)
+_SECTION_QUERY_ALIASES = {
+    "数据集": ("dataset", "data"),
+    "规模": ("dataset", "size", "entries", "samples", "statistics"),
+    "分布": ("distribution", "benchmark", "questions", "text", "table", "image", "video"),
+    "条目": ("entries", "dataset", "size"),
+    "平均": ("average", "mean", "statistics", "analysis"),
+    "变化": ("change", "difference", "delta"),
+    "绝对": ("absolute", "difference"),
+    "答案表": ("rows", "columns", "statistics"),
+    "行": ("rows", "row"),
+    "列": ("columns", "column"),
+    "阈值": ("threshold", "overlap", "unigram"),
+    "重叠": ("overlap", "unigram"),
+    "一致率": ("agreement", "agreement rate"),
+    "人工标注": ("annotation", "annotators", "reviewed", "instances", "agreement"),
+    "标注": ("annotation", "annotator", "label"),
+    "问题标注": ("question annotation", "annotation", "annotator"),
+    "代理模型": ("agent annotator", "agent model", "model"),
+    "表格集合": ("table set", "multi-table set", "tables"),
+    "构造": ("construction", "collection", "construct"),
+    "实体筛选": ("entity", "BM25", "alpha", "top"),
+    "相似句": ("similar", "sentence", "top", "m"),
+    "结构邻接": ("structural", "adjacency", "three", "sentences"),
+    "设置": ("implementation", "details", "setting", "alpha", "top"),
+    "构成": ("construction", "composition", "collection", "dataset"),
+    "来源": ("source", "dataset"),
+    "线索": ("cue", "cues", "metadata", "titles", "headers"),
+    "人类引导": ("human-guided", "human-in-the-loop", "demonstration"),
+    "关键方法": ("methods", "method", "approach"),
+    "数量": ("number", "count", "statistics", "distribution", "instances"),
+    "占比": ("percentage", "proportion", "distribution", "statistics"),
+    "分类": ("category", "categories", "types", "distribution"),
+    "论文": ("paper", "papers", "relevant papers", "abstracts"),
+    "摘要": ("abstract", "abstracts", "PubMed"),
+    "领域": ("domain", "domains", "field", "fields", "discipline", "disciplines"),
+    "上限": ("up to", "capped", "maximum", "max"),
+    "评分尺度": ("rating scale", "Likert", "score"),
+    "输出格式": ("response format", "format", "JSON", "structured", "rationale"),
+    "质检": ("quality", "quality control", "experts", "annotators", "annotation", "agreement", "kappa", "inferences", "code interpreter"),
+    "质量控制": ("quality", "quality control", "experts", "annotators", "annotation", "agreement", "kappa"),
+    "多少": ("number", "count", "statistics"),
+    "修订": ("revised", "refined", "edit"),
+    "问答对": ("question-answer pairs", "pairs"),
+    "数据子集": ("data subsets", "subsets"),
+    "下游任务": ("downstream tasks", "QA", "T2T"),
+    "实例": ("instances",),
+    "生成": ("generate", "generation"),
+    "候选实例": ("candidate", "instances"),
+    "显式推理": ("explicit-reasoning", "reasoning"),
+    "推理": ("reasoning",),
+    "模型": ("model", "models"),
+    "架构": ("architecture", "encoder-decoder", "decoder-only"),
+    "主干": ("trunk", "backbone", "architecture"),
+    "结构模块": ("structure module", "diffusion module", "module"),
+    "替换": ("replace", "replacing", "replacement", "substitute"),
+    "问题生成": ("question", "generation", "generate"),
+    "切分": ("split", "splitting", "caption", "subcaption"),
+    "检索": ("retrieve", "retrieval", "BM25", "ranker", "top-k"),
+    "嵌入": ("embedding", "embeddings", "vector"),
+    "索引": ("index", "indexing", "OpenSearch"),
+    "子章节": ("subsections", "section"),
+    "排序": ("rank", "ranking", "ranker", "top"),
+    "证据评估": ("evidence", "evaluation", "supported", "refuted"),
+    # Prefer a self-balanced/multi-granular RL section over a generic
+    # training-settings heading when both share the same broad token.
+    "强化学习": ("reinforcement", "rl", "training", "self-balanced", "multi-granular"),
+    "训练": ("training", "train"),
+    "随机种子": ("random", "seed", "seeds", "reproducibility", "variability"),
+    "激活函数": ("activation", "GELU"),
+    "正确答案": ("correct", "answer", "example"),
+    "示例": ("example", "correct", "answer"),
+    "评估指标": ("evaluation", "metrics", "accuracy", "recall", "hit"),
+    "评价指标": ("evaluation", "metrics", "accuracy", "recall", "hit"),
+    "加速策略": (
+        "acceleration", "accelerate", "speedup", "latency", "draft",
+        "speculative", "retrieval", "interaction",
+    ),
+    "效率": ("efficiency", "tokens", "regeneration", "time", "cost", "overhead"),
+    "代价": ("cost", "overhead", "time", "tokens", "regeneration"),
+    "开销": ("cost", "overhead", "time", "tokens", "regeneration"),
+    "全文": ("full-text", "full text"),
+    "完整文本": ("full-text", "full text"),
+    "第一人称": ("first-person", "third-person", "rewrite", "decontextualize"),
+    "实验配置": ("experimental", "setup", "configuration", "configurations"),
+    "量化": ("analysis", "experiment", "Recall@2", "sampled"),
+    "配置": ("configuration", "configurations", "setup"),
+    "基线": ("baseline", "configured"),
+    "奖励": ("reward",),
+    "管道": ("pipeline",),
+    "流程": ("pipeline", "process", "steps"),
+    "工具": ("tool", "toolkit", "parse", "parsing"),
+    "过滤": ("filter", "blind test", "agreement"),
+    "人工复核": ("manual", "verified", "subset", "samples", "instances"),
+    "样本": ("samples", "instances", "subset"),
+    "选项": ("answer choices", "options", "choices"),
+}
+_SOURCE_LOCAL_EVIDENCE_CUES = (
+    "阈值", "重叠", "一致率", "人工标注", "候选实例", "架构", "切分", "检索", "量化", "规模", "分布", "嵌入", "索引",
+    "排序", "显式推理", "强化学习", "随机种子", "激活函数", "正确答案", "示例",
+    "主干", "结构模块", "替换",
+    "评估指标", "评价指标", "加速策略", "全文", "完整文本", "第一人称", "实验配置", "配置", "基线", "奖励",
+    "管道", "流程", "步骤", "阶段", "效率", "代价", "开销", "变化", "绝对", "工具", "过滤", "人工复核", "样本",
+    "标注", "问题标注", "代理模型", "表格集合", "人类引导", "数量", "条目", "摘要", "领域", "上限", "评分尺度", "输出格式", "构成", "占比", "分类",
+    "修订", "数据子集", "选项", "质检", "质量控制",
+    "threshold", "overlap", "annotation", "architecture",
+    "chunk", "retrieval", "ranking", "seed", "activation", "correct answer", "evaluation", "metrics", "acceleration strategies",
+    "first-person", "pipeline", "steps", "configuration", "reward", "replace", "replacing",
+)
+_EXPLICIT_NUMBER_RE = re.compile(
+    r"(?<![\w])(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)(?![\w])"
+)
+MAX_SECTION_EXPANSION_CHUNKS = 6
+MAX_PARENT_WINDOW_ANCHORS = 2
+
+
+def _section_continuation_indices(
+    anchor_index: int,
+    all_metas: list[Any],
+    all_texts: list[Any],
+    source: str,
+    limit: int,
+) -> list[int]:
+    """Return text chunks contiguous with a section anchor.
+
+    PDF-to-Markdown extraction may repeat a section header on adjacent chunks
+    or omit it from continuations. Walk source-local ``chunk_index`` values
+    until the next explicit heading, skip table/figure blocks, and never cross
+    an index gap.
+    """
+
+    if limit <= 0:
+        return []
+    try:
+        anchor_chunk_index = int(all_metas[anchor_index].get("chunk_index"))
+    except (IndexError, AttributeError, TypeError, ValueError):
+        return []
+    source_by_chunk: dict[int, int] = {}
+    for index, raw_meta in enumerate(all_metas):
+        metadata = raw_meta if isinstance(raw_meta, dict) else {}
+        if str(metadata.get("source", "")) != source:
+            continue
+        try:
+            chunk_index = int(metadata.get("chunk_index"))
+        except (TypeError, ValueError):
+            continue
+        source_by_chunk[chunk_index] = index
+
+    continuation: list[int] = []
+    # Only walk forward. Walking backward from the first chunk could import
+    # prose belonging to the preceding section.
+    current = anchor_chunk_index
+    while len(continuation) < limit:
+        current += 1
+        index = source_by_chunk.get(current)
+        if index is None:
+            break
+        metadata = all_metas[index] if isinstance(all_metas[index], dict) else {}
+        if metadata.get("type", "text") != "text":
+            continue
+        headers = str(metadata.get("headers") or "").strip()
+        anchor_headers = str(
+            all_metas[anchor_index].get("headers")
+            if isinstance(all_metas[anchor_index], dict)
+            else ""
+        ).strip()
+        if headers and headers != anchor_headers:
+            break
+        if _is_picture_text_chunk(all_texts[index] if index < len(all_texts) else ""):
+            continue
+        if index not in continuation:
+            continuation.append(index)
+    return continuation[:limit]
+
+
+def _is_picture_text_chunk(text: Any) -> bool:
+    """Identify pymupdf4llm's OCR/image-text blocks for window isolation."""
+
+    return bool(_PICTURE_TEXT_MARKER_RE.search(str(text or "")))
+
+
+def _annotate_spatial_context(text: Any) -> str:
+    """Add a deterministic page-level quadrant to coordinate text evidence."""
+
+    lines: list[str] = []
+    for line in str(text or "").splitlines():
+        match = _SPATIAL_COORDINATE_RE.search(line)
+        if not match or "page-level region" in line.casefold():
+            lines.append(line)
+            continue
+        x_center = (float(match.group("x0")) + float(match.group("x1"))) / 2
+        y_center = (float(match.group("y0")) + float(match.group("y1"))) / 2
+        horizontal = "right" if x_center >= 50 else "left"
+        vertical = "bottom" if y_center >= 50 else "top"
+        lines.append(f"{line} [page-level region: {vertical}-{horizontal}]")
+    return "\n".join(lines)
+
+
+def _is_composite_fact_question(question: str) -> bool:
+    """Detect questions likely to require evidence from multiple chunks."""
+
+    text = str(question or "")
+    matches = _COMPOSITE_FACT_CUE_RE.findall(text)
+    return (
+        len(matches) >= 2
+        or bool(_LISTED_FACT_QUESTION_RE.search(text))
+        or bool(re.search(r"(?:与|和|以及).{0,60}(?:分别|各自)", text))
+        or bool(re.search(r"阶段|管道|步骤", text) and re.search(r"什么|如何|哪些", text))
+    )
+
+
+def _section_query_terms(question: str) -> set[str]:
+    terms = {token for token in tokenize(question) if len(token) >= 3}
+    normalized = str(question or "").casefold()
+    for phrase, aliases in _SECTION_QUERY_ALIASES.items():
+        if phrase in normalized:
+            terms.update(aliases)
+    return terms
+
+
+def _source_local_evidence_requested(question: str) -> bool:
+    """Gate source-local fallback to explicit evidence-seeking questions."""
+
+    normalized = str(question or "").casefold()
+    return any(str(cue).casefold() in normalized for cue in _SOURCE_LOCAL_EVIDENCE_CUES)
+
+
+def _explicit_number_tokens(value: Any) -> set[str]:
+    """Return normalized, non-trivial numbers for a routed evidence fallback."""
+
+    tokens = set()
+    for token in _EXPLICIT_NUMBER_RE.findall(str(value or "")):
+        normalized = token.replace(",", "")
+        try:
+            significant = float(normalized)
+        except ValueError:
+            continue
+        nearby_rank = bool(
+            re.search(
+                rf"(?:top|bottom|k)\s*[-_ ]?{re.escape(token)}\b",
+                str(value or ""),
+                re.IGNORECASE,
+            )
+        )
+        if "," in token or "." in token or significant >= 10 or nearby_rank:
+            tokens.add(normalized)
+    return tokens
+
+
+def _numeric_route_evidence_result(
+    question: str,
+    runtime: Runtime,
+    route: Any | None,
+) -> dict[str, Any] | None:
+    """Recover explicit numeric facts that fall outside a dense top-k."""
+
+    source = str(getattr(route, "document_id", "") or "").strip()
+    query_numbers = _explicit_number_tokens(question)
+    if not source or not query_numbers:
+        return None
+    snapshot = _get_lexical_snapshot(runtime)
+    candidates: list[tuple[int, int, int]] = []
+    query_terms = set(tokenize(question))
+    for index, (text, metadata) in enumerate(zip(snapshot.texts, snapshot.metadatas)):
+        if str(metadata.get("source", "")).strip() != source:
+            continue
+        if metadata.get("type") in {"formula", "figure"}:
+            continue
+        matched = query_numbers & _explicit_number_tokens(text)
+        if not matched:
+            continue
+        overlap = len(query_terms & set(tokenize(_lexical_search_text(text, metadata))))
+        candidates.append((-len(matched), -overlap, index))
+    if not candidates:
+        return None
+    indices = [row[2] for row in sorted(candidates)[:4]]
+    return {
+        "ids": [[snapshot.ids[index] for index in indices]],
+        "documents": [[snapshot.texts[index] for index in indices]],
+        "metadatas": [[
+            {**snapshot.metadatas[index], "route_evidence": True}
+            for index in indices
+        ]],
+    }
+
+
+def _lexical_route_evidence_result(
+    question: str,
+    runtime: Runtime,
+    route: Any | None,
+) -> dict[str, Any] | None:
+    """Add a small source-scoped lexical fallback to dense route results."""
+
+    source = str(getattr(route, "document_id", "") or "").strip()
+    if not source:
+        return None
+    snapshot = _get_lexical_snapshot(runtime)
+    positions = {
+        position: index
+        for position, index in enumerate(snapshot.lexical_indices)
+        if str(snapshot.metadatas[index].get("source", "")).strip() == source
+    }
+    if not positions:
+        return None
+    expanded_question = " ".join([question, *_section_query_terms(question)])
+    ranking = snapshot.index.retrieve(expanded_question, 6, indices=positions)
+    indices = [positions[int(item.key)] for item in ranking]
+    if _is_composite_fact_question(question):
+        expanded_indices: list[int] = []
+        for index in indices:
+            if index not in expanded_indices:
+                expanded_indices.append(index)
+            for continuation in _section_continuation_indices(
+                index,
+                snapshot.metadatas,
+                snapshot.texts,
+                source,
+                1,
+            ):
+                if continuation not in expanded_indices:
+                    expanded_indices.append(continuation)
+        indices = expanded_indices[:6]
+    if not indices:
+        return None
+    return {
+        "ids": [[snapshot.ids[index] for index in indices]],
+        "documents": [[snapshot.texts[index] for index in indices]],
+        "metadatas": [[
+            {**snapshot.metadatas[index], "route_evidence": True}
+            for index in indices
+        ]],
+    }
+
+
+def _figure_page_text_result(
+    question: str,
+    figure_result: dict[str, Any] | None,
+    runtime: Runtime,
+    source_filter: str | set[str] | None = None,
+) -> dict[str, Any] | None:
+    """Add same-page prose for an explicit figure query.
+
+    Spatial figure blocks contain labels and coordinates, while the sentence
+    that explains a figure's example can remain in an adjacent text chunk.
+    Keep a small source/page-local lexical fallback opt-in with the spatial
+    evidence path; ordinary text retrieval is unchanged.
+    """
+
+    if not figure_result:
+        return None
+    if not re.search(
+        r"正确答案|示例|\b(?:correct\s+answer|example)\b",
+        str(question or ""),
+        re.IGNORECASE,
+    ):
+        return None
+    figure_metas = _flat_result_values(figure_result, "metadatas")
+    figure_pages = {
+        (str(meta.get("source", "")).strip(), str(meta.get("page", "")).strip())
+        for meta in figure_metas
+        if isinstance(meta, dict) and meta.get("source") and meta.get("page") is not None
+    }
+    if not figure_pages:
+        return None
+    allowed_sources = _normalise_source_filter(source_filter)
+    if allowed_sources:
+        figure_pages = {
+            pair for pair in figure_pages if pair[0] in allowed_sources
+        }
+    if not figure_pages:
+        return None
+    snapshot = _get_lexical_snapshot(runtime)
+    candidate_indices = [
+        index
+        for index, metadata in enumerate(snapshot.metadatas)
+        if metadata.get("type", "text") in {"text", "formula"}
+        and (
+            str(metadata.get("source", "")).strip(),
+            str(metadata.get("page", "")).strip(),
+        ) in figure_pages
+        and not _is_picture_text_chunk(snapshot.texts[index])
+    ]
+    if not candidate_indices:
+        return None
+    expanded_question = " ".join([question, *_section_query_terms(question)])
+    local_index = BM25Index(
+        [
+            _lexical_search_text(snapshot.texts[index], snapshot.metadatas[index])
+            for index in candidate_indices
+        ]
+    )
+    indices = [
+        candidate_indices[int(item.key)]
+        for item in local_index.retrieve(expanded_question, 2)
+    ]
+    if not indices:
+        return None
+    return {
+        "ids": [[snapshot.ids[index] for index in indices]],
+        "documents": [[snapshot.texts[index] for index in indices]],
+        "metadatas": [[
+            {**snapshot.metadatas[index], "figure_page_evidence": True}
+            for index in indices
+        ]],
+    }
+
+
+def _header_match_score(header: str, query_terms: set[str]) -> int:
+    """Score the deepest heading more heavily than inherited parent headings."""
+
+    parts = [part.strip() for part in str(header).split(">") if part.strip()]
+    if not parts:
+        return 0
+    deepest = set(tokenize(parts[-1]))
+    score = len(deepest & query_terms) * 3
+    if len(parts) > 1:
+        score += len(set(tokenize(parts[-2])) & query_terms)
+    return score
+
+
+def _section_expansion_result(
+    question: str,
+    base_result: dict[str, Any],
+    runtime: Runtime,
+    route: Any | None = None,
+    source_filter: str | set[str] | None = None,
+) -> dict[str, Any] | None:
+    """Add same-section chunks for composite questions without cross-paper mixing.
+
+    PDF-to-Markdown chunkers keep the heading path in ``metadata['headers']``.
+    A multi-fact question can retrieve a section's overview while missing the
+    immediately following chunk that contains a threshold or tool name. This
+    bounded expansion reads the existing collection, stays within the source
+    of the highest-ranked candidate, selects the strongest matching header, and
+    adds at most a small neighborhood of chunks before the final context cap.
+    It never invents text or facts or mixes papers merely because their headings
+    use the same generic terms.
+    """
+
+    if not _is_composite_fact_question(question):
+        return None
+    base_ids = [str(value) for value in _flat_result_values(base_result, "ids")]
+    base_metas = _flat_result_values(base_result, "metadatas")
+    anchor_ids = base_ids[: runtime.config.context_k]
+    anchor_metas = base_metas[: runtime.config.context_k]
+    anchor_sources = {
+        str(meta.get("source", ""))
+        for meta in anchor_metas
+        if isinstance(meta, dict) and meta.get("source")
+    }
+    if len(anchor_sources) > 1:
+        return None
+    base_source = ""
+    for meta in anchor_metas:
+        if isinstance(meta, dict) and meta.get("source"):
+            base_source = str(meta["source"])
+            break
+    if not base_source:
+        return None
+    all_result = runtime.collection.get(include=["documents", "metadatas"])
+    all_texts = _flat_result_values(all_result, "documents")
+    all_metas = _flat_result_values(all_result, "metadatas")
+    corpus_sources = {
+        str(meta.get("source", ""))
+        for meta in all_metas
+        if isinstance(meta, dict) and meta.get("source")
+    }
+    allowed_sources = _normalise_source_filter(source_filter)
+    route_source = str(getattr(route, "document_id", "") or "").strip()
+    if route_source and allowed_sources and route_source not in allowed_sources:
+        route_source = ""
+    if allowed_sources:
+        if len(allowed_sources) == 1:
+            selected_source = next(iter(allowed_sources))
+        elif route_source:
+            selected_source = route_source
+        else:
+            return None
+    else:
+        if len(corpus_sources) > 1 and not route_source:
+            return None
+        selected_source = route_source or base_source
+    if selected_source not in corpus_sources:
+        return None
+    query_terms = _section_query_terms(question)
+    if route is not None:
+        query_terms.difference_update(
+            str(token).casefold()
+            for token in getattr(route, "distinctive_tokens", ())
+        )
+    if not query_terms:
+        return None
+
+    header_rows: list[tuple[int, int, str, str]] = []
+    for index, raw_meta in enumerate(all_metas):
+        metadata = raw_meta if isinstance(raw_meta, dict) else {}
+        source = str(metadata.get("source", ""))
+        header = str(metadata.get("headers", ""))
+        if source != selected_source or not header:
+            continue
+        score = _header_match_score(header, query_terms)
+        if score:
+            header_rows.append((score, index, source, header))
+    if not header_rows:
+        return None
+
+    anchor_headers = {
+        (str(meta.get("source", "")), str(meta.get("headers", "")))
+        for meta in anchor_metas
+        if isinstance(meta, dict) and meta.get("headers")
+    }
+    scored_headers = [
+        row for row in header_rows if (row[2], row[3]) in anchor_headers
+    ] or header_rows
+    best_score = max(row[0] for row in scored_headers)
+    selected_headers = {
+        (row[2], row[3]) for row in scored_headers if row[0] == best_score
+    }
+    all_ids = _flat_result_values(all_result, "ids")
+    all_id_to_index = {str(doc_id): index for index, doc_id in enumerate(all_ids)}
+    anchors = [
+        all_id_to_index[doc_id]
+        for doc_id in anchor_ids
+        if doc_id in all_id_to_index
+        and (
+            str(
+                all_metas[all_id_to_index[doc_id]].get("source", "")
+                if isinstance(all_metas[all_id_to_index[doc_id]], dict)
+                else ""
+            ),
+            str(
+                all_metas[all_id_to_index[doc_id]].get("headers", "")
+                if isinstance(all_metas[all_id_to_index[doc_id]], dict)
+                else ""
+            ),
+        ) in selected_headers
+    ]
+    if not anchors:
+        return None
+    selected_indices = [
+        index
+        for index, raw_meta in enumerate(all_metas)
+        if (
+            str(raw_meta.get("source", "")) if isinstance(raw_meta, dict) else "",
+            str(raw_meta.get("headers", "")) if isinstance(raw_meta, dict) else "",
+        ) in selected_headers
+        and index < len(all_texts)
+        and index < len(all_ids)
+    ]
+    selected_indices.sort(
+        key=lambda index: (
+            min((abs(index - anchor) for anchor in anchors), default=index),
+            index,
+        )
+    )
+    # A section header is often present only on its first chunk.  Add
+    # contiguous, headerless text continuations before the final context cap;
+    # table/figure blocks and the next explicit heading remain boundaries.
+    continuation_indices: list[int] = []
+    continuation_headers: dict[int, str] = {}
+    for anchor in anchors:
+        anchor_metadata = (
+            all_metas[anchor] if isinstance(all_metas[anchor], dict) else {}
+        )
+        section_header = str(anchor_metadata.get("headers") or "").strip()
+        for index in _section_continuation_indices(
+            anchor,
+            all_metas,
+            all_texts,
+            selected_source,
+            MAX_SECTION_EXPANSION_CHUNKS,
+        ):
+            continuation_indices.append(index)
+            if section_header:
+                continuation_headers.setdefault(index, section_header)
+    selected_indices = [
+        *anchors,
+        *continuation_indices,
+        *[
+            index
+            for index in selected_indices
+            if index not in anchors and index not in continuation_indices
+        ],
+    ]
+    selected_ids: list[str] = []
+    selected_docs: list[str] = []
+    selected_metas: list[dict[str, Any]] = []
+    for index in selected_indices[:MAX_SECTION_EXPANSION_CHUNKS]:
+        metadata = all_metas[index] if isinstance(all_metas[index], dict) else {}
+        if index in continuation_headers and not str(metadata.get("headers") or "").strip():
+            # Keep the source metadata's real ``headers`` untouched while
+            # exposing the inherited section used for deterministic evidence
+            # auditing and citations.
+            metadata = {
+                **metadata,
+                "section_context": continuation_headers[index],
+            }
+        doc_id = str(all_ids[index])
+        selected_ids.append(doc_id)
+        selected_docs.append(str(all_texts[index]))
+        selected_metas.append(dict(metadata))
+
+    if not selected_ids:
+        return None
+    return {
+        "ids": [selected_ids],
+        "documents": [selected_docs],
+        "metadatas": [selected_metas],
+    }
+
+
+def _is_cross_page_continuation(previous: str, following: str) -> bool:
+    """Recognize a sentence split at a PDF page boundary."""
+
+    previous = re.sub(r"\s+", " ", str(previous or "")).strip()
+    following = re.sub(r"\s+", " ", str(following or "")).strip()
+    if not previous or not following:
+        return False
+    if not re.search(
+        r"(?:\b(?:and|or|of|with|to|for|a|an|the)\s*|[,;:，、和及与的在]\s*)$",
+        previous,
+        re.IGNORECASE,
+    ):
+        return False
+    return bool(re.match(r"(?:[0-9A-Za-z]|[，。；：、])", following))
+
+
+def _parent_window_contexts(
+    texts: list[str],
+    ids: list[str],
+    metas: list[dict[str, Any]],
+    runtime: Runtime,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Attach same-page neighbors to top text anchors without adding slots.
+
+    Uploaded chunks carry a source-local ``chunk_index``.  The optional parent
+    window uses that stable sequence rather than Collection.get() ordering,
+    skips tables/references and already-selected contexts, and records every
+    contributing chunk ID in returned metadata.  The returned text is therefore
+    exactly what generation receives while citations retain the anchor page.
+    """
+
+    if not runtime.config.parent_window or not texts:
+        return list(texts), [dict(meta) for meta in metas]
+    snapshot = _get_lexical_snapshot(runtime)
+    sequence: dict[tuple[str, int], tuple[str, str, dict[str, Any]]] = {}
+    for doc_id, text, raw_meta in zip(
+        snapshot.ids, snapshot.texts, snapshot.metadatas
+    ):
+        metadata = raw_meta if isinstance(raw_meta, dict) else {}
+        source = str(metadata.get("source", ""))
+        try:
+            chunk_index = int(metadata.get("chunk_index"))
+        except (TypeError, ValueError):
+            continue
+        if source:
+            sequence[(source, chunk_index)] = (doc_id, text, metadata)
+
+    selected_ids = {str(doc_id) for doc_id in ids}
+    effective_texts = list(texts)
+    effective_metas = [dict(meta) for meta in metas]
+    for position in range(min(MAX_PARENT_WINDOW_ANCHORS, len(effective_texts))):
+        metadata = effective_metas[position]
+        if metadata.get("type", "text") != "text":
+            continue
+        # Figure/OCR blocks often contain several unrelated axes and sample
+        # counts.  Expanding them with adjacent prose increases numeric
+        # ambiguity, so retain the ranked block but do not create a window.
+        if _is_picture_text_chunk(effective_texts[position]):
+            continue
+        source = str(metadata.get("source", ""))
+        page = metadata.get("page")
+        header = str(metadata.get("headers", ""))
+        try:
+            anchor_chunk_index = int(metadata.get("chunk_index"))
+        except (TypeError, ValueError):
+            continue
+        if not source or page is None or _REFERENCE_HEADER_RE.search(header):
+            continue
+        anchor_record = sequence.get((source, anchor_chunk_index))
+        if anchor_record is None:
+            continue
+        included = [(anchor_chunk_index, *anchor_record)]
+        for neighbor_index in (anchor_chunk_index - 1, anchor_chunk_index + 1):
+            record = sequence.get((source, neighbor_index))
+            if record is None:
+                continue
+            neighbor_id, neighbor_text, neighbor_meta = record
+            if str(neighbor_id) in selected_ids:
+                continue
+            if neighbor_meta.get("type", "text") != "text":
+                continue
+            if _is_picture_text_chunk(neighbor_text):
+                continue
+            if neighbor_meta.get("page") != page and not _is_cross_page_continuation(
+                effective_texts[position], neighbor_text
+            ):
+                continue
+            if _REFERENCE_HEADER_RE.search(str(neighbor_meta.get("headers", ""))):
+                continue
+            included.append(
+                (neighbor_index, str(neighbor_id), str(neighbor_text), neighbor_meta)
+            )
+        included.sort(key=lambda row: row[0])
+        if len(included) <= 1:
+            continue
+        effective_texts[position] = "\n\n".join(row[2] for row in included)
+        effective_metas[position]["window_chunk_indices"] = [
+            row[0] for row in included
+        ]
+        effective_metas[position]["window_chunk_ids"] = [row[1] for row in included]
+        effective_metas[position]["window_added_character_count"] = sum(
+            len(row[2]) for row in included if row[1] != str(ids[position])
+        )
+    return effective_texts, effective_metas
+
+
 def query_knowledge(
     message: str,
     history: Any = None,
     return_contexts: bool = True,
     runtime: Runtime | None = None,
+    source_filter: str | list[str] | tuple[str, ...] | None = None,
 ) -> str | dict[str, Any]:
     """Retrieve evidence and generate an answer.
 
     When ``return_contexts`` is true, ``contexts`` is exactly the list joined
     into the generation prompt. IDs and metadata are returned for evaluation.
     ``history`` is accepted for Gradio compatibility but unused in this
-    single-turn baseline.
+    single-turn baseline. ``source_filter`` is an optional source filename
+    allowlist used by isolated benchmark runs; normal UI calls leave it empty.
     """
 
     runtime = runtime or get_runtime()
@@ -410,29 +2396,388 @@ def query_knowledge(
         answer = "📚 知识库为空，请先上传文档。"
         return {"answer": answer, "contexts": [], "context_ids": [], "context_metadatas": []} if return_contexts else answer
 
-    question_embedding = runtime.embedding_model.encode(message).tolist()
+    allowed_sources = _normalise_source_filter(source_filter)
+    vision_answer, vision_error, vision_metadata = _vision_answer(
+        message,
+        runtime,
+        source_filter=allowed_sources,
+    )
+    if vision_answer is not None:
+        result = {
+            "answer": vision_answer,
+            "contexts": [],
+            "context_ids": [],
+            "context_metadatas": [vision_metadata] if vision_metadata else [],
+        }
+        return result if return_contexts else vision_answer
+
+    variants = (
+        query_variants(message)
+        if runtime.config.query_decomposition
+        else [message]
+    )
+    if not variants:
+        variants = [message]
     configured_candidate_k = (
         runtime.config.hybrid_candidate_k
         if runtime.config.retrieval_mode == "hybrid"
         else runtime.config.retrieval_k
     )
     candidate_k = min(configured_candidate_k, runtime.collection.count())
-    dense = runtime.collection.query(
-        query_embeddings=[question_embedding],
-        n_results=candidate_k,
-        include=["documents", "metadatas", "distances"],
+    route = None
+    routed_sources: list[str] = []
+    routed_variant_ids: list[str] = []
+    routed_evidence_ids: list[str] = []
+    routed_evidence_results: list[dict[str, Any]] = []
+    if runtime.config.document_routing:
+        route_snapshot = _get_lexical_snapshot(runtime)
+        route = route_snapshot.router.route(message) if route_snapshot.router else None
+        if route_snapshot.router:
+            routed_sources = list(
+                dict.fromkeys(
+                    candidate.document_id
+                    for variant in variants
+                    for candidate in [route_snapshot.router.route(variant)]
+                    if candidate is not None
+                )
+            )
+    dense_results: list[dict[str, Any]] = []
+    for variant in variants:
+        question_embedding = runtime.embedding_model.encode(variant).tolist()
+        query_kwargs = {
+            "query_embeddings": [question_embedding],
+            "n_results": candidate_k,
+            "include": ["documents", "metadatas", "distances"],
+        }
+        # Formula blocks are a gated supplementary channel.  Excluding them
+        # from ordinary candidates keeps recovered equations from perturbing
+        # normal prose/table retrieval.  Figure blocks follow the same rule
+        # only when that opt-in channel is enabled.
+        query_conditions: list[dict[str, Any]] = [{"type": {"$ne": "formula"}}]
+        if runtime.config.spatial_figure_evidence:
+            query_conditions.append({"type": {"$ne": "figure"}})
+        variant_route = route
+        if len(routed_sources) > 1 and route_snapshot.router:
+            variant_route = route_snapshot.router.route(variant)
+        source_clause = _source_where_clause(allowed_sources)
+        if source_clause is not None:
+            query_conditions.append(source_clause)
+        elif variant_route is not None:
+            # ``source`` is written for every uploaded chunk.  The filter is
+            # only applied after the conservative lexical router found one
+            # unique source; ambiguous questions intentionally keep the global
+            # search for every variant.
+            query_conditions.append({"source": {"$eq": variant_route.document_id}})
+        query_kwargs["where"] = (
+            query_conditions[0]
+            if len(query_conditions) == 1
+            else {"$and": query_conditions}
+        )
+        variant_result = runtime.collection.query(**query_kwargs)
+        dense_results.append(variant_result)
+        # An isolated benchmark case already supplies the source allowlist,
+        # even when the lexical router cannot infer a unique identifier from a
+        # Chinese question. Reuse the same bounded evidence fallbacks in that
+        # case without changing ordinary UI retrieval (which has no filter).
+        evidence_route = variant_route
+        if evidence_route is None and len(allowed_sources) == 1:
+            evidence_route = DocumentRoute(next(iter(allowed_sources)), ())
+        if evidence_route is not None:
+            routed_variant_ids.extend(
+                str(value) for value in _flat_result_values(variant_result, "ids")[:12]
+            )
+            source_local_requested = (
+                _source_local_evidence_requested(message)
+                and figure_reference_from_question(message) is None
+            )
+            if (
+                len(routed_sources) > 1
+                or (evidence_route is not None and source_local_requested)
+                or (len(allowed_sources) == 1 and source_local_requested)
+            ):
+                # A source-only clause (for example ``TANQ`` after splitting
+                # ``TANQ 和 FigEx ...``) is useful for routing but carries no
+                # retrieval intent. Reuse the full question for the bounded
+                # source-local evidence fallbacks so the route does not lose
+                # the shared predicate.
+                # Keep a real decomposed clause for source-local lexical
+                # evidence.  A bare routed identifier still needs the full
+                # question because it carries no retrieval intent.
+                variant_has_question_cue = bool(
+                    re.search(
+                        r"什么|哪些|多少|如何|是否|分别|配置|指标|问题|条件|"
+                        r"what|which|how|whether|number|count|score|value",
+                        variant,
+                        re.IGNORECASE,
+                    )
+                )
+                evidence_question = (
+                    message
+                    if (
+                        (len(allowed_sources) == 1 and not variant_has_question_cue)
+                        or (
+                            not variant_has_question_cue
+                            and not _is_composite_fact_question(variant)
+                            and _is_composite_fact_question(message)
+                        )
+                    )
+                    else variant
+                )
+                variant_numeric = _numeric_route_evidence_result(
+                    evidence_question,
+                    runtime,
+                    evidence_route,
+                )
+                if variant_numeric is not None:
+                    routed_evidence_results.append(variant_numeric)
+                    routed_evidence_ids.extend(
+                        str(value)
+                        for value in _flat_result_values(variant_numeric, "ids")
+                    )
+                variant_lexical = _lexical_route_evidence_result(
+                    evidence_question,
+                    runtime,
+                    evidence_route,
+                )
+                if variant_lexical is not None:
+                    routed_evidence_results.append(variant_lexical)
+                    routed_evidence_ids.extend(
+                        str(value)
+                        for value in _flat_result_values(variant_lexical, "ids")
+                    )
+                variant_section = _section_expansion_result(
+                    evidence_question,
+                    variant_result,
+                    runtime,
+                    route=evidence_route,
+                    source_filter=allowed_sources,
+                )
+                if variant_section is not None:
+                    routed_evidence_results.append(variant_section)
+                    routed_evidence_ids.extend(
+                        str(value)
+                        for value in _flat_result_values(variant_section, "ids")
+                    )
+    dense = _fuse_dense_results(
+        dense_results,
+        candidate_k,
+        runtime.config.hybrid_rrf_k,
     )
     if runtime.config.retrieval_mode == "hybrid":
-        dense = _hybrid_fused_result(message, dense, runtime, candidate_k)
-    table_results = None
-    if is_table_question(message):
-        table_results = runtime.collection.get(
-            where={"type": "table"},
+        dense = _hybrid_fused_result(
+            message,
+            dense,
+            runtime,
+            candidate_k,
+            source_filter=(
+                allowed_sources
+                or (route.document_id if route is not None else None)
+            ),
+            lexical_queries=variants,
+        )
+        dense = _cross_encoder_reranked_result(message, dense, runtime)
+    section_result = _section_expansion_result(
+        message,
+        dense,
+        runtime,
+        route=route,
+        source_filter=allowed_sources,
+    )
+    formula_result = None
+    use_formula_evidence = formula_evidence_enabled(message, runtime.config)
+    if use_formula_evidence:
+        formula_snapshot = _get_lexical_snapshot(runtime)
+        source_ids = {
+            str(metadata.get("source", "")).strip()
+            for metadata in formula_snapshot.metadatas
+            if isinstance(metadata, dict) and str(metadata.get("source", "")).strip()
+        }
+        formula_indices: list[int] = []
+        # Composite questions may route each clause to a different paper. Run
+        # the opt-in formula aid per formula-bearing variant so a route chosen
+        # for the first clause cannot hide an equation needed by a later one.
+        for variant in variants:
+            if not formula_evidence_enabled(variant, runtime.config):
+                continue
+            variant_route = (
+                formula_snapshot.router.route(variant)
+                if formula_snapshot.router is not None
+                else None
+            )
+            allowed_formula_indices: list[int]
+            if allowed_sources:
+                allowed_formula_indices = [
+                    index
+                    for index in range(len(formula_snapshot.texts))
+                    if str(formula_snapshot.metadatas[index].get("source", ""))
+                    in allowed_sources
+                ]
+            elif variant_route is not None:
+                allowed_formula_indices = [
+                    index
+                    for index in range(len(formula_snapshot.texts))
+                    if str(formula_snapshot.metadatas[index].get("source", ""))
+                    == variant_route.document_id
+                ]
+            elif len(source_ids) == 1:
+                # A single-source collection is safe for this opt-in lexical aid.
+                allowed_formula_indices = list(range(len(formula_snapshot.texts)))
+            else:
+                # Do not let an unqualified multi-paper question borrow an
+                # equation from an unrelated source.
+                allowed_formula_indices = []
+            for index in formula_evidence_indices(
+                variant,
+                formula_snapshot.texts,
+                formula_snapshot.metadatas,
+                max_results=8,
+                allowed_indices=allowed_formula_indices,
+            ):
+                if index not in formula_indices:
+                    formula_indices.append(index)
+        if formula_indices:
+            formula_result = {
+                "ids": [[formula_snapshot.ids[index] for index in formula_indices]],
+                "documents": [[formula_snapshot.texts[index] for index in formula_indices]],
+                "metadatas": [[
+                    {**formula_snapshot.metadatas[index], "formula_evidence": True}
+                    for index in formula_indices
+                ]],
+            }
+    limitation_result = None
+    if is_limitation_question(message):
+        limitation_snapshot = _get_lexical_snapshot(runtime)
+        source_ids = {
+            str(metadata.get("source", "")).strip()
+            for metadata in limitation_snapshot.metadatas
+            if isinstance(metadata, dict) and str(metadata.get("source", "")).strip()
+        }
+        allowed_limitation_indices: list[int] | None
+        if allowed_sources:
+            allowed_limitation_indices = [
+                index
+                for index in range(len(limitation_snapshot.texts))
+                if str(limitation_snapshot.metadatas[index].get("source", ""))
+                in allowed_sources
+            ]
+        elif route is not None:
+            allowed_limitation_indices = [
+                index
+                for index in range(len(limitation_snapshot.texts))
+                if str(limitation_snapshot.metadatas[index].get("source", ""))
+                == route.document_id
+            ]
+        elif len(source_ids) == 1:
+            allowed_limitation_indices = list(range(len(limitation_snapshot.texts)))
+        else:
+            # Keep an unqualified multi-paper query from borrowing a limitation
+            # passage from an unrelated source.
+            allowed_limitation_indices = []
+        limitation_indices = limitation_evidence_indices(
+            message,
+            limitation_snapshot.texts,
+            limitation_snapshot.metadatas,
+            max_results=6,
+            allowed_indices=allowed_limitation_indices,
+        )
+        if limitation_indices:
+            limitation_result = {
+                "ids": [[limitation_snapshot.ids[index] for index in limitation_indices]],
+                "documents": [[limitation_snapshot.texts[index] for index in limitation_indices]],
+                "metadatas": [[
+                    {**limitation_snapshot.metadatas[index], "limitation_evidence": True}
+                    for index in limitation_indices
+                ]],
+            }
+    figure_result = None
+    figure_page_result = None
+    explicit_figure_reference = figure_reference_from_question(message)
+    if runtime.config.spatial_figure_evidence and explicit_figure_reference is not None:
+        # Build the lexical snapshot before the exact figure lookup so the
+        # same-page prose helper reuses it instead of issuing a second get().
+        _get_lexical_snapshot(runtime)
+        figure_kind, figure_number = explicit_figure_reference
+        figure_conditions: list[dict[str, Any]] = [
+            {"type": {"$eq": "figure"}},
+            {"figure_kind": {"$eq": figure_kind}},
+            {"figure_number": {"$eq": figure_number}},
+        ]
+        source_clause = _source_where_clause(allowed_sources)
+        if source_clause is not None:
+            figure_conditions.append(source_clause)
+        elif route is not None:
+            figure_conditions.append({"source": {"$eq": route.document_id}})
+        raw_figure_result = runtime.collection.get(
+            where={"$and": figure_conditions},
             include=["documents", "metadatas"],
         )
-    retrieved_texts, retrieved_ids, retrieved_metas = _merge_results(dense, table_results)
+        # ``collection.get`` is flat whereas normal query results are nested.
+        # Wrap it so the common merge path can place exact Figure N evidence
+        # before dense candidates without special-casing IDs or metadata.
+        figure_result = {
+            "ids": [raw_figure_result.get("ids") or []],
+            "documents": [raw_figure_result.get("documents") or []],
+            "metadatas": [raw_figure_result.get("metadatas") or []],
+        }
+        figure_page_result = _figure_page_text_result(
+            message,
+            figure_result,
+            runtime,
+            source_filter=allowed_sources,
+        )
+    table_results = None
+    if is_table_question(message):
+        table_where: dict[str, Any] = {"type": "table"}
+        source_clause = _source_where_clause(allowed_sources)
+        if source_clause is not None:
+            table_where = {"$and": [{"type": {"$eq": "table"}}, source_clause]}
+        elif route is not None:
+            # A source route already narrowed the dense/lexical candidate pool.
+            # Keep the deterministic table scan in that same scope; otherwise
+            # Table N from a different uploaded paper could satisfy the same
+            # row/column names before the routed paper is inspected.
+            table_where = {
+                "$and": [
+                    {"type": {"$eq": "table"}},
+                    {"source": {"$eq": route.document_id}},
+                ]
+            }
+        table_results = runtime.collection.get(
+            where=table_where,
+            include=["documents", "metadatas"],
+        )
+    retrieved_texts, retrieved_ids, retrieved_metas = _merge_results(
+        dense,
+        table_results,
+        [
+            result
+            for result in (
+                limitation_result,
+                figure_result,
+                figure_page_result,
+                formula_result,
+                section_result,
+                *routed_evidence_results,
+            )
+            if result is not None
+        ]
+        or None,
+    )
+    if allowed_sources:
+        filtered = [
+            (text, doc_id, metadata)
+            for text, doc_id, metadata in zip(
+                retrieved_texts, retrieved_ids, retrieved_metas
+            )
+            if str(metadata.get("source", "")).strip() in allowed_sources
+        ]
+        retrieved_texts = [row[0] for row in filtered]
+        retrieved_ids = [row[1] for row in filtered]
+        retrieved_metas = [row[2] for row in filtered]
     if not retrieved_texts:
         answer = "未找到相关内容，请换个问法。"
+        if vision_error:
+            answer += f"\n\n⚠️ {vision_error}"
         return {"answer": answer, "contexts": [], "context_ids": [], "context_metadatas": []} if return_contexts else answer
 
     explicit_table_number = table_number_from_question(message)
@@ -448,6 +2793,44 @@ def query_knowledge(
         return result if return_contexts else answer
 
     order, note, filtered_texts = rerank_table_first(message, retrieved_texts, retrieved_metas)
+    if explicit_figure_reference is not None and runtime.config.spatial_figure_evidence:
+        matching_figures = matching_figure_indices(
+            message,
+            filtered_texts,
+            retrieved_metas,
+        )
+        if matching_figures:
+            matching_set = set(matching_figures)
+            order = matching_figures + [
+                index
+                for index in order
+                if index not in matching_set
+                and retrieved_metas[index].get("type") != "figure"
+                and not _is_picture_text_chunk(filtered_texts[index])
+            ]
+        else:
+            figure_kind, figure_number = explicit_figure_reference
+            label = (
+                f"Extended Data Figure {figure_number}"
+                if figure_kind == "extended_data_figure"
+                else f"Figure {figure_number}"
+            )
+            figure_note = f"未找到 {label} 的坐标化文字证据，已回退普通文本检索。"
+            note = f"{note} {figure_note}".strip()
+
+    if len(routed_sources) > 1:
+        id_to_index = {str(doc_id): index for index, doc_id in enumerate(retrieved_ids)}
+        order = ensure_source_coverage(
+            order,
+            retrieved_metas,
+            routed_sources,
+            runtime.config.context_k,
+            preferred_order=[
+                id_to_index[doc_id]
+                for doc_id in [*routed_evidence_ids, *routed_variant_ids]
+                if doc_id in id_to_index
+            ],
+        )
 
     # A question that names a table, row, and column is a deterministic cell
     # lookup.  Answer it from the parsed table rather than asking a language
@@ -455,18 +2838,89 @@ def query_knowledge(
     cell_match = find_table_cell_in_chunks(message, filtered_texts, retrieved_metas)
     if cell_match is not None:
         cell_index, cell = cell_match
-        table_number = cell["table_number"] or explicit_table_number or "?"
-        cell_context = (
-            f"Table {table_number} 结构化单元格：行={cell['row']}；"
-            f"列={cell['column']}；值={cell['value']}。\n\n{filtered_texts[cell_index]}"
+        table_number = (
+            cell.get("table_number")
+            or cell.get("table_label")
+            or explicit_table_number
+            or "?"
         )
+        if "rows" in cell:
+            row_texts = []
+            for row in cell["rows"]:
+                values = "；".join(
+                    f"{item['column']}={item['value']}"
+                    for item in row.get("values", [])
+                )
+                descriptors = "；".join(
+                    f"{item['column']}={item['value']}"
+                    for item in row.get("descriptors", [])
+                )
+                qualifier = f"（{descriptors}）" if descriptors else ""
+                row_label = row["row"]
+                if row.get("outer_group"):
+                    row_label = f"{row['outer_group']} / {row_label}"
+                row_texts.append(f"{row_label}{qualifier}：{values}")
+            value_text = "；".join(row_texts)
+            cell_context = (
+                f"Table {table_number} 结构化多行：{value_text}\n\n"
+                f"{filtered_texts[cell_index]}"
+            )
+            answer = f"根据 Table {table_number} 中相关行，列值为：{value_text}。"
+        elif "values" in cell:
+            value_text = "；".join(
+                f"{item['column']}={item['value']}"
+                for item in cell["values"]
+            )
+            descriptors = "；".join(
+                f"{item['column']}={item['value']}"
+                for item in cell.get("descriptors", [])
+            )
+            if descriptors:
+                value_text = f"{descriptors}；{value_text}"
+            row_label = cell["row"]
+            if cell.get("outer_group"):
+                row_label = f"{cell['outer_group']} / {row_label}"
+            cell_context = (
+                f"Table {table_number} 结构化行：行={row_label}；{value_text}\n\n"
+                f"{filtered_texts[cell_index]}"
+            )
+            answer = f"根据 Table {table_number} 中“{row_label}”行，相关列值为：{value_text}。"
+        else:
+            cell_context = (
+                f"Table {table_number} 结构化单元格：行={cell['row']}；"
+                f"列={cell['column']}；值={cell['value']}。\n\n{filtered_texts[cell_index]}"
+            )
+            answer = (
+                f"根据 Table {table_number} 中“{cell['row']}”行的“{cell['column']}”列，"
+                f"数值为 **{cell['value']}**。"
+            )
+        table_metadata = (
+            retrieved_metas[cell_index]
+            if cell_index < len(retrieved_metas)
+            and isinstance(retrieved_metas[cell_index], dict)
+            else {}
+        )
+        table_caption = str(table_metadata.get("table_caption", "") or "")
+        if table_caption:
+            # Keep the caption beside the structured evidence so a returned
+            # trace retains shared units/scale notes that are not part of a
+            # parsed header (for example a table-wide ×10^-2 footnote).
+            cell_context = f"{table_caption}\n\n{cell_context}"
+            if re.search(
+                r"总计|共有|一共|总数|合计|total|comprises|contains",
+                message,
+                re.IGNORECASE,
+            ) and re.search(r"\d", table_caption):
+                answer = f"{table_caption}\n\n{answer}"
+        unit_note = _table_caption_unit_note(table_metadata)
+        if unit_note and not _TABLE_UNIT_HINT_RE.search(answer):
+            answer += unit_note
+        metric_note = _table_caption_metric_note(table_metadata, message)
+        if metric_note and metric_note not in answer:
+            answer += metric_note
         ordered_texts = [cell_context]
         ordered_ids = [retrieved_ids[cell_index]]
         ordered_metas = [retrieved_metas[cell_index]]
-        answer = (
-            f"根据 Table {table_number} 中“{cell['row']}”行的“{cell['column']}”列，"
-            f"数值为 **{cell['value']}**。"
-        )
         if return_contexts:
             return {
                 "answer": answer,
@@ -484,19 +2938,73 @@ def query_knowledge(
     ordered_texts = [filtered_texts[index] for index in order]
     ordered_ids = [retrieved_ids[index] for index in order]
     ordered_metas = [retrieved_metas[index] for index in order]
+    ordered_texts, ordered_metas = _parent_window_contexts(
+        ordered_texts,
+        ordered_ids,
+        ordered_metas,
+        runtime,
+    )
+    ordered_texts = [
+        _attach_table_caption(
+            _annotate_spatial_context(text)
+            if metadata.get("type") == "figure"
+            else text,
+            metadata,
+        )
+        for text, metadata in zip(ordered_texts, ordered_metas)
+    ]
 
     context_parts = []
     for index, (text, metadata) in enumerate(zip(ordered_texts, ordered_metas), start=1):
-        label = f"【片段 {index}】[表格]" if metadata.get("type") == "table" else f"【片段 {index}】"
+        if metadata.get("type") == "table":
+            table_label = metadata.get("table_label") or metadata.get("table_number")
+            table_label = (
+                f"[表格，Table {table_label}]"
+                if table_label is not None and str(table_label).strip()
+                else "[表格]"
+            )
+            label = f"【片段 {index}】{table_label}"
+        elif metadata.get("type") == "figure":
+            label = f"【片段 {index}】[图形坐标文字]"
+        elif metadata.get("formula_evidence"):
+            label = f"【片段 {index}】[公式候选]"
+        elif metadata.get("limitation_evidence"):
+            label = f"【片段 {index}】[限制证据]"
+        else:
+            label = f"【片段 {index}】"
         context_parts.append(f"{label}\n{text}")
     context = "\n\n---\n\n".join(context_parts)
+    if any(metadata.get("type") == "figure" for metadata in ordered_metas):
+        context = (
+            "【图形坐标约定】图形文字证据使用 PDF 页面坐标：原点在左上角，x 向右增加，"
+            "y 向下增加；因此较大的 y 值位于页面下方。\n\n"
+            + context
+        )
+    evidence_ledger = build_evidence_ledger(
+        message,
+        ordered_texts,
+        ordered_metas,
+    )
+    ledger_text = ""
+    if evidence_ledger:
+        ledger_lines = [f"- {line}" for line in evidence_ledger]
+        ledger_text = (
+            "【事实核对清单】以下内容仅逐字摘自后面的参考片段，不是新增事实；"
+            "回答复合问题时请逐项核对其中与问题相关的数字、阈值、工具名和步骤。\n"
+            + "\n".join(ledger_lines)
+            + "\n\n"
+        )
     if note:
         context = f"【检索提示】{note}\n\n{context}"
-    user_prompt = f"【参考资料】\n{context}\n\n【问题】\n{message}"
+    if vision_error:
+        context = f"【检索提示】{vision_error}\n\n{context}"
+    user_prompt = f"{ledger_text}【参考资料】\n{context}\n\n【问题】\n{message}"
 
     try:
+        if runtime.client is None:
+            raise RuntimeError("请先在“设置”页配置模型服务。")
         response = runtime.client.chat.completions.create(
-            model=runtime.config.deepseek_model,
+            model=runtime.config.llm_model,
             messages=[
                 {"role": "system", "content": SCIENTIFIC_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
@@ -505,16 +3013,56 @@ def query_knowledge(
             max_tokens=2048,
         )
         answer = response.choices[0].message.content
+        answer = supplement_formula_with_evidence(
+            message,
+            answer,
+            ordered_texts,
+            ordered_metas,
+        )
     except Exception as exc:
         answer = f"❌ 调用出错：{exc}"
+    if vision_error:
+        answer += f"\n\n⚠️ {vision_error}"
+
+    has_spatial_figure_context = any(
+        metadata.get("type") == "figure" for metadata in ordered_metas
+    )
+    if (
+        _is_composite_fact_question(message)
+        and not is_table_question(message)
+        and not has_spatial_figure_context
+        and re.search(
+            r"管道|流程|步骤|构建|pipeline|process|construct|steps",
+            message,
+            re.IGNORECASE,
+        )
+    ):
+        answer = supplement_answer_with_evidence(answer, message, evidence_ledger)
+
+    answer_validation = None
+    if runtime.config.answer_validation:
+        answer_validation = validate_answer_against_evidence(
+            message,
+            answer,
+            evidence_ledger,
+        )
+        if answer_validation.get("status") == "review":
+            reasons = "、".join(answer_validation.get("reasons") or [])
+            answer += (
+                "\n\n⚠️ **证据核对提示**：生成答案可能遗漏参考片段中的高信号内容，"
+                f"请人工核对（{reasons or '未分类原因'}）；系统未自动改写或重试。"
+            )
 
     if return_contexts:
-        return {
+        result = {
             "answer": answer,
             "contexts": ordered_texts,
             "context_ids": ordered_ids,
             "context_metadatas": ordered_metas,
         }
+        if answer_validation is not None:
+            result["answer_validation"] = answer_validation
+        return result
     sources = []
     for metadata in ordered_metas:
         source = metadata.get("source", "未知")
@@ -522,19 +3070,30 @@ def query_knowledge(
         suffix = f"，第 {page} 页" if page else ""
         if metadata.get("type") == "table":
             suffix += f"（{metadata.get('table_id', '表格')}）"
+        elif metadata.get("type") == "figure":
+            suffix += f"（{metadata.get('figure_label', '图形坐标文字')}）"
         sources.append(f"- {source}{suffix}")
     unique_sources = list(dict.fromkeys(sources))
     return answer + "\n\n📌 **参考来源：**\n" + "\n".join(unique_sources)
 
 
-SCIENTIFIC_SYSTEM_PROMPT = """你是一个面向科学论文的严谨学术问答引擎（Sci-RAG），职责是从给定的参考片段中抽取事实、数值与实验方法论。必须遵守以下规则：
+SCIENTIFIC_SYSTEM_PROMPT = """你是个人知识库助手中的严谨学术问答助手，职责是从给定的参考片段中抽取事实、数值与实验方法论。必须遵守以下规则：
 
 【强制规则 1：数值必须原样引用并指明出处】
 - 若参考文本中存在具体数值，回答时必须原样引用，不得四舍五入、改写或推算。
 - 引用数值后必须指明出处，格式为：根据参考片段 [X] 所示。
+- 如果问题明确要求计算（如求差、合计、平均、比例、倍数或相对提升/降低），允许且必须只用参考片段中的原始操作数列式计算，并遵守问题指定的精度；不得引入参考片段之外的数值。普通数值引用仍须原样保留。
+
+【强制规则 1A：图形坐标文字不得跨视觉组拼接】
+- 标记为“图形坐标文字”的片段只来自 PDF 文字层坐标，不等同于图片识别。
+- 只有标签和值的水平 x 范围重叠时，才可把它们视为同一视觉组；不得把相邻子图、柱或类别中的数值移接到另一标签。
+- 如果图中信息只存在于像素而未出现在文字层，必须说明参考片段不足，不能猜测。
 
 【强制规则 2：趋势判断必须有明确对比依据】
 - 若问题涉及趋势判断，必须确认参考文本有明确对比依据；没有依据时必须回复“资料未提供该趋势的明确依据，无法推测。”
+
+【强制规则 2A：限制问题要区分限制本身与示例现象】
+- 若问题询问模型、方法或数据的局限性，先复述参考片段明确给出的机制性限制及其限定条件（例如 PDB 中的静态结构与溶液中的动力学行为的区别），再说明示例展示的结果；不能只描述示例现象而省略限制本身。若原文给出这种对照关系，必须保留两端，不能用“训练数据限制”等参考片段未出现的机制替代。
 
 【强制规则 3：实验步骤按时间顺序重组】
 - 若回答涉及实验步骤或方法流程，请按“第一、第二、第三”的逻辑重组叙述，不得调换核心操作顺序或省略中间步骤。
@@ -548,24 +3107,71 @@ SCIENTIFIC_SYSTEM_PROMPT = """你是一个面向科学论文的严谨学术问�
 - 参考资料中若出现“结构化表格单元格”行，该行是从指定表格的真实行列交叉处解析出的证据，必须优先采用其中的值。
 - 不得用其他 Table 的同名行、叙述性段落或相似数值覆盖该单元格证据。
 
+【强制规则 5A：表格证据一致性】
+- 如果参考资料中已经出现与问题直接对应的表格行、列和值，即使该片段没有重复显示完整的表号或题注，也应直接回答已确认的值。
+- 不得在已经给出具体表格数值后，再说“资料未提供”“无法确认”或否认该数值属于用户指定的表格；如果只有部分子项有证据，只对缺失子项单独说明资料不足。
+
+【强制规则 6：公式与符号必须按证据转录】
+- 若问题询问公式、形式化定义、初始化/更新表达式或激活函数，优先转录参考片段中明确出现的等式、括号、参数顺序、上下标和运算符；不得凭语义改写、交换参数或自行补充等价形式。
+- 若同一问题涉及多个公式或变量，必须逐项回答并区分每个变量的定义；不要用流程概述替代显式公式。
+- 同一公式若因 PDF 分块分布在相邻参考片段，可在不改变符号、顺序和运算符的前提下按片段拼接；只要各部分分别出现在参考片段中，不得仅因没有单行完整公式而拒答。
+- 如果参考片段只有“表达如下/producing ... as”之类引导语而没有等式本身，必须说明该公式未出现在参考片段中，不能猜测。
+
 【其他要求】
 - 表格以 Markdown 形式给出，数值问题请直接依据表格行列作答。
-- 若问题涉及图片内容，请说明“该图内容未纳入文本检索范围”。
+- 若问题涉及图片内容：如果参考片段没有标记为“图形坐标文字”的坐标证据，必须说明“该图内容未纳入文本检索范围”；如果存在这类坐标证据，只能依据其中明确出现的标签、数值和坐标范围作答，不能把它当作像素级图片识别。
+- 若问题包含“多少、哪些、如何、管道、步骤”等多个事实维度，先在内部逐项核对问题要求，综合所有互补片段；不得因第一段已有概述就省略后续片段中的专有名词、工具名、阈值、数据规模、筛选条件或生成步骤。
+- 若用户问题包含两个或以上事实维度，优先使用分点回答，并逐项覆盖参考资料中与问题直接相关的数字、阈值、工具/模型名称、实体和操作步骤；“流程概述”不能替代这些具体事实。
+- 在回复“资料未提供相关信息”之前，必须逐一检查全部参考片段（包括后面编号的算法、附录和方法片段）；只要其中存在直接对应的初始化、残差、步长、循环类型、模型名或其他事实，就先回答该事实，不能因为前面的片段没有它而拒答整题。
+- 复合问题中某一子项缺少证据时，回答其余有直接证据的子项，并明确指出仅缺少哪一项；不得把局部缺失扩大为整题拒答，也不得用常识补写未出现的细节。
 - 若参考片段无法回答问题，请如实说明“资料未提供相关信息”，严禁编造。"""
 
 
-def generate_mindmap(runtime: Runtime | None = None) -> str:
+def format_evidence_panel(result: dict[str, Any]) -> str:
+    """Render the exact contexts used for an answer as readable source excerpts."""
+
+    contexts = list(result.get("contexts") or [])
+    metadatas = list(result.get("context_metadatas") or [])
+    if not contexts:
+        return "提问后，这里会显示回答实际使用的原文片段。"
+    sections = []
+    for index, context in enumerate(contexts, start=1):
+        metadata = metadatas[index - 1] if index <= len(metadatas) else {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+        source = html.escape(str(metadata.get("source") or "未知来源"))
+        page = metadata.get("page")
+        location = f"，第 {page} 页" if page is not None else ""
+        kind = {
+            "table": "表格",
+            "figure": "图形文字",
+            "formula": "公式",
+        }.get(str(metadata.get("type", "text")), "正文")
+        quoted = "\n".join(
+            f"> {line}" if line else ">" for line in str(context).strip().splitlines()
+        )
+        sections.append(
+            f"### 片段 {index}\n**{source}{location} · {kind}**\n\n{quoted}"
+        )
+    return "\n\n".join(sections)
+
+
+def generate_mindmap(runtime: Runtime | None = None, source_filter: list[str] | None = None) -> str:
     runtime = runtime or get_runtime()
     if runtime.collection.count() == 0:
         return "📚 知识库为空，请先上传文档。"
-    all_chunks = runtime.collection.get(include=["documents"])
+    if runtime.client is None:
+        return "⚙️ 请先在“设置”页配置模型服务。"
+    where = _source_where_clause(_normalise_source_filter(source_filter))
+    all_chunks = runtime.collection.get(
+        include=["documents"], **({"where": where} if where else {})
+    )
     documents = all_chunks.get("documents") or []
     if not documents:
-        return "无法读取文档内容。"
-    context = "\n\n".join(documents[:15])
+        return "📚 所选范围没有可用内容，请重新选择文档。"
+    context = "\n\n".join(documents[: runtime.config.context_k])
     try:
         response = runtime.client.chat.completions.create(
-            model=runtime.config.deepseek_model,
+            model=runtime.config.llm_model,
             messages=[
                 {"role": "system", "content": "你是一位顶级学术助教。请根据提供的课程资料，生成一份层级清晰、结构完整的学习大纲。"},
                 {"role": "user", "content": f"请基于以下资料生成Markdown格式的层级大纲（使用 # ## ### - 表示层级），不要包含任何开场白或结尾总结，直接输出大纲结构。\n\n资料内容：\n{context}"},
@@ -578,70 +3184,607 @@ def generate_mindmap(runtime: Runtime | None = None) -> str:
         return f"❌ 生成大纲失败：{exc}"
 
 
-def generate_quiz(runtime: Runtime | None = None) -> str:
+def generate_quiz(runtime: Runtime | None = None, source_filter: list[str] | None = None) -> str:
     runtime = runtime or get_runtime()
     if runtime.collection.count() == 0:
         return "📚 知识库为空，请先上传文档。"
-    all_chunks = runtime.collection.get(include=["documents"])
+    if runtime.client is None:
+        return "⚙️ 请先在“设置”页配置模型服务。"
+    where = _source_where_clause(_normalise_source_filter(source_filter))
+    all_chunks = runtime.collection.get(
+        include=["documents"], **({"where": where} if where else {})
+    )
     documents = all_chunks.get("documents") or []
     if not documents:
-        return "无法读取文档内容。"
-    sample_chunks = random.sample(documents, min(8, len(documents)))
+        return "📚 所选范围没有可用内容，请重新选择文档。"
+    sample_chunks = random.sample(
+        documents, min(runtime.config.context_k, len(documents))
+    )
     try:
         response = runtime.client.chat.completions.create(
-            model=runtime.config.deepseek_model,
+            model=runtime.config.llm_model,
             messages=[
                 {"role": "system", "content": "你是一个严谨的大学教师。请根据资料出5道单项选择题，用于考察学生对知识的掌握程度。"},
-                {"role": "user", "content": "请根据以下资料，生成5道单项选择题。\n输出格式：第1题：[题目]\nA. [A] B. [B] C. [C] D. [D]\n答案：X\n解析：[解释]\n\n资料内容：\n" + "\n\n".join(sample_chunks)},
+                {
+                    "role": "user",
+                    "content": (
+                        "请根据以下资料生成5道单项选择题。只输出合法 JSON 数组，不要使用 Markdown 代码块。"
+                        "每项必须包含 question、options、answer、explanation；options 是4个选项文本组成的数组，"
+                        "answer 只能是 A、B、C、D。\n\n资料内容：\n"
+                        + "\n\n".join(sample_chunks)
+                    ),
+                },
             ],
             temperature=0.4,
             max_tokens=2000,
         )
         return response.choices[0].message.content
     except Exception as exc:
-        return f"❌ 出题失败：{exc}"
+        return f"出题失败：{exc}"
 
 
-def build_demo(runtime: Runtime | None = None) -> Any:
+def parse_quiz_items(response: str) -> list[dict[str, Any]]:
+    """Parse the small, fixed JSON shape requested from the model."""
+
+    text = str(response or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
+    payload = json.loads(text)
+    if not isinstance(payload, list) or len(payload) != 5:
+        raise ValueError("题目数量不是 5 道")
+    items = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("题目格式不正确")
+        question = str(item.get("question") or "").strip()
+        options = item.get("options")
+        answer = str(item.get("answer") or "").strip().upper()
+        explanation = str(item.get("explanation") or "").strip()
+        if (
+            not question
+            or not isinstance(options, list)
+            or len(options) != 4
+            or any(not str(option).strip() for option in options)
+            or answer not in {"A", "B", "C", "D"}
+            or not explanation
+        ):
+            raise ValueError("题目字段不完整")
+        items.append(
+            {
+                "question": question,
+                "options": [str(option).strip() for option in options],
+                "answer": answer,
+                "explanation": explanation,
+            }
+        )
+    return items
+
+
+def score_quiz(quiz_items: list[dict[str, Any]], answers: list[Any]) -> str:
+    if not quiz_items:
+        return "请先生成题目。"
+    if len(answers) < len(quiz_items) or any(not answer for answer in answers):
+        return "请完成全部 5 道题后再提交。"
+    selected = [str(answer).strip()[:1].upper() for answer in answers]
+    score = sum(
+        answer == str(item["answer"]).upper()
+        for item, answer in zip(quiz_items, selected)
+    )
+    details = [f"## 得分：{score} / {len(quiz_items)}"]
+    for index, (item, answer) in enumerate(zip(quiz_items, selected), start=1):
+        status = "正确" if answer == item["answer"] else "错误"
+        details.append(
+            f"### 第 {index} 题：{status}\n"
+            f"你的答案：{answer}　正确答案：{item['answer']}\n\n"
+            f"{item['explanation']}"
+        )
+    return "\n\n".join(details)
+
+
+def build_demo(
+    runtime: Runtime | None = None,
+    *,
+    managed_local_model: bool = False,
+    on_exit: Callable[[], None] | None = None,
+) -> Any:
     """Build the UI around an explicitly supplied runtime."""
 
     import gradio as gr
 
     runtime = runtime or get_runtime()
-    with gr.Blocks(title="AI 大学生学习工作台", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("# 🎓 AI 大学生学习工作台")
-        gr.Markdown("上传你的课件或论文，用 AI 帮你学！")
-        with gr.Tab("📤 上传文档"):
-            file_input = gr.File(label="选择文档", file_types=[".pdf", ".txt", ".docx"])
-            upload_output = gr.Textbox(label="上传状态", lines=3)
-            upload_button = gr.Button("添加到知识库")
-            upload_button.click(lambda file: upload_file(file, runtime), inputs=file_input, outputs=upload_output)
-            gr.Markdown(f"**当前知识库文本块数：** {runtime.collection.count()}")
-        with gr.Tab("💬 智能问答"):
-            gr.ChatInterface(
-                fn=lambda message, history: query_knowledge(message, history, False, runtime),
-                title="📖 基于文档的问答",
-                description="输入问题，AI会从已上传的文档中检索答案。",
-                chatbot=gr.Chatbot(height=450),
-                textbox=gr.Textbox(placeholder="例如：这篇论文的核心创新点是什么？", scale=7),
+
+    def inventory_view() -> tuple[list[tuple[str, int]], str]:
+        documents = document_inventory(runtime)
+        inventory = (
+            "**已上传文档：**\n" + "\n".join(
+                f"- {source}（{count} 个文本块）" for source, count in documents
             )
-        with gr.Tab("🧠 生成学习大纲"):
-            gr.Markdown("### 一键生成层级学习大纲（自动转为脑图结构）")
-            button = gr.Button("🚀 生成大纲与脑图")
-            output = gr.Markdown(label="📋 大纲内容", value="点击上方按钮生成...")
-            button.click(lambda: generate_mindmap(runtime), inputs=[], outputs=output)
-        with gr.Tab("📝 智能出题"):
-            gr.Markdown("### 基于当前知识库自动生成练习题（含解析）")
-            button = gr.Button("📝 生成5道选择题")
-            output = gr.Markdown(label="📋 题目与解析", value="点击上方按钮生成...")
-            button.click(lambda: generate_quiz(runtime), inputs=[], outputs=output)
+            if documents
+            else "**已上传文档：** 暂无"
+        )
+        return documents, inventory
+
+    def library_state() -> tuple[Any, ...]:
+        documents, inventory = inventory_view()
+        sources = [source for source, _count in documents]
+        return (
+            f"**当前知识库文本块数：** {runtime.collection.count()}",
+            inventory,
+            gr.update(choices=sources, value=None),
+            gr.update(choices=sources, value=[]),
+            gr.update(choices=sources, value=[]),
+            gr.update(choices=sources, value=[]),
+        )
+
+    def page_header(title: str, description: str) -> None:
+        gr.HTML(
+            f"""
+            <section class="kb-page-head">
+                <h1>{title}</h1>
+                <p>{description}</p>
+            </section>
+            """,
+            apply_default_css=False,
+        )
+
+    def answer_with_evidence(
+        message: str,
+        history: Any,
+        sources: list[str] | None,
+    ) -> tuple[str, str]:
+        result = query_knowledge(
+            message,
+            history,
+            True,
+            runtime,
+            source_filter=sources,
+        )
+        return str(result["answer"]), format_evidence_panel(result)
+
+    def prepare_quiz(sources: list[str] | None) -> tuple[Any, ...]:
+        response = generate_quiz(runtime, source_filter=sources)
+        try:
+            items = parse_quiz_items(response)
+        except (json.JSONDecodeError, ValueError):
+            status = (
+                response
+                if response.startswith(("📚", "⚙️", "出题失败"))
+                else "题目格式不完整，请重新生成。"
+            )
+            hidden = [
+                gr.update(choices=[], value=None, visible=False) for _ in range(5)
+            ]
+            return (
+                status,
+                *hidden,
+                [],
+                gr.update(interactive=False),
+                gr.update(value="", visible=False),
+            )
+        updates = []
+        for index, item in enumerate(items, start=1):
+            choices = [
+                f"{letter}. {option}"
+                for letter, option in zip("ABCD", item["options"])
+            ]
+            updates.append(
+                gr.update(
+                    choices=choices,
+                    label=f"第 {index} 题：{item['question']}",
+                    value=None,
+                    visible=True,
+                )
+            )
+        return (
+            "已生成 5 道题。完成作答后提交，即可查看得分与解析。",
+            *updates,
+            items,
+            gr.update(interactive=True),
+            gr.update(value="", visible=False),
+        )
+
+    initial_documents, initial_inventory = inventory_view()
+    initial_sources = [source for source, _count in initial_documents]
+    with gr.Blocks(title=APP_DISPLAY_NAME) as demo:
+        model_state = "本地模型已就绪" if managed_local_model else "模型服务可配置"
+        gr.HTML(
+            f"""
+            <header class="kb-header">
+                <div class="kb-brand">
+                    <span class="kb-mark" aria-hidden="true">文</span>
+                    <div>
+                        <h1 class="kb-title">{APP_DISPLAY_NAME}</h1>
+                        <p class="kb-subtitle">导入个人文档，进行资料问答、原文核对、大纲整理和自测练习</p>
+                    </div>
+                </div>
+                <div class="kb-header-meta">
+                    <span class="kb-status"><span class="kb-status-dot" aria-hidden="true"></span>{model_state}</span>
+                </div>
+            </header>
+            """,
+            elem_id="kb-header",
+            apply_default_css=False,
+        )
+        with gr.Tabs(elem_id="kb-workspace"):
+            with gr.Tab("文档资料库"):
+                page_header(
+                    "文档资料库",
+                    "导入 PDF、TXT 或 DOCX，建立只保存在当前设备上的检索资料库。",
+                )
+                with gr.Row(equal_height=True, elem_classes="kb-library-grid"):
+                    with gr.Column(
+                        scale=3,
+                        elem_classes=["kb-panel", "kb-library-panel"],
+                    ):
+                        gr.HTML(
+                            """
+                            <div class="kb-panel-title">
+                                <h3>添加本地资料</h3>
+                                <p>选择一个文档，确认后加入知识库。</p>
+                            </div>
+                            """,
+                            apply_default_css=False,
+                        )
+                        file_input = gr.File(
+                            label="选择文档",
+                            file_types=[".pdf", ".txt", ".docx"],
+                        )
+                        upload_button = gr.Button(
+                            "添加到知识库",
+                            variant="primary",
+                            elem_id="kb-upload-button",
+                        )
+                        upload_output = gr.Textbox(
+                            label="上传状态",
+                            lines=3,
+                            interactive=False,
+                        )
+                    with gr.Column(
+                        scale=2,
+                        elem_classes=["kb-panel", "kb-library-panel"],
+                    ):
+                        gr.HTML(
+                            """
+                            <div class="kb-panel-title">
+                                <h3>知识库概览</h3>
+                                <p>查看已解析资料，并在需要时移除单个文档。</p>
+                            </div>
+                            """,
+                            apply_default_css=False,
+                        )
+                        count_output = gr.Markdown(
+                            f"**当前知识库文本块数：** {runtime.collection.count()}"
+                        )
+                        inventory_output = gr.Markdown(initial_inventory)
+                        with gr.Accordion("管理已上传文档", open=False):
+                            delete_select = gr.Dropdown(
+                                label="选择要删除的文档",
+                                choices=initial_sources,
+                                value=None,
+                            )
+                            delete_confirm = gr.Checkbox(
+                                label="确认删除所选文档及其本地数据"
+                            )
+                            delete_button = gr.Button(
+                                "删除所选文档",
+                                variant="stop",
+                            )
+                            delete_output = gr.Textbox(
+                                label="删除状态",
+                                lines=2,
+                                interactive=False,
+                            )
+            with gr.Tab("资料问答与原文比对"):
+                page_header(
+                    "资料问答与原文比对",
+                    "限定资料范围后提问，并对照回答实际使用的原文片段与页码。",
+                )
+                source_select = gr.Dropdown(
+                    label="限定回答范围",
+                    choices=initial_sources,
+                    value=[],
+                    multiselect=True,
+                    info="范围会应用到下一次提问。",
+                    render=False,
+                )
+                with gr.Row(equal_height=True, elem_classes="kb-chat-layout"):
+                    with gr.Column(
+                        scale=3,
+                        elem_classes=["kb-panel", "kb-context-panel"],
+                    ):
+                        gr.HTML(
+                            """
+                            <div class="kb-panel-title">
+                                <h3>资料范围与原文</h3>
+                                <p>不选择文档时检索全部资料。</p>
+                            </div>
+                            """,
+                            apply_default_css=False,
+                        )
+                        source_select.render()
+                        gr.HTML(
+                            """
+                            <div class="kb-context-note">
+                                下方内容是本次回答实际使用的检索片段，不是模型重新生成的摘要。
+                            </div>
+                            """,
+                            apply_default_css=False,
+                        )
+                        evidence_output = gr.Markdown(
+                            "提问后，这里会显示回答实际使用的原文片段。",
+                            elem_classes="kb-evidence",
+                        )
+                    with gr.Column(
+                        scale=7,
+                        elem_classes=["kb-panel", "kb-chat-panel"],
+                    ):
+                        gr.HTML(
+                            """
+                            <div class="kb-panel-title">
+                                <h3>向资料库提问</h3>
+                                <p>回答仅基于当前知识库中的可检索内容。</p>
+                            </div>
+                            """,
+                            apply_default_css=False,
+                        )
+                        gr.ChatInterface(
+                            fn=answer_with_evidence,
+                            title=None,
+                            description=None,
+                            chatbot=gr.Chatbot(
+                                height="clamp(300px, 48vh, 620px)",
+                                label="对话",
+                            ),
+                            textbox=gr.Textbox(
+                                label="问题",
+                                show_label=False,
+                                placeholder="例如：这篇论文的核心结论是什么？",
+                                scale=7,
+                                submit_btn=True,
+                                stop_btn=True,
+                            ),
+                            additional_inputs=[source_select],
+                            additional_outputs=[evidence_output],
+                        )
+            with gr.Tab("学习大纲"):
+                page_header(
+                    "学习大纲",
+                    "基于所选资料的部分开头片段整理大纲，不保证覆盖全文。",
+                )
+                outline_sources = gr.Dropdown(
+                    label="大纲资料范围", choices=initial_sources, value=[], multiselect=True,
+                    info="不选择时使用全部资料；更改范围后请重新生成。",
+                )
+                with gr.Row(elem_classes=["kb-panel", "kb-action-bar"]):
+                    with gr.Column(scale=4):
+                        gr.HTML(
+                            """
+                            <div class="kb-action-copy">
+                                <h3>从所选资料生成大纲</h3>
+                                <p>生成结果采用 Markdown 层级，可继续复制到笔记工具中整理。</p>
+                            </div>
+                            """,
+                            apply_default_css=False,
+                        )
+                    with gr.Column(scale=1, min_width=150):
+                        button = gr.Button(
+                            "生成学习大纲",
+                            variant="primary",
+                            elem_id="kb-mindmap-button",
+                        )
+                output = gr.Markdown(
+                    label="大纲内容",
+                    value="生成结果会显示在这里。",
+                    elem_classes="kb-output",
+                )
+                button.click(
+                    lambda sources: generate_mindmap(runtime, source_filter=sources),
+                    inputs=[outline_sources], outputs=output,
+                )
+            with gr.Tab("自测习题与测评"):
+                page_header(
+                    "自测习题与测评",
+                    "从所选资料中抽取部分片段生成 5 道单项选择题，提交后显示得分与解析。",
+                )
+                quiz_sources = gr.Dropdown(
+                    label="自测资料范围", choices=initial_sources, value=[], multiselect=True,
+                    info="不选择时使用全部资料；更改范围后请重新生成题目。",
+                )
+                with gr.Row(elem_classes=["kb-panel", "kb-action-bar"]):
+                    with gr.Column(scale=4):
+                        gr.HTML(
+                            """
+                            <div class="kb-action-copy">
+                                <h3>生成一组资料自测题</h3>
+                                <p>作答前不会显示答案，提交后逐题核对。</p>
+                            </div>
+                            """,
+                            apply_default_css=False,
+                        )
+                    with gr.Column(scale=1, min_width=150):
+                        quiz_generate_button = gr.Button(
+                            "生成 5 道练习题",
+                            variant="primary",
+                            elem_id="kb-quiz-button",
+                        )
+                quiz_status = gr.Markdown("生成题目后开始作答。")
+                quiz_state = gr.State([])
+                with gr.Column(elem_classes=["kb-panel", "kb-quiz-stack"]):
+                    quiz_answers = [
+                        gr.Radio(
+                            choices=[],
+                            label=f"第 {index} 题",
+                            visible=False,
+                            elem_classes="kb-quiz-question",
+                        )
+                        for index in range(1, 6)
+                    ]
+                    quiz_submit_button = gr.Button(
+                        "提交答案",
+                        variant="primary",
+                        interactive=False,
+                    )
+                quiz_result = gr.Markdown(
+                    elem_classes=["kb-output", "kb-quiz-result"],
+                    visible=False,
+                )
+                quiz_generate_button.click(
+                    prepare_quiz,
+                    inputs=[quiz_sources],
+                    outputs=[
+                        quiz_status,
+                        *quiz_answers,
+                        quiz_state,
+                        quiz_submit_button,
+                        quiz_result,
+                    ],
+                )
+                quiz_submit_button.click(
+                    lambda items, *answers: gr.update(
+                        value=score_quiz(items, list(answers)),
+                        visible=True,
+                    ),
+                    inputs=[quiz_state, *quiz_answers],
+                    outputs=quiz_result,
+                )
+            if not managed_local_model:
+                initial_service = next(
+                    (
+                        name
+                        for name, (base_url, _model) in MODEL_SERVICE_PRESETS.items()
+                        if base_url.rstrip("/") == runtime.config.llm_base_url.rstrip("/")
+                    ),
+                    "自定义 OpenAI 兼容服务",
+                )
+                with gr.Tab("模型设置"):
+                    page_header(
+                        "模型设置",
+                        "优先使用本机 Ollama；也可以连接你自己的 OpenAI 兼容模型服务。",
+                    )
+                    with gr.Row(equal_height=True, elem_classes="kb-settings-grid"):
+                        with gr.Column(scale=2, elem_classes="kb-panel"):
+                            gr.HTML(
+                                """
+                                <div class="kb-panel-title">
+                                    <h3>选择模型</h3>
+                                    <p>切换预设后仍可手动调整模型名称。</p>
+                                </div>
+                                """,
+                                apply_default_css=False,
+                            )
+                            service_select = gr.Dropdown(
+                                label="模型服务",
+                                choices=list(MODEL_SERVICE_PRESETS),
+                                value=initial_service,
+                            )
+                            model_input = gr.Textbox(
+                                label="模型名称",
+                                value=runtime.config.llm_model,
+                            )
+                        with gr.Column(scale=3, elem_classes="kb-panel"):
+                            gr.HTML(
+                                """
+                                <div class="kb-panel-title">
+                                    <h3>连接信息</h3>
+                                    <p>API Key 仅保留在当前运行进程中。</p>
+                                </div>
+                                """,
+                                apply_default_css=False,
+                            )
+                            base_url_input = gr.Textbox(
+                                label="Base URL",
+                                value=runtime.config.llm_base_url,
+                            )
+                            api_key_input = gr.Textbox(
+                                label="API Key（Ollama 本地服务可留空）",
+                                type="password",
+                                placeholder="云端服务请输入自己的 Key",
+                            )
+                    model_service_button = gr.Button(
+                        "应用模型设置",
+                        variant="primary",
+                        elem_id="kb-settings-button",
+                    )
+                    model_service_status = gr.Markdown(
+                        f"✅ 已从环境变量配置模型 {html.escape(runtime.config.llm_model)}。"
+                        if runtime.client is not None
+                        else "尚未配置模型服务；本地文档管理仍可使用。"
+                    )
+        exit_button = (
+            gr.Button(
+                "退出工作台",
+                variant="secondary",
+                size="sm",
+                elem_id="kb-exit-button",
+            )
+            if managed_local_model and on_exit is not None
+            else None
+        )
+
+        def handle_upload(
+            file: Any,
+            progress: Any = gr.Progress(),
+        ) -> tuple[Any, ...]:
+            return (upload_file(file, runtime, progress), *library_state())
+
+        def handle_delete(source: str | None, confirmed: bool) -> tuple[Any, ...]:
+            return (
+                delete_document(source, confirmed, runtime),
+                *library_state(),
+                False,
+            )
+
+        if not managed_local_model:
+            service_select.change(
+                model_service_defaults,
+                inputs=service_select,
+                outputs=[base_url_input, model_input],
+            )
+            model_service_button.click(
+                lambda base_url, model, api_key: (
+                    configure_model_service(base_url, model, api_key, runtime),
+                    "",
+                ),
+                inputs=[base_url_input, model_input, api_key_input],
+                outputs=[model_service_status, api_key_input],
+            )
+
+        upload_button.click(
+            handle_upload,
+            inputs=file_input,
+            outputs=[
+                upload_output,
+                count_output,
+                inventory_output,
+                delete_select,
+                source_select,
+                outline_sources,
+                quiz_sources,
+            ],
+        )
+        delete_button.click(
+            handle_delete,
+            inputs=[delete_select, delete_confirm],
+            outputs=[
+                delete_output,
+                count_output,
+                inventory_output,
+                delete_select,
+                source_select,
+                outline_sources,
+                quiz_sources,
+                delete_confirm,
+            ],
+        )
+        if exit_button is not None:
+            exit_button.click(on_exit, inputs=[], outputs=[])
     return demo
 
-
-def chat_respond(message: str, history: Any) -> str:
-    return query_knowledge(message, history, return_contexts=False)
-
-
 if __name__ == "__main__":
-    demo = build_demo(create_runtime())
-    demo.launch()
+    import gradio as gr
+
+    build_demo(create_runtime()).launch(
+        theme=app_theme(gr),
+        css=APP_CSS,
+        inbrowser=True,
+    )
