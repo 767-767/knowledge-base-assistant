@@ -3157,16 +3157,19 @@ def format_evidence_panel(result: dict[str, Any]) -> str:
     return "\n\n".join(sections)
 
 
-def generate_mindmap(runtime: Runtime | None = None) -> str:
+def generate_mindmap(runtime: Runtime | None = None, source_filter: list[str] | None = None) -> str:
     runtime = runtime or get_runtime()
     if runtime.collection.count() == 0:
         return "📚 知识库为空，请先上传文档。"
     if runtime.client is None:
         return "⚙️ 请先在“设置”页配置模型服务。"
-    all_chunks = runtime.collection.get(include=["documents"])
+    where = _source_where_clause(_normalise_source_filter(source_filter))
+    all_chunks = runtime.collection.get(
+        include=["documents"], **({"where": where} if where else {})
+    )
     documents = all_chunks.get("documents") or []
     if not documents:
-        return "无法读取文档内容。"
+        return "📚 所选范围没有可用内容，请重新选择文档。"
     context = "\n\n".join(documents[: runtime.config.context_k])
     try:
         response = runtime.client.chat.completions.create(
@@ -3183,16 +3186,19 @@ def generate_mindmap(runtime: Runtime | None = None) -> str:
         return f"❌ 生成大纲失败：{exc}"
 
 
-def generate_quiz(runtime: Runtime | None = None) -> str:
+def generate_quiz(runtime: Runtime | None = None, source_filter: list[str] | None = None) -> str:
     runtime = runtime or get_runtime()
     if runtime.collection.count() == 0:
         return "📚 知识库为空，请先上传文档。"
     if runtime.client is None:
         return "⚙️ 请先在“设置”页配置模型服务。"
-    all_chunks = runtime.collection.get(include=["documents"])
+    where = _source_where_clause(_normalise_source_filter(source_filter))
+    all_chunks = runtime.collection.get(
+        include=["documents"], **({"where": where} if where else {})
+    )
     documents = all_chunks.get("documents") or []
     if not documents:
-        return "无法读取文档内容。"
+        return "📚 所选范围没有可用内容，请重新选择文档。"
     sample_chunks = random.sample(
         documents, min(runtime.config.context_k, len(documents))
     )
@@ -3300,13 +3306,15 @@ def build_demo(
         )
         return documents, inventory
 
-    def library_state() -> tuple[str, str, Any, Any]:
+    def library_state() -> tuple[Any, ...]:
         documents, inventory = inventory_view()
         sources = [source for source, _count in documents]
         return (
             f"**当前知识库文本块数：** {runtime.collection.count()}",
             inventory,
             gr.update(choices=sources, value=None),
+            gr.update(choices=sources, value=[]),
+            gr.update(choices=sources, value=[]),
             gr.update(choices=sources, value=[]),
         )
 
@@ -3335,8 +3343,8 @@ def build_demo(
         )
         return str(result["answer"]), format_evidence_panel(result)
 
-    def prepare_quiz() -> tuple[Any, ...]:
-        response = generate_quiz(runtime)
+    def prepare_quiz(sources: list[str] | None) -> tuple[Any, ...]:
+        response = generate_quiz(runtime, source_filter=sources)
         try:
             items = parse_quiz_items(response)
         except (json.JSONDecodeError, ValueError):
@@ -3544,14 +3552,18 @@ def build_demo(
             with gr.Tab("学习大纲"):
                 page_header(
                     "学习大纲",
-                    "根据当前知识库整理层级结构，帮助快速复习和梳理资料之间的关系。",
+                    "基于所选资料的部分开头片段整理大纲，不保证覆盖全文。",
+                )
+                outline_sources = gr.Dropdown(
+                    label="大纲资料范围", choices=initial_sources, value=[], multiselect=True,
+                    info="不选择时使用全部资料；更改范围后请重新生成。",
                 )
                 with gr.Row(elem_classes=["kb-panel", "kb-action-bar"]):
                     with gr.Column(scale=4):
                         gr.HTML(
                             """
                             <div class="kb-action-copy">
-                                <h3>从全部资料生成大纲</h3>
+                                <h3>从所选资料生成大纲</h3>
                                 <p>生成结果采用 Markdown 层级，可继续复制到笔记工具中整理。</p>
                             </div>
                             """,
@@ -3568,11 +3580,18 @@ def build_demo(
                     value="生成结果会显示在这里。",
                     elem_classes="kb-output",
                 )
-                button.click(lambda: generate_mindmap(runtime), inputs=[], outputs=output)
+                button.click(
+                    lambda sources: generate_mindmap(runtime, source_filter=sources),
+                    inputs=[outline_sources], outputs=output,
+                )
             with gr.Tab("自测习题与测评"):
                 page_header(
                     "自测习题与测评",
-                    "基于当前知识库生成 5 道单项选择题，提交后显示得分与解析。",
+                    "从所选资料中抽取部分片段生成 5 道单项选择题，提交后显示得分与解析。",
+                )
+                quiz_sources = gr.Dropdown(
+                    label="自测资料范围", choices=initial_sources, value=[], multiselect=True,
+                    info="不选择时使用全部资料；更改范围后请重新生成题目。",
                 )
                 with gr.Row(elem_classes=["kb-panel", "kb-action-bar"]):
                     with gr.Column(scale=4):
@@ -3614,7 +3633,7 @@ def build_demo(
                 )
                 quiz_generate_button.click(
                     prepare_quiz,
-                    inputs=[],
+                    inputs=[quiz_sources],
                     outputs=[
                         quiz_status,
                         *quiz_answers,
@@ -3742,6 +3761,8 @@ def build_demo(
                 inventory_output,
                 delete_select,
                 source_select,
+                outline_sources,
+                quiz_sources,
             ],
         )
         delete_button.click(
@@ -3753,6 +3774,8 @@ def build_demo(
                 inventory_output,
                 delete_select,
                 source_select,
+                outline_sources,
+                quiz_sources,
                 delete_confirm,
             ],
         )

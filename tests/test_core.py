@@ -4267,6 +4267,32 @@ class RuntimeContractTests(unittest.TestCase):
         for call in completions.calls:
             self.assertEqual(call["messages"][1]["content"].count("chunk-"), 4)
 
+    def test_learning_generation_filters_real_collection(self):
+        import chromadb
+        from unittest.mock import Mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            collection = chromadb.PersistentClient(path=directory).get_or_create_collection("scope-test")
+            collection.add(
+                ids=["a", "b"], documents=["SELECTED_EVIDENCE", "OTHER_EVIDENCE"],
+                metadatas=[{"source": "a.pdf"}, {"source": "b.pdf"}],
+                embeddings=[[1.0, 0.0], [0.0, 1.0]],
+            )
+            client = Mock()
+            client.chat.completions.create.return_value.choices = [
+                Mock(message=Mock(content="ok"))
+            ]
+            runtime = app.Runtime(app.RuntimeConfig(), client, object(), collection)
+            for generate in (app.generate_mindmap, app.generate_quiz):
+                for sources in (["a.pdf"], ["a.pdf", "b.pdf"], []):
+                    self.assertEqual(generate(runtime, source_filter=sources), "ok")
+                    prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+                    self.assertIn("SELECTED_EVIDENCE", prompt)
+                    self.assertEqual("OTHER_EVIDENCE" in prompt, sources != ["a.pdf"])
+                client.chat.completions.create.reset_mock()
+                self.assertIn("没有可用内容", generate(runtime, source_filter=["deleted.pdf"]))
+                client.chat.completions.create.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
