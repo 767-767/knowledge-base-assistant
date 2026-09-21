@@ -27,7 +27,7 @@ cd "$PROJECT_DIR"
 PYINSTALLER_CONFIG_DIR="${PYINSTALLER_CONFIG_DIR:-/private/tmp/scirag-pyinstaller}" \
   "$PROJECT_PYTHON" -m PyInstaller \
   --noconfirm \
-  --name "文档学习工作台" \
+  --name "个人知识库助手" \
   --windowed \
   --target-arch arm64 \
   --osx-bundle-identifier com.scirag.desktop \
@@ -43,4 +43,4 @@ PYINSTALLER_CONFIG_DIR="${PYINSTALLER_CONFIG_DIR:-/private/tmp/scirag-pyinstalle
   --add-data "$SCI_RAG_EMBEDDING_MODEL:models/bge-small-zh-v1.5" \
   desktop.py
 
-echo "已生成：$PROJECT_DIR/dist/文档学习工作台.app"
+echo "已生成：$PROJECT_DIR/dist/个人知识库助手.app"

@@ -17,7 +17,7 @@ if not errorlevel 1 (
     py -3 -m venv .venv
 ) else (
     where python >nul 2>&1 || (
-        echo 需要 Python 3 才能启动文档学习工作台。
+        echo 需要 Python 3 才能启动个人知识库助手。
         exit /b 1
     )
     python -m venv .venv

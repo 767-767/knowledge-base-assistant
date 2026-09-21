@@ -1,4 +1,4 @@
-"""Launch 文档学习工作台 with its packaged local model server."""
+"""Launch 个人知识库助手 with its packaged local model server."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
-DISPLAY_NAME = "文档学习工作台"
+DISPLAY_NAME = "个人知识库助手"
 DATA_DIR_NAME = "Sci-RAG"
 MODEL_NAME = "qwen3:4b-instruct"
 

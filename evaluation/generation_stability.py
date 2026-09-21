@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Repeat fixed Sci-RAG generations against an isolated database.
+"""Repeat fixed 个人知识库助手 generations against an isolated database.
 
 The runner is deliberately outside the normal UI path. It keeps one runtime
 and one retrieval configuration for every repetition, writes one JSON object

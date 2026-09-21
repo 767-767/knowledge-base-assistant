@@ -2,7 +2,7 @@
   "meta": {
     "paper": "2602.08213v1.pdf",
     "title": "DrugR: Optimizing Molecular Drugs through LLM-based Explicit Reasoning and Reinforcement Learning",
-    "description": "Sci-RAG 评估测试集：问题均基于论文真实内容（表格数值、实验方法与综合理解），ground_truth 从论文原文/表格中抽取，contexts 为对应的论文参考片段（金标准上下文）。",
+    "description": "个人知识库助手评估测试集：问题均基于论文真实内容（表格数值、实验方法与综合理解），ground_truth 从论文原文/表格中抽取，contexts 为对应的论文参考片段（金标准上下文）。",
     "created": "2026-08-24"
   },
   "test_cases": [

@@ -237,7 +237,7 @@ def _print_summary(report: dict[str, Any]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="离线生成/校验 Sci-RAG 人工答案复核记录")
+    parser = argparse.ArgumentParser(description="离线生成/校验个人知识库助手的人工答案复核记录")
     parser.add_argument("--testset", required=True, help="JSON/JSONL 测试集路径")
     parser.add_argument("--answers", required=True, help="JSON/JSONL 回答路径")
     parser.add_argument("--reviews", help="已填写的 JSON/JSONL 人工复核路径")

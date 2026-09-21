@@ -1,4 +1,4 @@
-"""文档学习工作台应用入口。
+"""个人知识库助手应用入口。
 
 Importing this module is intentionally side-effect free.  Models, the OpenAI
 client, ChromaDB, and Gradio are created only by :func:`create_runtime` or
@@ -57,7 +57,7 @@ from sci_rag_retrieval import (
 from sci_rag_vision import complete_vision, render_figure, vision_messages
 
 
-APP_DISPLAY_NAME = "文档学习工作台"
+APP_DISPLAY_NAME = "个人知识库助手"
 
 
 MODEL_SERVICE_PRESETS = {
@@ -194,8 +194,7 @@ APP_CSS = """
     gap: 10px;
 }
 
-.kb-status,
-.kb-local-note {
+.kb-status {
     display: inline-flex;
     align-items: center;
     gap: 7px;
@@ -536,8 +535,7 @@ select:focus-visible {
         font-size: 15px;
     }
 
-    .kb-subtitle,
-    .kb-local-note {
+    .kb-subtitle {
         display: none;
     }
 
@@ -3079,7 +3077,7 @@ def query_knowledge(
     return answer + "\n\n📌 **参考来源：**\n" + "\n".join(unique_sources)
 
 
-SCIENTIFIC_SYSTEM_PROMPT = """你是文档学习工作台中的严谨学术问答助手，职责是从给定的参考片段中抽取事实、数值与实验方法论。必须遵守以下规则：
+SCIENTIFIC_SYSTEM_PROMPT = """你是个人知识库助手中的严谨学术问答助手，职责是从给定的参考片段中抽取事实、数值与实验方法论。必须遵守以下规则：
 
 【强制规则 1：数值必须原样引用并指明出处】
 - 若参考文本中存在具体数值，回答时必须原样引用，不得四舍五入、改写或推算。
@@ -3396,12 +3394,11 @@ def build_demo(
                     <span class="kb-mark" aria-hidden="true">文</span>
                     <div>
                         <h1 class="kb-title">{APP_DISPLAY_NAME}</h1>
-                        <p class="kb-subtitle">导入本地文档，进行资料问答、大纲整理和练习题生成</p>
+                        <p class="kb-subtitle">导入个人文档，进行资料问答、原文核对、大纲整理和自测练习</p>
                     </div>
                 </div>
                 <div class="kb-header-meta">
                     <span class="kb-status"><span class="kb-status-dot" aria-hidden="true"></span>{model_state}</span>
-                    <span class="kb-local-note">资料保存在当前设备</span>
                 </div>
             </header>
             """,
