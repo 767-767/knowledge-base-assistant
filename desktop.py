@@ -167,6 +167,8 @@ def main() -> None:
             os.environ["LLM_BASE_URL"] = base_url
             os.environ["LLM_MODEL"] = MODEL_NAME
             os.environ["LLM_API_KEY"] = api_key
+            os.environ["LLM_CONTEXT_TOKENS"] = "8192"
+            os.environ.setdefault("LLM_MAX_TOKENS", "2048")
 
             import gradio as gr
 

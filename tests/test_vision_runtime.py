@@ -6,13 +6,15 @@ import unittest
 from unittest.mock import patch
 import json
 
+import numpy as np
+
 import app
 from sci_rag_core import Chunk, file_sha256
 
 
 class _Embedding:
-    def encode(self, _text):
-        return SimpleNamespace(tolist=lambda: [0.1, 0.2])
+    def encode(self, text):
+        return np.array([[0.1, 0.2] for _ in text] if isinstance(text, list) else [0.1, 0.2])
 
 
 class _Collection:
