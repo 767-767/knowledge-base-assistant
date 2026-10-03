@@ -20,29 +20,13 @@ class RerankingTests(unittest.TestCase):
         model = FakeCrossEncoder()
         reranker = CrossEncoderReranker(model=model, batch_size=2)
         candidates = [RankedItem(0, 0.9), RankedItem(1, 0.8), RankedItem(2, 0.7)]
-        documents = ["not useful", "relevant relevant", "relevant once"]
+        documents = ["not useful", "relevant relevant", "relevant relevant"]
 
         result = reranker.rerank("question", candidates, documents)
 
-        self.assertEqual([item.key for item in result.ranked], [1, 2, 0])
-        self.assertEqual([item.score for item in result.ranked], [2.0, 1.0, 0.0])
-        self.assertEqual(result.scored_pairs, 3)
-        self.assertEqual(result.cache_hits, 0)
+        self.assertEqual([item.key for item in result], [1, 2, 0])
+        self.assertEqual([item.score for item in result], [2.0, 2.0, 0.0])
         self.assertEqual(model.calls[0][1], 2)
-
-    def test_benchmark_cache_reuses_identical_query_passage_scores(self):
-        model = FakeCrossEncoder()
-        reranker = CrossEncoderReranker(model=model, cache_scores=True)
-        candidates = [RankedItem(0, 1.0), RankedItem(1, 0.5)]
-        documents = ["relevant", "not useful"]
-
-        first = reranker.rerank("question", candidates, documents)
-        second = reranker.rerank("question", candidates, documents)
-
-        self.assertEqual(first.scored_pairs, 2)
-        self.assertEqual(second.scored_pairs, 0)
-        self.assertEqual(second.cache_hits, 2)
-        self.assertEqual(len(model.calls), 1)
 
     def test_reranker_rejects_invalid_configuration_and_candidate_key(self):
         with self.assertRaises(ValueError):

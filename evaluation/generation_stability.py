@@ -99,6 +99,8 @@ def runtime_config_trace(runtime: app.Runtime) -> dict[str, Any]:
         "db_path": str(Path(config.db_path).expanduser().resolve()),
         "retrieval_k": int(config.retrieval_k),
         "context_k": int(config.context_k),
+        "llm_context_tokens": int(config.llm_context_tokens),
+        "llm_max_tokens": int(config.llm_max_tokens),
         "retrieval_mode": config.retrieval_mode,
         "hybrid_candidate_k": int(config.hybrid_candidate_k),
         "hybrid_rrf_k": int(config.hybrid_rrf_k),

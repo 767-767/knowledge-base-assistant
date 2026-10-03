@@ -82,8 +82,8 @@ def run(args: argparse.Namespace) -> int:
                 continue
 
     client = OpenAI(
-        api_key=os.environ.get("DEEPSEEK_API_KEY"),
-        base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+        api_key=os.environ.get("LLM_API_KEY"),
+        base_url=os.environ.get("LLM_BASE_URL", "https://api.deepseek.com/v1"),
     )
     documents = benchmark["documents"]
     errors = 0
