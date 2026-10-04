@@ -5256,6 +5256,16 @@ class RuntimeContractTests(unittest.TestCase):
             result = app.query_knowledge("Alpha 的方法是什么？", runtime=runtime, source_filter=sources)
             self.assertEqual({meta["source"] for meta in result["context_metadatas"]}, {"alpha.pdf"})
 
+            result = app.query_knowledge(
+                "这两篇论文各自使用了什么方法？请分别说明。",
+                runtime=runtime,
+                source_filter=["alpha.pdf", "beta.pdf"],
+            )
+            self.assertEqual(
+                {meta["source"] for meta in result["context_metadatas"]},
+                {"alpha.pdf", "beta.pdf"},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

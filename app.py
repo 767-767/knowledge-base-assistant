@@ -1350,6 +1350,23 @@ def _normalise_source_filter(value: Any) -> set[str]:
     }
 
 
+def _all_selected_sources_requested(question: str, sources: set[str]) -> bool:
+    """Recognize an explicit comparison of exactly two selected documents."""
+
+    if len(sources) != 2:
+        return False
+    text = str(question or "")
+    chinese_scope = bool(
+        re.search(r"(?:这|所选)?两\s*(?:篇|份|个)?\s*(?:论文|文档|资料)", text)
+        and re.search(r"各自|分别|比较|对比|异同|区别|取舍", text)
+    )
+    english_scope = bool(
+        re.search(r"\b(?:both|two)\s+(?:selected\s+)?(?:papers?|documents?)\b", text, re.I)
+        and re.search(r"\b(?:each|respectively|compare|comparison|difference|trade-?off)\b", text, re.I)
+    )
+    return chinese_scope or english_scope
+
+
 def _source_where_clause(sources: set[str]) -> dict[str, Any] | None:
     if not sources:
         return None
@@ -1799,6 +1816,10 @@ _SECTION_QUERY_ALIASES = {
     "效率": ("efficiency", "tokens", "regeneration", "time", "cost", "overhead"),
     "代价": ("cost", "overhead", "time", "tokens", "regeneration"),
     "开销": ("cost", "overhead", "time", "tokens", "regeneration"),
+    "取舍": ("trade-off", "tradeoff", "overhead", "accuracy", "efficiency"),
+    "部署": ("deployment", "deploy", "practitioners", "implications"),
+    "高风险": ("high-stakes",),
+    "建议": ("recommend", "recommendation", "practitioners", "implications"),
     "全文": ("full-text", "full text"),
     "多文档": ("multiple documents",),
     "图像": ("images", "figures", "visual", "multimodal"),
@@ -2791,6 +2812,7 @@ def query_knowledge(
     routed_variant_ids: list[str] = []
     routed_evidence_ids: list[str] = []
     routed_evidence_results: list[dict[str, Any]] = []
+    cover_all_selected_sources = _all_selected_sources_requested(message, allowed_sources)
     if runtime.config.document_routing or len(allowed_sources) > 1:
         route_snapshot = _get_lexical_snapshot(runtime)
         route = route_snapshot.router.route(message) if route_snapshot.router else None
@@ -2810,8 +2832,13 @@ def query_knowledge(
             routed_sources = list(routed_terms)
             if len(allowed_sources) > 1 and routed_sources:
                 variants = scope_variants
+    if cover_all_selected_sources:
+        routed_sources = sorted(allowed_sources)
     dense_results: list[dict[str, Any]] = []
-    for variant in variants:
+    query_plans: list[tuple[str, str | None]] = [(variant, None) for variant in variants]
+    if cover_all_selected_sources:
+        query_plans.extend((message, source) for source in sorted(allowed_sources))
+    for variant, forced_source in query_plans:
         question_embedding = runtime.embedding_model.encode(variant).tolist()
         query_kwargs = {
             "query_embeddings": [question_embedding],
@@ -2825,15 +2852,15 @@ def query_knowledge(
         query_conditions: list[dict[str, Any]] = [{"type": {"$ne": "formula"}}]
         if runtime.config.spatial_figure_evidence:
             query_conditions.append({"type": {"$ne": "figure"}})
-        variant_route = route
-        if len(routed_sources) > 1 and route_snapshot.router:
+        variant_route = DocumentRoute(forced_source, ()) if forced_source else route
+        if forced_source is None and len(routed_sources) > 1 and route_snapshot.router:
             variant_route = route_snapshot.router.route(variant)
         if variant_route is not None and allowed_sources and variant_route.document_id not in allowed_sources:
             variant_route = None
-        source_clause = _source_where_clause(allowed_sources)
+        source_clause = _source_where_clause({forced_source} if forced_source else allowed_sources)
         if source_clause is not None:
             query_conditions.append(source_clause)
-        if variant_route is not None:
+        if variant_route is not None and forced_source is None:
             # ``source`` is written for every uploaded chunk.  The filter is
             # only applied after the conservative lexical router found one
             # unique source; ambiguous questions intentionally keep the global

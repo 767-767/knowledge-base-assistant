@@ -41,6 +41,8 @@ PYINSTALLER_CONFIG_DIR="${PYINSTALLER_CONFIG_DIR:-/private/tmp/scirag-pyinstalle
   --add-binary "$SCI_RAG_LLAMA_SERVER:runtime" \
   --add-data "$STAGED_MODEL:models" \
   --add-data "$SCI_RAG_EMBEDDING_MODEL:models/bge-small-zh-v1.5" \
+  --add-data "$PROJECT_DIR/LICENSE:." \
+  --add-data "$PROJECT_DIR/THIRD_PARTY_NOTICES.md:." \
   desktop.py
 
 echo "已生成：$PROJECT_DIR/dist/个人知识库助手.app"
