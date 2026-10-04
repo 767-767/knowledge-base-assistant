@@ -4654,7 +4654,8 @@ class RuntimeContractTests(unittest.TestCase):
                 app.add_document_to_db(str(file), runtime)
             self.assertCountEqual(collection.get()["documents"], ["new parse", "other document"])
             with patch.object(app, "load_and_split_document", return_value=[]):
-                app.add_document_to_db(str(file), runtime)
+                with self.assertRaisesRegex(ValueError, "没有可导入的文本"):
+                    app.add_document_to_db(str(file), runtime)
             self.assertCountEqual(collection.get()["documents"], ["new parse", "other document"])
 
     def test_upload_batches_chunks_and_disambiguates_same_named_files(self):

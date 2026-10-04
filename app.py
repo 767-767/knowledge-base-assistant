@@ -1090,6 +1090,8 @@ def add_document_to_db(
         file_path,
         include_spatial_figures=runtime.config.spatial_figure_evidence,
     )
+    if not chunks:
+        raise ValueError("文档中没有可导入的文本")
     if runtime.config.vision_enabled and Path(file_path).suffix.lower() == ".pdf":
         source_dir = Path(runtime.config.db_path) / "source_pdfs"
         source_dir.mkdir(parents=True, exist_ok=True)
