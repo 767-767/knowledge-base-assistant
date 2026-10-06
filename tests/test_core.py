@@ -4926,6 +4926,7 @@ class RuntimeContractTests(unittest.TestCase):
     def test_document_inventory_and_confirmed_deletion(self):
         digest = "a" * 64
         shared_digest = "b" * 64
+        third_digest = "c" * 64
 
         class Collection:
             def __init__(self):
@@ -4933,6 +4934,7 @@ class RuntimeContractTests(unittest.TestCase):
                     ("a-1", {"source": "a.pdf", "document_sha256": digest}),
                     ("a-2", {"source": "a.pdf", "document_sha256": shared_digest}),
                     ("b-1", {"source": "b.txt", "document_sha256": shared_digest}),
+                    ("c-1", {"source": "c.txt", "document_sha256": third_digest}),
                 ]
                 self.deleted = []
 
@@ -4968,18 +4970,27 @@ class RuntimeContractTests(unittest.TestCase):
             source_pdf.write_bytes(b"pdf")
             shared_pdf = source_pdf.with_name(f"{shared_digest}.pdf")
             shared_pdf.write_bytes(b"pdf")
+            third_pdf = source_pdf.with_name(f"{third_digest}.pdf")
+            third_pdf.write_bytes(b"pdf")
 
-            self.assertEqual(app.document_inventory(runtime), [("a.pdf", 2), ("b.txt", 1)])
-            self.assertEqual(app.delete_document("a.pdf", False, runtime=runtime), "请先确认删除。")
+            self.assertEqual(
+                app.document_inventory(runtime),
+                [("a.pdf", 2), ("b.txt", 1), ("c.txt", 1)],
+            )
+            self.assertEqual(
+                app.delete_document(["a.pdf", "c.txt"], False, runtime=runtime),
+                "请先确认删除。",
+            )
             self.assertEqual(collection.deleted, [])
 
-            status = app.delete_document("a.pdf", True, runtime=runtime)
+            status = app.delete_document(["a.pdf", "c.txt"], True, runtime=runtime)
 
-            self.assertIn("2 个文本块", status)
-            self.assertEqual(collection.deleted, ["a-1", "a-2"])
+            self.assertIn("2 份文档（3 个文本块）", status)
+            self.assertEqual(collection.deleted, ["a-1", "a-2", "c-1"])
             self.assertEqual(app.document_inventory(runtime), [("b.txt", 1)])
             self.assertFalse(source_pdf.exists())
             self.assertTrue(shared_pdf.exists())
+            self.assertFalse(third_pdf.exists())
             self.assertIsNone(runtime._lexical_snapshot)
 
     def test_upload_file_preserves_pathlib_path(self):

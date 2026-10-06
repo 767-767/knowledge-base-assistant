@@ -84,10 +84,10 @@ APP_CSS = """
     --kb-text: #10204a;
     --kb-muted: #62749a;
     --kb-canvas: #eef6ff;
-    --kb-surface: rgba(255, 255, 255, 0.88);
+    --kb-surface: #ffffff;
     --kb-surface-muted: #edf5ff;
     --kb-border: #c9dcff;
-    --kb-sidebar: rgba(247, 250, 255, 0.9);
+    --kb-sidebar: #f7faff;
     --kb-sidebar-raised: #ffffff;
     --kb-sidebar-text: #10204a;
     --kb-sidebar-muted: #53678f;
@@ -105,10 +105,10 @@ APP_CSS = """
     --kb-text: #10204a;
     --kb-muted: #62749a;
     --kb-canvas: #eef6ff;
-    --kb-surface: rgba(255, 255, 255, 0.88);
+    --kb-surface: #ffffff;
     --kb-surface-muted: #edf5ff;
     --kb-border: #c9dcff;
-    --kb-sidebar: rgba(247, 250, 255, 0.9);
+    --kb-sidebar: #f7faff;
     --kb-sidebar-raised: #ffffff;
     --kb-sidebar-text: #10204a;
     --kb-sidebar-muted: #53678f;
@@ -176,7 +176,6 @@ APP_CSS = """
     gap: 14px;
     padding: 20px 24px;
     background: var(--kb-sidebar);
-    backdrop-filter: blur(18px);
 }
 
 .kb-mark {
@@ -256,7 +255,6 @@ APP_CSS = """
     border-right: 1px solid var(--kb-border) !important;
     border-radius: 0 !important;
     background: var(--kb-sidebar) !important;
-    backdrop-filter: blur(18px);
     overflow-y: auto;
 }
 
@@ -350,7 +348,6 @@ APP_CSS = """
     border-radius: 16px !important;
     background: var(--kb-surface) !important;
     box-shadow: var(--kb-shadow) !important;
-    backdrop-filter: blur(16px);
 }
 
 .kb-panel-title h3 {
@@ -368,7 +365,10 @@ APP_CSS = """
     line-height: 1.55;
 }
 
-.kb-library-grid,
+.kb-library-grid {
+    align-items: flex-start;
+}
+
 .kb-settings-grid {
     align-items: stretch;
     gap: 18px;
@@ -391,7 +391,48 @@ APP_CSS = """
 }
 
 .kb-library-panel {
+    align-self: flex-start;
     min-height: 0;
+}
+
+#kb-delete-confirm {
+    padding: 11px 13px !important;
+    border: 1px solid var(--kb-border) !important;
+    border-radius: 11px !important;
+    background: var(--kb-surface-muted) !important;
+}
+
+#kb-delete-confirm:has(input[type="checkbox"]:checked) {
+    border-color: var(--kb-primary) !important;
+    background: var(--kb-accent-soft) !important;
+    box-shadow: inset 4px 0 0 var(--kb-primary);
+}
+
+#kb-delete-confirm input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--kb-primary);
+}
+
+#kb-delete-confirm input[type="checkbox"]:checked {
+    border-color: var(--kb-primary) !important;
+    background: var(--kb-primary) !important;
+}
+
+#kb-delete-confirm:has(input[type="checkbox"]:checked) label {
+    color: var(--kb-primary) !important;
+    font-weight: 650;
+}
+
+#kb-delete-confirm:has(input[type="checkbox"]:checked) label::after {
+    content: "已确认";
+    margin-left: 8px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    color: #ffffff;
+    background: var(--kb-primary);
+    font-size: 11px;
+    white-space: nowrap;
 }
 
 .kb-chat-panel {
@@ -496,7 +537,6 @@ APP_CSS = """
     border-radius: 16px !important;
     background: var(--kb-surface) !important;
     box-shadow: var(--kb-shadow) !important;
-    backdrop-filter: blur(16px);
 }
 
 .kb-output h1,
@@ -1619,32 +1659,43 @@ def document_inventory(runtime: Runtime) -> list[tuple[str, int]]:
 
 
 def delete_document(
-    source: str | None,
+    source: str | list[str] | None,
     confirmed: bool = False,
     *,
     runtime: Runtime,
 ) -> str:
-    """Delete one source and its persisted vision PDF after explicit confirmation."""
+    """Delete selected sources and persisted vision PDFs after confirmation."""
 
-    source = str(source or "").strip()
-    if not source:
+    sources = sorted(_normalise_source_filter(source), key=str.casefold)
+    if not sources:
         return "请选择要删除的文档。"
     if not confirmed:
         return "请先确认删除。"
 
-    result = runtime.collection.get(
-        where={"source": {"$eq": source}},
-        include=["metadatas"],
-    )
-    ids = [str(value) for value in _flat_result_values(result, "ids")]
+    ids: list[str] = []
+    digests: set[str] = set()
+    deleted_sources: list[str] = []
+    for selected_source in sources:
+        result = runtime.collection.get(
+            where={"source": {"$eq": selected_source}},
+            include=["metadatas"],
+        )
+        source_ids = [str(value) for value in _flat_result_values(result, "ids")]
+        if not source_ids:
+            continue
+        ids.extend(source_ids)
+        deleted_sources.append(selected_source)
+        digests.update(
+            str(metadata.get("document_sha256", "")).strip().casefold()
+            for metadata in _flat_result_values(result, "metadatas")
+            if isinstance(metadata, dict)
+            and re.fullmatch(
+                r"[0-9a-fA-F]{64}",
+                str(metadata.get("document_sha256", "")).strip(),
+            )
+        )
     if not ids:
-        return f"未找到文档：{source}"
-    digests = {
-        str(metadata.get("document_sha256", "")).strip().casefold()
-        for metadata in _flat_result_values(result, "metadatas")
-        if isinstance(metadata, dict)
-        and re.fullmatch(r"[0-9a-fA-F]{64}", str(metadata.get("document_sha256", "")).strip())
-    }
+        return "未找到所选文档。"
     runtime.collection.delete(ids=ids)
     runtime.invalidate_lexical_index()
     for digest in digests:
@@ -1656,7 +1707,8 @@ def delete_document(
             (Path(runtime.config.db_path) / "source_pdfs" / f"{digest}.pdf").unlink(
                 missing_ok=True
             )
-    return f"✅ 已删除 {source}（{len(ids)} 个文本块）。"
+    names = "、".join(deleted_sources)
+    return f"✅ 已删除 {len(deleted_sources)} 份文档（{len(ids)} 个文本块）：{names}。"
 
 
 def _normalise_source_filter(value: Any) -> set[str]:
@@ -4298,7 +4350,7 @@ def build_demo(
         return (
             f"**当前知识库文本块数：** {runtime.collection.count()}",
             inventory,
-            gr.update(choices=sources, value=None),
+            gr.update(choices=sources, value=[]),
             gr.update(choices=sources, value=[]),
             gr.update(choices=sources, value=[]),
             gr.update(choices=sources, value=[]),
@@ -4394,7 +4446,7 @@ def build_demo(
                     "研究资料库",
                     "导入 PDF、TXT 或 DOCX，建立只保存在当前设备上的检索资料库。",
                 )
-                with gr.Row(equal_height=True, elem_classes="kb-library-grid"):
+                with gr.Row(equal_height=False, elem_classes="kb-library-grid"):
                     with gr.Column(
                         scale=3,
                         elem_classes=["kb-panel", "kb-library-panel"],
@@ -4429,9 +4481,9 @@ def build_demo(
                     ):
                         gr.HTML(
                             """
-                            <div class="kb-panel-title">
-                                <h3>知识库概览</h3>
-                                <p>查看已解析资料，并在需要时移除单个文档。</p>
+                                <div class="kb-panel-title">
+                                    <h3>知识库概览</h3>
+                                    <p>查看已解析资料，并在需要时批量移除文档。</p>
                             </div>
                             """,
                             apply_default_css=False,
@@ -4442,12 +4494,15 @@ def build_demo(
                         inventory_output = gr.Markdown(initial_inventory)
                         with gr.Accordion("管理已上传文档", open=False):
                             delete_select = gr.Dropdown(
-                                label="选择要删除的文档",
+                                label="选择一篇或多篇要删除的文档",
                                 choices=initial_sources,
-                                value=None,
+                                value=[],
+                                multiselect=True,
+                                filterable=False,
                             )
                             delete_confirm = gr.Checkbox(
-                                label="确认删除所选文档及其本地数据"
+                                label="确认删除所选文档及其本地数据",
+                                elem_id="kb-delete-confirm",
                             )
                             delete_button = gr.Button(
                                 "删除所选文档",
@@ -4721,9 +4776,9 @@ def build_demo(
         ) -> tuple[Any, ...]:
             return (upload_file(file, runtime, progress), *library_state())
 
-        def handle_delete(source: str | None, confirmed: bool) -> tuple[Any, ...]:
+        def handle_delete(sources: list[str], confirmed: bool) -> tuple[Any, ...]:
             return (
-                delete_document(source, confirmed, runtime=runtime),
+                delete_document(sources, confirmed, runtime=runtime),
                 *library_state(),
                 False,
             )
@@ -4755,6 +4810,7 @@ def build_demo(
                 outline_sources,
                 quiz_sources,
             ],
+            show_progress_on=upload_output,
         )
         delete_button.click(
             handle_delete,
