@@ -190,9 +190,9 @@ class CoreTests(unittest.TestCase):
     def test_generation_prompt_prevents_contradictory_refusal(self):
         self.assertIn("不得在已经给出具体表格数值后", app.SCIENTIFIC_SYSTEM_PROMPT)
         self.assertIn("明确要求计算", app.SCIENTIFIC_SYSTEM_PROMPT)
-        self.assertIn("逐一检查全部参考片段", app.SCIENTIFIC_SYSTEM_PROMPT)
+        self.assertIn("逐一检查全部原文引用", app.SCIENTIFIC_SYSTEM_PROMPT)
         self.assertIn("限制问题要区分限制本身与示例现象", app.SCIENTIFIC_SYSTEM_PROMPT)
-        self.assertIn("不能用“训练数据限制”等参考片段未出现的机制替代", app.SCIENTIFIC_SYSTEM_PROMPT)
+        self.assertIn("不能用“训练数据限制”等原文未出现的机制替代", app.SCIENTIFIC_SYSTEM_PROMPT)
 
     def test_generation_prompt_labels_table_number_from_metadata(self):
         class Vector(list):
@@ -353,7 +353,7 @@ class CoreTests(unittest.TestCase):
         joined = "\n".join(ledger)
         for fact in ("DeepSeek-R1", "ADMETLab", "0.6", "SMILES", "4,855"):
             self.assertIn(fact, joined)
-        self.assertTrue(all(line.startswith("【片段 ") for line in ledger))
+        self.assertTrue(all(line.startswith("【原文引用：paper.pdf") for line in ledger))
 
     def test_formula_evidence_candidates_are_opt_in_and_ranked_by_terms(self):
         question = "线性有限元离散后的椭圆 PDE 系统写成什么形式，卷积核尺寸是多少？"
@@ -5173,7 +5173,7 @@ class RuntimeContractTests(unittest.TestCase):
 
         self.assertEqual(selected, [1])
         self.assertNotIn("x" * 20, prompt)
-        self.assertIn("【片段 1】\nsmall evidence", prompt)
+        self.assertIn("【原文引用 1】\nsmall evidence", prompt)
 
     def test_truncated_generation_is_visible_and_truncated_quiz_is_rejected(self):
         message = type("Message", (), {"content": "partial"})()
@@ -5230,7 +5230,7 @@ class RuntimeContractTests(unittest.TestCase):
         prompt = request["messages"][1]["content"]
         self.assertEqual(result["context_ids"], ["fits"])
         self.assertEqual(result["contexts"], ["Complete short evidence."])
-        self.assertIn("【片段 1】", prompt)
+        self.assertIn("【原文引用 1】", prompt)
         self.assertNotIn("overlong", prompt)
         self.assertIn("尚未完成", result["answer"])
         self.assertLessEqual(

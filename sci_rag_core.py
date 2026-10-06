@@ -1241,10 +1241,16 @@ def build_evidence_ledger(
             else None
         )
         section = str(header).split(">")[-1].strip() if header else ""
-        suffix = f"，{source}" if source else ""
+        details = [str(source)] if source else []
+        page = metadata.get("page") if isinstance(metadata, dict) else None
+        if isinstance(metadata, dict) and metadata.get("window_pages"):
+            page = "–".join(str(value) for value in metadata["window_pages"])
+        if page is not None:
+            details.append(f"第 {page} 页")
         if section:
-            suffix += f"，{section}"
-        return f"【片段 {context_index + 1}{suffix}】{line}"
+            details.append(section)
+        label = f"：{'，'.join(details)}" if details else ""
+        return f"【原文引用{label}】{line}"
 
     return [
         render(selected[key])

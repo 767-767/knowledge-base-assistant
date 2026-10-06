@@ -502,34 +502,6 @@ APP_CSS = """
     line-height: 1.6;
 }
 
-.kb-action-bar {
-    display: grid !important;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 18px;
-    margin-bottom: 14px;
-    padding: 17px 20px !important;
-}
-
-.kb-action-bar > .column {
-    width: auto !important;
-    min-width: 0 !important;
-    flex: none !important;
-}
-
-.kb-action-copy h3 {
-    margin: 0 0 3px;
-    color: var(--kb-text);
-    font-size: 15px;
-}
-
-.kb-action-copy p {
-    margin: 0;
-    color: var(--kb-muted);
-    font-size: 12px;
-    line-height: 1.5;
-}
-
 .kb-output {
     min-height: clamp(300px, 48vh, 660px);
     padding: 28px !important;
@@ -545,8 +517,13 @@ APP_CSS = """
     color: var(--kb-text);
 }
 
+.kb-generate-stack,
 .kb-quiz-stack {
     gap: 14px;
+}
+
+.kb-generate-stack {
+    margin-bottom: 14px;
 }
 
 .kb-quiz-question {
@@ -570,7 +547,9 @@ APP_CSS = """
 
 #kb-mindmap-button,
 #kb-quiz-button {
-    min-width: 150px;
+    width: 100%;
+    min-width: 0;
+    margin: 0;
 }
 
 #kb-exit-button {
@@ -917,10 +896,6 @@ select:focus-visible {
         min-height: 0;
     }
 
-    .kb-action-bar {
-        align-items: stretch;
-        grid-template-columns: minmax(0, 1fr);
-    }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1199,7 +1174,7 @@ def configure_model_service(
     if not model:
         return "请输入模型名称。"
     if not api_key and parsed_url.hostname not in {"localhost", "127.0.0.1", "::1"}:
-        return "云端模型服务需要 API Key；Ollama 本地服务可以留空。"
+        return "如果使用 Ollama 本地服务，API Key 可以留空；使用云端模型服务时必须填写 API Key。"
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key or "local", base_url=base_url)
@@ -3097,13 +3072,13 @@ def _pack_contexts(
     parts: list[str] = []
     for index, text in enumerate(texts):
         label = labels[index] if labels else ""
-        part = f"【片段 {len(selected) + 1}】{label}\n{text}"
+        part = f"【原文引用 {len(selected) + 1}】{label}\n{text}"
         candidate = instruction + "\n\n" + "\n\n---\n\n".join([*parts, part]) + suffix
         if _estimated_tokens(system) + _estimated_tokens(candidate) <= limit:
             selected.append(index)
             parts.append(part)
     if not selected:
-        raise ValueError("输入预算不足以容纳完整资料片段；请缩短问题、拆分长资料，或按服务实际窗口配置 LLM_CONTEXT_TOKENS。")
+        raise ValueError("输入预算不足以容纳完整参考内容；请缩短问题、拆分长资料，或按服务实际窗口配置 LLM_CONTEXT_TOKENS。")
     return selected, instruction + "\n\n" + "\n\n---\n\n".join(parts) + suffix
 
 
@@ -3864,7 +3839,7 @@ def query_knowledge(
     )
     if evidence_ledger:
         ledger_text = (
-            "【事实核对清单】以下内容仅逐字摘自后面的参考片段，不是新增事实；"
+            "【事实核对清单】以下内容仅逐字摘自后面的原文引用，不是新增事实；"
             "回答复合问题时请逐项核对其中与问题相关的数字、阈值、工具名和步骤。"
         )
         limit = runtime.config.llm_context_tokens - runtime.config.llm_max_tokens - 128
@@ -3892,7 +3867,7 @@ def query_knowledge(
         answer = f"❌ 调用出错：{exc}"
     if input_limited:
         answer += (
-            f"\n\n⚠️ 输入窗口有限，本次使用了 {len(ordered_texts)} 个完整片段；"
+            f"\n\n⚠️ 输入窗口有限，本次使用了 {len(ordered_texts)} 段完整原文引用；"
             "其余候选未发送给模型。"
         )
     if vision_error:
@@ -3923,7 +3898,7 @@ def query_knowledge(
         if answer_validation.get("status") == "review":
             reasons = "、".join(answer_validation.get("reasons") or [])
             answer += (
-                "\n\n⚠️ **证据核对提示**：生成答案可能遗漏参考片段中的高信号内容，"
+                "\n\n⚠️ **证据核对提示**：生成答案可能遗漏原文引用中的高信号内容，"
                 f"请人工核对（{reasons or '未分类原因'}）；系统未自动改写或重试。"
             )
 
@@ -3953,23 +3928,24 @@ def query_knowledge(
     return answer + "\n\n📌 **参考来源：**\n" + "\n".join(unique_sources)
 
 
-SCIENTIFIC_SYSTEM_PROMPT = """你是个人知识库助手中的严谨学术问答助手，职责是从给定的参考片段中抽取事实、数值与实验方法论。必须遵守以下规则：
+SCIENTIFIC_SYSTEM_PROMPT = """你是个人知识库助手中的严谨学术问答助手，职责是从给定的原文引用中抽取事实、数值与实验方法论。必须遵守以下规则：
 
 【强制规则 1：数值必须原样引用并指明出处】
 - 若参考文本中存在具体数值，回答时必须原样引用，不得四舍五入、改写或推算。
-- 引用数值后必须指明出处，格式为：根据参考片段 [X] 所示。
+- 引用数值后必须指明出处，优先写成“根据《文档名》第 X 页所示”；缺少页码时至少写明文档名。
+- “原文引用 1、2”等编号只用于组织模型输入，最终回答不得使用“片段1”“片段2”或“原文引用1”等内部编号。
 - 问题明确要求计算时，只用原文操作数列式计算并遵守指定精度；其余数值原样引用。
 
 【强制规则 1A：图形坐标文字不得跨视觉组拼接】
-- 标记为“图形坐标文字”的片段只来自 PDF 文字层坐标，不等同于图片识别。
+- 标记为“图形坐标文字”的内容只来自 PDF 文字层坐标，不等同于图片识别。
 - 只有标签和值的水平 x 范围重叠时，才可把它们视为同一视觉组；不得把相邻子图、柱或类别中的数值移接到另一标签。
-- 如果图中信息只存在于像素而未出现在文字层，必须说明参考片段不足，不能猜测。
+- 如果图中信息只存在于像素而未出现在文字层，必须说明原文证据不足，不能猜测。
 
 【强制规则 2：趋势判断必须有明确对比依据】
 - 仅当问题询问数值升降或因果趋势时，才根据明确对比依据回答；缺少依据则说明无法判断。其他问题不得套用趋势拒答句。仍可分别引用不同论文的目标或方法进行比较。
 
 【强制规则 2A：限制问题要区分限制本身与示例现象】
-- 先回答机制性限制及限定条件，再说示例现象；保留原文对照关系的两端，不能用“训练数据限制”等参考片段未出现的机制替代。
+- 先回答机制性限制及限定条件，再说示例现象；保留原文对照关系的两端，不能用“训练数据限制”等原文未出现的机制替代。
 
 【强制规则 3：实验步骤按时间顺序重组】
 - 若回答涉及实验步骤或方法流程，请按“第一、第二、第三”的逻辑重组叙述，不得调换核心操作顺序或省略中间步骤。
@@ -3987,20 +3963,20 @@ SCIENTIFIC_SYSTEM_PROMPT = """你是个人知识库助手中的严谨学术问�
 - 行、列、值已与问题对应时，不因未重复显示题注而拒答。不得在已经给出具体表格数值后否认该值；仅缺失子项说明资料不足。
 
 【强制规则 6：公式与符号必须按证据转录】
-- 若问题询问公式、形式化定义、初始化/更新表达式或激活函数，优先转录参考片段中明确出现的等式、括号、参数顺序、上下标和运算符；不得凭语义改写、交换参数或自行补充等价形式。
+- 若问题询问公式、形式化定义、初始化/更新表达式或激活函数，优先转录原文引用中明确出现的等式、括号、参数顺序、上下标和运算符；不得凭语义改写、交换参数或自行补充等价形式。
 - 若同一问题涉及多个公式或变量，必须逐项回答并区分每个变量的定义；不要用流程概述替代显式公式。
-- 同一公式若因 PDF 分块分布在相邻参考片段，可在不改变符号、顺序和运算符的前提下按片段拼接；只要各部分分别出现在参考片段中，不得仅因没有单行完整公式而拒答。
-- 如果参考片段只有“表达如下/producing ... as”之类引导语而没有等式本身，必须说明该公式未出现在参考片段中，不能猜测。
+- 同一公式若因 PDF 解析分布在相邻原文引用中，可在不改变符号、顺序和运算符的前提下按原文顺序拼接；只要各部分分别出现在所给原文中，不得仅因没有单行完整公式而拒答。
+- 如果所给原文只有“表达如下/producing ... as”之类引导语而没有等式本身，必须说明该公式未出现在原文引用中，不能猜测。
 
 【其他要求】
 - 直接回答问题，不展示内部核对过程，不重复结论或自我评价。
 - 表格以 Markdown 形式给出，数值问题请直接依据表格行列作答。
-- 若问题涉及图片内容：如果参考片段没有标记为“图形坐标文字”的坐标证据，必须说明“该图内容未纳入文本检索范围”；如果存在这类坐标证据，只能依据其中明确出现的标签、数值和坐标范围作答，不能把它当作像素级图片识别。
-- 逐一检查全部参考片段，按问题子项分点作答，每项给出结论和引用。完整保留相关数字、阈值、工具/模型名、实体和步骤，不以概述代替具体事实。
+- 若问题涉及图片内容：如果所给原文没有标记为“图形坐标文字”的坐标证据，必须说明“该图内容未纳入文本检索范围”；如果存在这类坐标证据，只能依据其中明确出现的标签、数值和坐标范围作答，不能把它当作像素级图片识别。
+- 逐一检查全部原文引用，按问题子项分点作答，每项给出结论和来源。完整保留相关数字、阈值、工具/模型名、实体和步骤，不以概述代替具体事实。
 - 局部缺证据时，先回答有依据的子项，仅标明缺失项；不整题拒答，不用常识补写。
 - 跨论文比较先分别说明各文观点，再标明综合推论；不要求原文已直接比较另一篇论文，不混淆来源。
 - 区分论文已经运行的实验与另行提供的数据、摘要或未来工作；“提供了”不能推断为“已输入模型并评测”。
-- 若参考片段无法回答问题，请如实说明“资料未提供相关信息”，严禁编造。"""
+- 若所给原文无法回答问题，请如实说明“资料未提供相关信息”，严禁编造。"""
 
 
 def _scientific_system_prompt(question: str, metadatas: list[dict[str, Any]]) -> str:
@@ -4024,7 +4000,7 @@ def format_evidence_panel(result: dict[str, Any]) -> str:
     contexts = list(result.get("contexts") or [])
     metadatas = list(result.get("context_metadatas") or [])
     if not contexts:
-        return "提问后，这里会显示回答实际使用的原文片段。"
+        return "提问后，这里会显示回答实际使用的原文引用。"
     sections = []
     for index, context in enumerate(contexts, start=1):
         metadata = metadatas[index - 1] if index <= len(metadatas) else {}
@@ -4042,9 +4018,7 @@ def format_evidence_panel(result: dict[str, Any]) -> str:
         quoted = "\n".join(
             f"> {line}" if line else ">" for line in str(context).strip().splitlines()
         )
-        sections.append(
-            f"### 片段 {index}\n**{source}{location} · {kind}**\n\n{quoted}"
-        )
+        sections.append(f"### {source}{location} · {kind}\n\n{quoted}")
     return "\n\n".join(sections)
 
 
@@ -4155,7 +4129,7 @@ def _outline_candidates_within_budget(
     if not candidates:
         return []
     empty_parts = [
-        f"【片段 {index}】{label}\n" for index, label in enumerate(labels, start=1)
+        f"【原文引用 {index}】{label}\n" for index, label in enumerate(labels, start=1)
     ]
     fixed_prompt = instruction + "\n\n" + "\n\n---\n\n".join(empty_parts)
     limit = runtime.config.llm_context_tokens - runtime.config.llm_max_tokens - 128
@@ -4195,10 +4169,11 @@ def generate_mindmap(runtime: Runtime, source_filter: list[str] | None = None) -
         return "📚 所选范围没有可用内容，请重新选择文档。"
     system = "你是一位严谨的学术助教。请根据提供的课程资料，生成精炼、完整、便于复习的学习大纲。"
     instruction = (
-        "请用中文，基于以下按原文顺序提供的章节代表片段生成 Markdown 层级大纲（使用 # ## ### - 表示层级）。"
+        "请用中文，基于以下按原文顺序提供的章节代表内容生成 Markdown 层级大纲（使用 # ## ### - 表示层级）。"
         "覆盖每个已提供的学术章节，保留章节从属关系；每个小节只写 1–2 条最重要的信息，"
         "全文控制在约 1200 个中文字以内。重点保留研究问题、核心方法、实验设计、关键结果、结论与局限。"
-        "不要列出作者、单位、作者贡献、致谢、利益冲突、数据链接或参考文献，也不要编造片段中没有的信息。"
+        "不要列出作者、单位、作者贡献、致谢、利益冲突、数据链接或参考文献，也不要编造原文中没有的信息。"
+        "最终大纲不得出现“片段1”“原文引用1”等内部编号，应直接使用论文的自然章节标题和内容。"
         "不要包含开场白或结尾总结，直接输出大纲结构。"
     )
     candidates, labels = _outline_section_candidates(documents, metadatas)
@@ -4216,7 +4191,7 @@ def generate_mindmap(runtime: Runtime, source_filter: list[str] | None = None) -
         answer = _complete_text(runtime, system, prompt)
         if len(selected) < len(candidates):
             answer += (
-                f"\n\n⚠️ 输入窗口有限，本次大纲覆盖了 {len(selected)}/{len(candidates)} 个章节代表片段。"
+                f"\n\n⚠️ 输入窗口有限，本次大纲覆盖了 {len(selected)}/{len(candidates)} 个章节代表内容。"
             )
         return answer
     except Exception as exc:
@@ -4243,6 +4218,8 @@ def generate_quiz(runtime: Runtime, source_filter: list[str] | None = None) -> s
         "请根据以下资料生成5道单项选择题。只输出合法 JSON 对象，不要使用 Markdown 代码块。"
         "对象格式必须是 {\"questions\": [...]}，questions 中每项必须包含 question、options、"
         "answer、explanation；options 是4个选项文本组成的数组，answer 只能是 A、B、C、D。"
+        "题目和解析必须直接陈述论文内容，不得出现“片段1”“参考内容1”“原文引用1”等内部编号；"
+        "需要说明依据时，应使用文档名、页码或直接引用原文内容。"
     )
     try:
         _selected, prompt = _pack_contexts(
@@ -4441,7 +4418,7 @@ def build_demo(
             apply_default_css=False,
         )
         with gr.Tabs(elem_id="kb-workspace"):
-            with gr.Tab("资料库"):
+            with gr.Tab("知识库"):
                 page_header(
                     "研究资料库",
                     "导入 PDF、TXT 或 DOCX，建立只保存在当前设备上的检索资料库。",
@@ -4516,7 +4493,7 @@ def build_demo(
             with gr.Tab("资料问答"):
                 page_header(
                     "资料问答",
-                    "限定资料范围后提问，并对照回答实际使用的原文片段与页码。",
+                    "限定资料范围后提问，并对照回答实际使用的原文引用与页码。",
                 )
                 source_select = gr.Dropdown(
                     label="限定回答范围",
@@ -4526,7 +4503,7 @@ def build_demo(
                     filterable=False,
                     elem_id="kb-answer-sources",
                     elem_classes="kb-source-select",
-                    info="范围会应用到下一次提问；比较多篇时请在问题中写出各篇名称。",
+                    info="你下一次发送问题时，系统只会在当前选中的资料范围内检索；更改范围不会影响已经生成的回答。",
                     render=False,
                 )
                 with gr.Row(equal_height=True, elem_classes="kb-chat-layout"):
@@ -4538,7 +4515,7 @@ def build_demo(
                             """
                             <div class="kb-panel-title">
                                 <h3>原文依据</h3>
-                                <p>本次回答实际使用的检索片段与页码。</p>
+                                <p>本次回答实际使用的原文引用与页码。</p>
                             </div>
                             """,
                             apply_default_css=False,
@@ -4546,13 +4523,13 @@ def build_demo(
                         gr.HTML(
                             """
                             <div class="kb-context-note">
-                                这里展示检索原文，不是模型重新生成的摘要。
+                                这里展示对应的检索原文。
                             </div>
                             """,
                             apply_default_css=False,
                         )
                         evidence_output = gr.Markdown(
-                            "提问后，这里会显示回答实际使用的原文片段。",
+                            "提问后，这里会显示回答实际使用的原文引用。",
                             elem_classes="kb-evidence",
                         )
                     with gr.Column(
@@ -4562,7 +4539,7 @@ def build_demo(
                         gr.HTML(
                             """
                             <div class="kb-panel-title">
-                                <h3>向资料库提问</h3>
+                                <h3>向知识库提问</h3>
                                 <p>回答仅基于当前知识库中的可检索内容。</p>
                             </div>
                             """,
@@ -4593,30 +4570,19 @@ def build_demo(
                     "学习大纲",
                     "按章节顺序整理所选资料的主要内容，参考文献列表不纳入大纲。",
                 )
-                outline_sources = gr.Dropdown(
-                    label="大纲资料范围", choices=initial_sources, value=[], multiselect=True,
-                    filterable=False,
-                    elem_id="kb-outline-sources",
-                    elem_classes="kb-source-select",
-                    info="不选择时使用全部资料；更改范围后请重新生成。",
-                )
-                with gr.Row(elem_classes=["kb-panel", "kb-action-bar"]):
-                    with gr.Column(scale=4):
-                        gr.HTML(
-                            """
-                            <div class="kb-action-copy">
-                                <h3>从所选资料生成大纲</h3>
-                                <p>每个正文章节至少选取一个代表片段，生成 Markdown 层级结构。</p>
-                            </div>
-                            """,
-                            apply_default_css=False,
-                        )
-                    with gr.Column(scale=1, min_width=150):
-                        button = gr.Button(
-                            "生成学习大纲",
-                            variant="primary",
-                            elem_id="kb-mindmap-button",
-                        )
+                with gr.Column(elem_classes=["kb-panel", "kb-generate-stack"]):
+                    outline_sources = gr.Dropdown(
+                        label="大纲资料范围", choices=initial_sources, value=[], multiselect=True,
+                        filterable=False,
+                        elem_id="kb-outline-sources",
+                        elem_classes="kb-source-select",
+                        info="不选择时使用全部资料，更改范围后请重新生成。",
+                    )
+                    button = gr.Button(
+                        "生成学习大纲",
+                        variant="primary",
+                        elem_id="kb-mindmap-button",
+                    )
                 output = gr.Markdown(
                     label="大纲内容",
                     value="生成结果会显示在这里。",
@@ -4629,32 +4595,21 @@ def build_demo(
             with gr.Tab("自测练习"):
                 page_header(
                     "自测习题",
-                    "从所选资料中抽取部分片段生成 5 道单项选择题，提交后显示得分与解析。",
+                    "根据所选资料内容生成 5 道单项选择题，提交后显示得分与解析。",
                 )
-                quiz_sources = gr.Dropdown(
-                    label="自测资料范围", choices=initial_sources, value=[], multiselect=True,
-                    filterable=False,
-                    elem_id="kb-quiz-sources",
-                    elem_classes="kb-source-select",
-                    info="不选择时使用全部资料；更改范围后请重新生成题目。",
-                )
-                with gr.Row(elem_classes=["kb-panel", "kb-action-bar"]):
-                    with gr.Column(scale=4):
-                        gr.HTML(
-                            """
-                            <div class="kb-action-copy">
-                                <h3>生成一组资料自测题</h3>
-                                <p>作答前不会显示答案，提交后逐题核对。</p>
-                            </div>
-                            """,
-                            apply_default_css=False,
-                        )
-                    with gr.Column(scale=1, min_width=150):
-                        quiz_generate_button = gr.Button(
-                            "生成 5 道练习题",
-                            variant="primary",
-                            elem_id="kb-quiz-button",
-                        )
+                with gr.Column(elem_classes=["kb-panel", "kb-generate-stack"]):
+                    quiz_sources = gr.Dropdown(
+                        label="自测资料范围", choices=initial_sources, value=[], multiselect=True,
+                        filterable=False,
+                        elem_id="kb-quiz-sources",
+                        elem_classes="kb-source-select",
+                        info="不选择时使用全部资料，更改范围后请重新生成题目。",
+                    )
+                    quiz_generate_button = gr.Button(
+                        "生成 5 道练习题",
+                        variant="primary",
+                        elem_id="kb-quiz-button",
+                    )
                 quiz_status = gr.Markdown("生成题目后开始作答。")
                 quiz_state = gr.State([])
                 with gr.Column(elem_classes=["kb-panel", "kb-quiz-stack"]):
@@ -4744,10 +4699,10 @@ def build_demo(
                                 value=runtime.config.llm_base_url,
                             )
                             api_key_input = gr.Textbox(
-                                label="API Key（Ollama 本地服务可留空）",
+                                label="API Key（仅使用 Ollama 本地服务时可留空）",
                                 type="password",
                                 placeholder="云端服务请输入自己的 Key",
-                                info="应用成功后会保留为隐藏圆点，仅在当前运行进程中使用。",
+                                info="使用 Ollama 本地服务时无需填写；使用 DeepSeek、Gemini 或其他云端服务时必须填写。应用成功后仅在当前运行进程中使用。",
                             )
                     model_service_button = gr.Button(
                         "检测连接并应用",
