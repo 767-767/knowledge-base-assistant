@@ -4995,7 +4995,7 @@ class RuntimeContractTests(unittest.TestCase):
 
     def test_quiz_json_is_parsed_and_scored(self):
         response = json.dumps(
-            [
+            {"questions": [
                 {
                     "question": f"问题 {index}",
                     "options": ["甲", "乙", "丙", "丁"],
@@ -5003,7 +5003,7 @@ class RuntimeContractTests(unittest.TestCase):
                     "explanation": f"解析 {index}",
                 }
                 for index in range(1, 6)
-            ],
+            ]},
             ensure_ascii=False,
         )
         items = app.parse_quiz_items(response)
@@ -5053,6 +5053,9 @@ class RuntimeContractTests(unittest.TestCase):
         openai_client.assert_not_called()
 
         with patch("openai.OpenAI") as openai_client:
+            openai_client.return_value.models.list.return_value.data = [
+                type("Model", (), {"id": "test-model"})()
+            ]
             status = app.configure_model_service(
                 "https://example.com/v1",
                 "test-model",
@@ -5067,6 +5070,22 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIs(runtime.client, openai_client.return_value)
         self.assertEqual(runtime.config.llm_model, "test-model")
         self.assertNotIn("secret-value", status)
+        openai_client.return_value.models.list.assert_called_once_with()
+
+        previous_client = runtime.client
+        with patch("openai.OpenAI") as openai_client:
+            error = RuntimeError("unauthorized")
+            error.status_code = 401
+            openai_client.return_value.models.list.side_effect = error
+            status = app.configure_model_service(
+                "https://example.com/v1",
+                "other-model",
+                "invalid-value",
+                runtime=runtime,
+            )
+        self.assertIn("API Key 无效", status)
+        self.assertIs(runtime.client, previous_client)
+        self.assertEqual(runtime.config.llm_model, "test-model")
 
         with patch("openai.OpenAI") as openai_client:
             status = app.configure_model_service(
@@ -5123,8 +5142,8 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(runtime.config.context_k, 4)
         self.assertEqual(app.generate_mindmap(runtime), "ok")
         self.assertEqual(app.generate_quiz(runtime), "ok")
-        for call in completions.calls:
-            self.assertEqual(call["messages"][1]["content"].count("chunk-"), 4)
+        self.assertEqual(completions.calls[0]["messages"][1]["content"].count("chunk-"), 6)
+        self.assertEqual(completions.calls[1]["messages"][1]["content"].count("chunk-"), 4)
 
     def test_context_budget_skips_oversized_chunks_without_cutting_them(self):
         runtime = app.Runtime(
@@ -5161,6 +5180,22 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("尚未完成", app._complete_text(runtime, "system", "prompt"))
         with self.assertRaisesRegex(ValueError, "未载入测评"):
             app._complete_text(runtime, "system", "prompt", json_output=True)
+
+    def test_deepseek_generation_disables_thinking_and_requests_json(self):
+        from unittest.mock import Mock
+
+        client = Mock()
+        client.chat.completions.create.return_value.choices = [
+            Mock(message=Mock(content='{"questions": []}'), finish_reason="stop")
+        ]
+        runtime = app.Runtime(app.RuntimeConfig(), client, None, None)
+
+        app._complete_text(runtime, "system", "prompt", json_output=True)
+
+        request = client.chat.completions.create.call_args.kwargs
+        self.assertEqual(request["response_format"], {"type": "json_object"})
+        self.assertEqual(request["extra_body"], {"thinking": {"type": "disabled"}})
+        self.assertEqual(request["max_tokens"], 2048)
 
     def test_question_budget_keeps_prompt_and_evidence_panel_aligned(self):
         from unittest.mock import Mock
@@ -5223,6 +5258,113 @@ class RuntimeContractTests(unittest.TestCase):
                 client.chat.completions.create.reset_mock()
                 self.assertIn("没有可用内容", generate(runtime, source_filter=["deleted.pdf"]))
                 client.chat.completions.create.assert_not_called()
+
+    def test_outline_uses_each_main_section_instead_of_only_opening_chunks(self):
+        from unittest.mock import Mock
+
+        documents = [
+            "INTRODUCTION " * 30,
+            "INTRODUCTION CONTINUED " * 30,
+            "METHODOLOGY " * 30,
+            "RESULTS " * 30,
+            "CONCLUSION " * 30,
+            "REFERENCES " * 30,
+            "APPENDIX " * 30,
+        ]
+        metadatas = [
+            {"source": "paper.pdf", "chunk_index": 0, "headers": "H2: Introduction"},
+            {"source": "paper.pdf", "chunk_index": 1, "headers": "H2: Introduction"},
+            {"source": "paper.pdf", "chunk_index": 2, "headers": "H2: Methodology"},
+            {"source": "paper.pdf", "chunk_index": 3, "headers": "H2: Results"},
+            {"source": "paper.pdf", "chunk_index": 4, "headers": "H2: Conclusion"},
+            {"source": "paper.pdf", "chunk_index": 5, "headers": "H2: References"},
+            {"source": "paper.pdf", "chunk_index": 6, "headers": "H2: Appendix"},
+        ]
+        collection = Mock()
+        collection.count.return_value = len(documents)
+        collection.get.return_value = {
+            "documents": documents,
+            "metadatas": metadatas,
+        }
+        client = Mock()
+        client.chat.completions.create.return_value.choices = [
+            Mock(message=Mock(content="outline"), finish_reason="stop")
+        ]
+        runtime = app.Runtime(app.RuntimeConfig(), client, object(), collection)
+
+        self.assertEqual(app.generate_mindmap(runtime, ["paper.pdf"]), "outline")
+
+        request = client.chat.completions.create.call_args.kwargs
+        prompt = request["messages"][1]["content"]
+        for marker in ("INTRODUCTION", "METHODOLOGY", "RESULTS", "CONCLUSION"):
+            self.assertIn(marker, prompt)
+        self.assertNotIn("REFERENCES", prompt)
+        self.assertNotIn("APPENDIX", prompt)
+
+    def test_outline_filters_non_academic_sections_and_fits_every_section(self):
+        documents = [
+            "PAPER TITLE AND AUTHORS",
+            "ABSTRACT " * 80,
+            "INTRODUCTION " * 120,
+            "METHODS " * 120,
+            "PREDICTED CHANGES " * 120,
+            "RESULTS " * 120,
+            "AUTHOR CONTRIBUTIONS " * 120,
+            "DATA AVAILABILITY " * 120,
+            "CONCLUSION " * 120,
+            "REFERENCES " * 120,
+        ]
+        metadatas = [
+            {"source": "paper.pdf", "chunk_index": 0, "headers": "H1: Paper title"},
+            {"source": "paper.pdf", "chunk_index": 1, "headers": "H1: Paper title"},
+            {"source": "paper.pdf", "chunk_index": 2, "headers": "H2: 1 Introduction"},
+            {"source": "paper.pdf", "chunk_index": 3, "headers": "H2: 2 Methods"},
+            {
+                "source": "paper.pdf",
+                "chunk_index": 4,
+                "headers": "H3: and the predicted changes",
+            },
+            {"source": "paper.pdf", "chunk_index": 5, "headers": "H2: 3 Results"},
+            {
+                "source": "paper.pdf",
+                "chunk_index": 6,
+                "headers": "H2: Author contributions",
+            },
+            {
+                "source": "paper.pdf",
+                "chunk_index": 7,
+                "headers": "H2: Data availability",
+            },
+            {"source": "paper.pdf", "chunk_index": 8, "headers": "H2: Conclusion"},
+            {"source": "paper.pdf", "chunk_index": 9, "headers": "H2: References"},
+        ]
+
+        candidates, labels = app._outline_section_candidates(documents, metadatas)
+        joined_labels = " ".join(labels)
+        self.assertEqual(len(candidates), 5)
+        self.assertNotIn("and the predicted changes", joined_labels)
+        self.assertNotIn("Author contributions", joined_labels)
+        self.assertNotIn("Data availability", joined_labels)
+        self.assertNotIn("References", joined_labels)
+        self.assertTrue(candidates[0].startswith("ABSTRACT"))
+
+        runtime = app.Runtime(
+            app.RuntimeConfig(llm_context_tokens=1600, llm_max_tokens=512),
+            None,
+            None,
+            None,
+        )
+        system = "system"
+        instruction = "instruction"
+        compacted = app._outline_candidates_within_budget(
+            runtime, system, instruction, candidates, labels
+        )
+        selected, prompt = app._pack_contexts(
+            runtime, system, instruction, compacted, labels=labels
+        )
+        self.assertEqual(len(selected), len(candidates))
+        for label in labels:
+            self.assertIn(label, prompt)
 
     def test_selected_papers_supply_both_named_sources_without_forcing_extra_papers(self):
         import chromadb

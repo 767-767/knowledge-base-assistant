@@ -62,7 +62,7 @@ APP_DISPLAY_NAME = "个人知识库助手"
 
 MODEL_SERVICE_PRESETS = {
     "Ollama（本地）": ("http://localhost:11434/v1", "qwen3:4b-instruct"),
-    "DeepSeek": ("https://api.deepseek.com/v1", "deepseek-v4-flash"),
+    "DeepSeek": ("https://api.deepseek.com", "deepseek-flash"),
     "Gemini": (
         "https://generativelanguage.googleapis.com/v1beta/openai/",
         "gemini-2.5-flash-lite",
@@ -75,303 +75,388 @@ DOCUMENT_BATCH_SIZE = 64
 
 APP_CSS = """
 :root {
-    --kb-primary: #17243a;
-    --kb-primary-hover: #223451;
-    --kb-nav-active: #17243a;
-    --kb-accent: #006a61;
-    --kb-accent-hover: #00584f;
-    --kb-accent-soft: #d9f0eb;
-    --kb-text: #132238;
-    --kb-muted: #596579;
-    --kb-canvas: #f4f7fb;
-    --kb-surface: #ffffff;
-    --kb-surface-muted: #edf3fa;
-    --kb-border: #d8e1ec;
-    --kb-danger: #a33a3a;
-    --kb-shadow: 0 10px 28px rgba(31, 49, 76, 0.07);
+    --kb-primary: #2563eb;
+    --kb-primary-hover: #1d4ed8;
+    --kb-nav-active: #2563eb;
+    --kb-accent: #168bff;
+    --kb-accent-hover: #0876e8;
+    --kb-accent-soft: #dbeafe;
+    --kb-text: #10204a;
+    --kb-muted: #62749a;
+    --kb-canvas: #eef6ff;
+    --kb-surface: rgba(255, 255, 255, 0.88);
+    --kb-surface-muted: #edf5ff;
+    --kb-border: #c9dcff;
+    --kb-sidebar: rgba(247, 250, 255, 0.9);
+    --kb-sidebar-raised: #ffffff;
+    --kb-sidebar-text: #10204a;
+    --kb-sidebar-muted: #53678f;
+    --kb-danger: #dc2626;
+    --kb-shadow: 0 18px 48px rgba(37, 99, 235, 0.08);
 }
 
 .dark {
-    --kb-primary: #d9e5f7;
-    --kb-primary-hover: #ffffff;
-    --kb-nav-active: #006a61;
-    --kb-accent: #69d5c7;
-    --kb-accent-hover: #8fe4d8;
-    --kb-accent-soft: #173c3a;
-    --kb-text: #e7edf6;
-    --kb-muted: #a8b4c5;
-    --kb-canvas: #101925;
-    --kb-surface: #172333;
-    --kb-surface-muted: #1d2d42;
-    --kb-border: #304157;
-    --kb-danger: #ffb4ab;
-    --kb-shadow: 0 12px 30px rgba(0, 0, 0, 0.22);
+    --kb-primary: #2563eb;
+    --kb-primary-hover: #1d4ed8;
+    --kb-nav-active: #2563eb;
+    --kb-accent: #168bff;
+    --kb-accent-hover: #0876e8;
+    --kb-accent-soft: #dbeafe;
+    --kb-text: #10204a;
+    --kb-muted: #62749a;
+    --kb-canvas: #eef6ff;
+    --kb-surface: rgba(255, 255, 255, 0.88);
+    --kb-surface-muted: #edf5ff;
+    --kb-border: #c9dcff;
+    --kb-sidebar: rgba(247, 250, 255, 0.9);
+    --kb-sidebar-raised: #ffffff;
+    --kb-sidebar-text: #10204a;
+    --kb-sidebar-muted: #53678f;
+    --kb-danger: #dc2626;
+    --kb-shadow: 0 18px 48px rgba(37, 99, 235, 0.08);
 }
 
 .gradio-container {
     width: 100% !important;
     max-width: none !important;
-    min-height: 100vh;
-    padding: 0 0 36px !important;
-    background: var(--kb-canvas) !important;
+    min-height: 100dvh;
+    padding: 0 !important;
+    background:
+        radial-gradient(circle at 18% 16%, rgba(22, 139, 255, 0.11), transparent 30%),
+        linear-gradient(135deg, #f8fbff 0%, var(--kb-canvas) 48%, #f7fbff 100%) !important;
     color: var(--kb-text);
+    font-family: "PingFang SC", "Microsoft YaHei", ui-sans-serif, -apple-system,
+        BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 .gradio-container .main {
     width: 100%;
-    padding: 0 24px !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    gap: 0 !important;
 }
 
 #kb-header {
-    position: sticky;
+    position: fixed;
     top: 0;
-    z-index: 40;
-    margin: 0 -24px 22px;
+    left: 0;
+    right: 0;
+    z-index: 70;
+    margin: 0;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    overflow: visible !important;
 }
 
 .kb-header {
     display: flex;
-    min-height: 68px;
+    min-height: 72px;
     align-items: center;
     justify-content: space-between;
-    gap: 24px;
-    padding: 11px clamp(20px, 3vw, 48px);
+    gap: 20px;
+    margin-left: 264px;
+    padding: 12px clamp(24px, 3vw, 46px);
     border-bottom: 1px solid var(--kb-border);
-    background: color-mix(in srgb, var(--kb-surface) 96%, transparent);
-    box-shadow: 0 2px 14px rgba(31, 49, 76, 0.05);
-    backdrop-filter: blur(10px);
+    background: rgba(255, 255, 255, 0.76);
 }
 
 .kb-brand {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 61;
     display: flex;
     align-items: center;
-    min-width: 0;
-    gap: 12px;
+    width: 264px;
+    min-width: 264px;
+    min-height: 96px;
+    gap: 14px;
+    padding: 20px 24px;
+    background: var(--kb-sidebar);
+    backdrop-filter: blur(18px);
 }
 
 .kb-mark {
     display: grid;
-    width: 38px;
+    width: 34px;
     height: 38px;
-    flex: 0 0 38px;
+    flex: 0 0 34px;
     place-items: center;
-    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.72);
+    border-radius: 11px;
     color: #ffffff;
-    background: #17243a;
-    font-size: 18px;
+    background: linear-gradient(135deg, #2563eb 0%, #168bff 100%);
+    box-shadow: 0 10px 24px rgba(37, 99, 235, 0.24);
+    font-size: 17px;
     font-weight: 700;
-    box-shadow: 0 5px 14px rgba(23, 36, 58, 0.18);
 }
 
 .dark .kb-mark {
     color: #ffffff !important;
-    background: #006a61 !important;
+    background: linear-gradient(135deg, #2563eb 0%, #168bff 100%) !important;
 }
 
 .kb-title {
     margin: 0;
-    color: var(--kb-text);
-    font-size: 17px;
+    color: var(--kb-sidebar-text);
+    font-size: 19px;
     font-weight: 700;
-    letter-spacing: -0.02em;
+    letter-spacing: 0.06em;
     line-height: 1.25;
 }
 
 .kb-subtitle {
     margin: 2px 0 0;
     overflow: hidden;
-    color: var(--kb-muted);
-    font-size: 12px;
+    color: var(--kb-sidebar-muted);
+    font-size: 10px;
+    letter-spacing: 0.06em;
     line-height: 1.35;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
-.kb-header-meta {
-    display: flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 10px;
-}
-
-.kb-status {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    min-height: 30px;
-    padding: 5px 10px;
-    border-radius: 7px;
+.kb-crumb {
     color: var(--kb-muted);
-    background: var(--kb-surface-muted);
-    font-size: 12px;
-    line-height: 1.3;
+    font-size: 11px;
+    letter-spacing: 0.08em;
 }
 
-.kb-status {
-    color: var(--kb-accent);
-    font-weight: 650;
-}
-
-.kb-status-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--kb-accent);
-    box-shadow: 0 0 0 3px var(--kb-accent-soft);
+.kb-crumb strong {
+    color: var(--kb-text);
+    font-weight: 620;
 }
 
 #kb-workspace {
     display: block !important;
     width: 100%;
-    max-width: 1600px;
-    margin: 0 auto;
+    min-height: 100dvh;
+    margin: 0;
 }
 
 #kb-workspace > .tab-wrapper {
-    position: sticky;
-    top: 80px;
-    z-index: 30;
+    position: fixed;
+    top: 96px;
+    bottom: 0;
+    left: 0;
+    z-index: 55;
     display: flex !important;
-    align-items: center;
-    gap: 4px;
-    width: 100%;
-    margin-bottom: 22px;
-    padding: 6px !important;
-    border: 1px solid var(--kb-border) !important;
-    border-radius: 9px !important;
-    background: var(--kb-surface) !important;
-    box-shadow: var(--kb-shadow);
+    align-self: start;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+    width: 264px;
+    height: calc(100dvh - 96px) !important;
+    margin: 0;
+    padding: 20px 16px 96px !important;
+    border: 0 !important;
+    border-right: 1px solid var(--kb-border) !important;
+    border-radius: 0 !important;
+    background: var(--kb-sidebar) !important;
+    backdrop-filter: blur(18px);
+    overflow-y: auto;
 }
 
 #kb-workspace > .tab-wrapper > .tab-container[role="tablist"] {
     display: flex;
-    flex: 1 1 auto;
-    gap: 4px;
+    flex: 0 0 auto;
+    flex-direction: column;
+    gap: 5px;
+    height: auto !important;
+    overflow: visible !important;
+}
+
+#kb-workspace > .tab-wrapper > .tab-container.visually-hidden button {
+    width: 1px !important;
+    min-width: 0 !important;
+    padding-inline: 0 !important;
 }
 
 #kb-workspace > .tab-wrapper [role="tab"],
 #kb-workspace > .tab-wrapper .overflow-menu > button {
-    justify-content: center;
-    width: auto;
-    min-height: 42px;
-    padding: 9px 11px !important;
+    justify-content: flex-start;
+    width: 100%;
+    min-height: 46px;
+    padding: 11px 15px !important;
     border: 0 !important;
-    border-radius: 7px !important;
-    color: var(--kb-muted) !important;
+    border-radius: 12px !important;
+    color: var(--kb-sidebar-muted) !important;
+    -webkit-text-fill-color: var(--kb-sidebar-muted) !important;
     font-size: 13px !important;
-    font-weight: 590 !important;
+    font-weight: 560 !important;
     text-align: left;
 }
 
 #kb-workspace > .tab-wrapper [role="tab"]:hover,
 #kb-workspace > .tab-wrapper .overflow-menu > button:hover {
-    color: var(--kb-text) !important;
-    background: var(--kb-surface-muted) !important;
+    color: var(--kb-primary) !important;
+    -webkit-text-fill-color: var(--kb-primary) !important;
+    background: rgba(37, 99, 235, 0.08) !important;
 }
 
 #kb-workspace > .tab-wrapper [role="tab"].selected {
+    border-bottom: 0 !important;
     color: #ffffff !important;
-    background: var(--kb-nav-active) !important;
+    -webkit-text-fill-color: #ffffff !important;
+    background: linear-gradient(135deg, #2563eb 0%, #168bff 100%) !important;
+    font-weight: 680 !important;
+    box-shadow: none !important;
+}
+
+#kb-workspace > .tab-wrapper [role="tab"].selected::before,
+#kb-workspace > .tab-wrapper [role="tab"].selected::after {
+    display: none !important;
+    content: none !important;
 }
 
 #kb-workspace > .tabitem {
     min-width: 0;
-    padding: 0 !important;
+    width: calc(100% - 264px);
+    max-width: none;
+    margin: 0 0 0 264px;
+    padding: 108px clamp(24px, 3vw, 48px) 48px !important;
 }
 
 .kb-page-head {
-    margin: 2px 0 18px;
+    margin: 0 0 26px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid rgba(201, 220, 255, 0.8);
 }
 
 .kb-page-head h1 {
     margin: 0;
     color: var(--kb-text);
-    font-size: clamp(23px, 2.2vw, 30px);
+    font-size: clamp(30px, 2.4vw, 42px);
     font-weight: 700;
-    letter-spacing: -0.035em;
+    letter-spacing: 0.01em;
     line-height: 1.2;
 }
 
 .kb-page-head p {
-    max-width: 68ch;
-    margin: 7px 0 0;
+    max-width: 72ch;
+    margin: 10px 0 0;
     color: var(--kb-muted);
-    font-size: 14px;
+    font-size: 13px;
     line-height: 1.65;
 }
 
 .kb-panel {
     min-width: 0;
-    padding: 20px !important;
+    padding: 22px !important;
     border: 1px solid var(--kb-border) !important;
-    border-radius: 9px !important;
+    border-radius: 16px !important;
     background: var(--kb-surface) !important;
-    box-shadow: var(--kb-shadow);
+    box-shadow: var(--kb-shadow) !important;
+    backdrop-filter: blur(16px);
 }
 
 .kb-panel-title h3 {
     margin: 0 0 5px;
     color: var(--kb-text);
-    font-size: 16px;
-    font-weight: 680;
-    letter-spacing: -0.015em;
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 0.025em;
 }
 
 .kb-panel-title p {
     margin: 0 0 14px;
     color: var(--kb-muted);
-    font-size: 13px;
+    font-size: 12px;
     line-height: 1.55;
 }
 
 .kb-library-grid,
-.kb-chat-layout,
 .kb-settings-grid {
     align-items: stretch;
     gap: 18px;
 }
 
+.kb-chat-layout {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1.85fr) minmax(320px, 0.95fr);
+    max-width: 1480px;
+    margin: 0 auto;
+    align-items: stretch;
+    gap: 16px;
+}
+
+.kb-chat-layout > .column {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    flex: none !important;
+}
+
 .kb-library-panel {
-    min-height: 380px;
+    min-height: 0;
 }
 
 .kb-chat-panel {
-    order: 1;
+    grid-column: 1;
+    grid-row: 1;
     overflow: hidden;
 }
 
 .kb-context-panel {
-    order: 2;
+    grid-column: 2;
+    grid-row: 1;
     align-self: stretch;
+    background: var(--kb-surface) !important;
+}
+
+.kb-context-panel .kb-panel-title {
+    margin: -22px -22px 18px;
+    padding: 17px 20px 15px;
+    border-bottom: 1px solid var(--kb-border);
+    background: rgba(255, 255, 255, 0.62);
+    border-radius: 16px 16px 0 0;
+}
+
+.kb-context-panel .kb-panel-title h3 {
+    margin: 0;
+    color: var(--kb-text);
+    font-size: 17px;
+}
+
+.kb-context-panel .kb-panel-title p {
+    margin: 5px 0 0;
+    color: var(--kb-muted);
+    font-size: 11px;
 }
 
 .kb-context-note {
-    margin-top: 14px;
-    padding: 12px;
-    border-left: 3px solid var(--kb-accent);
-    border-radius: 0 7px 7px 0;
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--kb-border);
+    border-radius: 12px;
     color: var(--kb-muted);
-    background: var(--kb-surface-muted);
+    background: rgba(219, 234, 254, 0.62);
     font-size: 12px;
     line-height: 1.6;
 }
 
 .kb-evidence {
-    max-height: clamp(300px, 48vh, 620px);
+    max-height: clamp(420px, 57vh, 720px);
     overflow: auto;
     padding-right: 4px;
 }
 
 .kb-evidence h3 {
-    margin-top: 18px;
-    font-size: 14px;
+    margin: 22px 0 8px;
+    font-size: 16px;
 }
 
 .kb-evidence blockquote {
     margin: 8px 0 0;
-    padding: 10px 12px;
-    border-left: 2px solid var(--kb-border);
-    color: var(--kb-muted);
+    padding: 11px 14px;
+    border: 1px solid var(--kb-border);
+    border-left: 3px solid var(--kb-accent);
+    border-radius: 12px;
+    color: var(--kb-text);
+    background: rgba(237, 245, 255, 0.84);
     font-size: 12px;
     line-height: 1.6;
 }
@@ -382,7 +467,7 @@ APP_CSS = """
     align-items: center;
     gap: 18px;
     margin-bottom: 14px;
-    padding: 15px 17px !important;
+    padding: 17px 20px !important;
 }
 
 .kb-action-bar > .column {
@@ -406,11 +491,12 @@ APP_CSS = """
 
 .kb-output {
     min-height: clamp(300px, 48vh, 660px);
-    padding: 22px !important;
+    padding: 28px !important;
     border: 1px solid var(--kb-border) !important;
-    border-radius: 9px !important;
+    border-radius: 16px !important;
     background: var(--kb-surface) !important;
-    box-shadow: var(--kb-shadow);
+    box-shadow: var(--kb-shadow) !important;
+    backdrop-filter: blur(16px);
 }
 
 .kb-output h1,
@@ -426,7 +512,7 @@ APP_CSS = """
 .kb-quiz-question {
     padding: 14px !important;
     border: 1px solid var(--kb-border) !important;
-    border-radius: 8px !important;
+    border-radius: 12px !important;
     background: var(--kb-surface-muted) !important;
 }
 
@@ -448,8 +534,17 @@ APP_CSS = """
 }
 
 #kb-exit-button {
-    max-width: 168px;
-    margin: 26px auto 0;
+    position: fixed;
+    z-index: 65;
+    bottom: 20px;
+    left: 16px;
+    width: 232px;
+    max-width: 232px;
+    min-height: 38px;
+    margin: 0;
+    border-color: var(--kb-border) !important;
+    color: var(--kb-sidebar-text) !important;
+    background: rgba(255, 255, 255, 0.72) !important;
 }
 
 .kb-panel .block,
@@ -457,16 +552,66 @@ APP_CSS = """
     box-shadow: none;
 }
 
+.kb-panel > .hide-container {
+    flex: 0 0 auto !important;
+}
+
+.kb-context-panel > .kb-evidence {
+    flex: 1 1 auto !important;
+}
+
+.kb-chat-panel .block,
+.kb-chat-panel .chatbot,
+.kb-chat-panel [data-testid="chatbot"] {
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+
+.kb-chat-panel .message.bot,
+.kb-chat-panel [data-testid="bot"] {
+    color: var(--kb-text) !important;
+    background: transparent !important;
+    font-size: 15px;
+    line-height: 1.85;
+}
+
+.kb-chat-panel .message.user,
+.kb-chat-panel [data-testid="user"] {
+    color: var(--kb-text) !important;
+    border: 1px solid var(--kb-border) !important;
+    border-radius: 14px !important;
+    background: rgba(219, 234, 254, 0.76) !important;
+}
+
+.kb-chat-panel textarea,
+.kb-chat-panel input {
+    background: rgba(255, 255, 255, 0.92) !important;
+}
+
 button,
 input,
 textarea,
 select {
-    transition: border-color 150ms ease, background-color 150ms ease,
-        color 150ms ease, transform 100ms ease !important;
+    transition: border-color 140ms ease, background-color 140ms ease,
+        color 140ms ease !important;
 }
 
-button:active {
-    transform: scale(0.98);
+.gradio-container button.primary {
+    border-color: var(--kb-primary) !important;
+    color: #ffffff !important;
+    background: linear-gradient(135deg, #2563eb 0%, #168bff 100%) !important;
+    box-shadow: 0 10px 22px rgba(37, 99, 235, 0.22);
+}
+
+.gradio-container button {
+    border-radius: 11px !important;
+    font-weight: 650;
+}
+
+.gradio-container button.primary:hover {
+    border-color: var(--kb-primary-hover) !important;
+    background: linear-gradient(135deg, #1d4ed8 0%, #0876e8 100%) !important;
 }
 
 button:focus-visible,
@@ -477,25 +622,141 @@ select:focus-visible {
     outline-offset: 2px;
 }
 
-@media (max-width: 980px) {
-    .kb-library-grid,
-    .kb-chat-layout,
-    .kb-settings-grid {
-        display: grid !important;
-        grid-template-columns: minmax(0, 1fr) !important;
+.gradio-container textarea,
+.gradio-container input,
+.gradio-container select {
+    border-color: var(--kb-border) !important;
+    border-radius: 11px !important;
+    background: rgba(255, 255, 255, 0.9) !important;
+    color: var(--kb-text) !important;
+}
+
+.block:has(input[role="combobox"][aria-label$="范围"]) .secondary-wrap {
+    position: relative;
+    width: 100%;
+}
+
+.block:has(input[role="combobox"][aria-label$="范围"]) .secondary-wrap input[role="combobox"] {
+    width: 100% !important;
+    padding-right: 36px !important;
+    cursor: pointer;
+}
+
+.block:has(input[role="combobox"][aria-label$="范围"]) .secondary-wrap .icon-wrap {
+    position: absolute;
+    top: 50%;
+    right: 8px;
+    transform: translateY(-50%);
+    pointer-events: none;
+}
+
+.block:has(input[role="combobox"][aria-label$="范围"]) .wrap-inner:has(.token) .secondary-wrap {
+    flex: 0 0 56px;
+    min-width: 56px;
+}
+
+.block:has(input[role="combobox"][aria-label$="范围"]) .wrap-inner:has(.token) .secondary-wrap input[role="combobox"] {
+    height: 100%;
+    padding: 0 !important;
+    opacity: 0;
+}
+
+.block:has(input[role="combobox"][aria-label$="范围"]) .wrap-inner:has(.token) .secondary-wrap .remove-all {
+    position: absolute;
+    top: 50%;
+    right: 28px;
+    z-index: 1;
+    transform: translateY(-50%);
+}
+
+.gradio-container footer {
+    display: none !important;
+}
+
+@media (max-width: 1180px) {
+    .kb-chat-layout {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 16px;
     }
 
-    .kb-library-grid > .column,
-    .kb-chat-layout > .column,
-    .kb-settings-grid > .column {
-        width: 100% !important;
-        min-width: 0 !important;
-        max-width: none !important;
-        flex: none !important;
+    .kb-chat-panel,
+    .kb-context-panel {
+        grid-column: 1;
+    }
+
+    .kb-chat-panel {
+        grid-row: 1;
+        border-right: 1px solid var(--kb-border) !important;
+    }
+
+    .kb-context-panel {
+        grid-row: 2;
+    }
+
+    .kb-evidence {
+        max-height: 340px;
+    }
+}
+
+@media (max-width: 1020px) {
+    #kb-header {
+        position: sticky;
+    }
+
+    .kb-header {
+        min-height: 62px;
+        margin-left: 0;
+        padding: 9px 18px;
+    }
+
+    .kb-brand {
+        position: static;
+        width: auto;
+        min-width: 0;
+        min-height: 0;
+        padding: 0;
+        background: transparent;
+    }
+
+    .kb-title {
+        color: var(--kb-text);
+        font-size: 17px;
+    }
+
+    .kb-subtitle {
+        color: var(--kb-muted);
+    }
+
+    .kb-mark {
+        color: var(--kb-accent);
+        border-color: var(--kb-accent);
+    }
+
+    .kb-crumb {
+        display: none;
+    }
+
+    #kb-workspace {
+        display: block !important;
+        min-height: 0;
     }
 
     #kb-workspace > .tab-wrapper {
-        margin-bottom: 18px;
+        position: sticky;
+        top: 62px;
+        display: flex !important;
+        width: 100%;
+        height: auto !important;
+        padding: 8px 18px !important;
+        border-right: 0 !important;
+        border-bottom: 1px solid var(--kb-border) !important;
+        background: var(--kb-sidebar) !important;
+        overflow-x: auto;
+    }
+
+    #kb-workspace > .tab-wrapper > .tab-container[role="tablist"] {
+        flex-direction: row;
+        gap: 4px;
     }
 
     #kb-workspace > .tab-wrapper [role="tab"] {
@@ -504,50 +765,83 @@ select:focus-visible {
         white-space: nowrap;
     }
 
+    #kb-workspace > .tab-wrapper [role="tab"],
+    #kb-workspace > .tab-wrapper .overflow-menu > button {
+        color: var(--kb-sidebar-muted) !important;
+        -webkit-text-fill-color: var(--kb-sidebar-muted) !important;
+    }
+
+    #kb-workspace > .tab-wrapper [role="tab"]:hover,
+    #kb-workspace > .tab-wrapper .overflow-menu > button:hover {
+        color: var(--kb-primary) !important;
+        -webkit-text-fill-color: var(--kb-primary) !important;
+        background: rgba(37, 99, 235, 0.08) !important;
+    }
+
+    #kb-workspace > .tab-wrapper [role="tab"].selected {
+        border-bottom: 0 !important;
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        background: linear-gradient(135deg, #2563eb 0%, #168bff 100%) !important;
+        box-shadow: none !important;
+    }
+
     #kb-workspace > .tabitem {
         width: 100%;
+        max-width: none;
+        margin: 0;
+        padding: 28px 24px 44px !important;
     }
+
+    #kb-exit-button {
+        position: static;
+        width: auto;
+        max-width: 168px;
+        margin: 0 auto 24px;
+    }
+
+    .kb-library-grid,
+    .kb-settings-grid {
+        display: grid !important;
+        grid-template-columns: minmax(0, 1fr) !important;
+    }
+
+    .kb-library-grid > .column,
+    .kb-settings-grid > .column {
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        flex: none !important;
+    }
+
 }
 
 @media (max-width: 680px) {
-    .gradio-container .main {
-        padding: 0 13px !important;
-    }
-
-    #kb-header {
-        margin: 0 -13px 14px;
-    }
-
     .kb-header {
-        min-height: 62px;
+        min-height: 58px;
         gap: 12px;
         padding: 9px 14px;
     }
 
     .kb-mark {
-        width: 34px;
-        height: 34px;
-        flex-basis: 34px;
-        font-size: 16px;
+        width: 27px;
+        height: 31px;
+        flex-basis: 27px;
+        font-size: 14px;
     }
 
     .kb-title {
         font-size: 15px;
+        color: var(--kb-text);
     }
 
     .kb-subtitle {
         display: none;
     }
 
-    .kb-status {
-        padding: 5px 8px;
-        font-size: 11px;
-    }
-
     #kb-workspace > .tab-wrapper {
-        top: 72px;
-        margin-bottom: 14px;
-        padding: 7px !important;
+        top: 58px;
+        padding: 6px 10px !important;
     }
 
     #kb-workspace > .tab-wrapper [role="tab"],
@@ -558,16 +852,25 @@ select:focus-visible {
     }
 
     .kb-page-head {
-        margin-bottom: 14px;
+        margin-bottom: 18px;
     }
 
     .kb-page-head h1 {
-        font-size: 23px;
+        font-size: 28px;
     }
 
     .kb-panel,
     .kb-output {
         padding: 15px !important;
+    }
+
+    .kb-context-panel .kb-panel-title {
+        margin: -15px -15px 14px;
+        padding: 14px 15px 13px;
+    }
+
+    #kb-workspace > .tabitem {
+        padding: 24px 13px 36px !important;
     }
 
     .kb-library-panel {
@@ -593,52 +896,52 @@ select:focus-visible {
 
 def app_theme(gr: Any) -> Any:
     return gr.themes.Soft(
-        primary_hue="teal",
-        secondary_hue="slate",
+        primary_hue="blue",
+        secondary_hue="blue",
         neutral_hue="slate",
         spacing_size="md",
-        radius_size="sm",
+        radius_size="lg",
         text_size="md",
     ).set(
-        body_background_fill="#f4f7fb",
-        body_background_fill_dark="#101925",
-        body_text_color="#132238",
-        body_text_color_dark="#e7edf6",
-        body_text_color_subdued="#596579",
-        body_text_color_subdued_dark="#a8b4c5",
+        body_background_fill="#eef6ff",
+        body_background_fill_dark="#eef6ff",
+        body_text_color="#10204a",
+        body_text_color_dark="#10204a",
+        body_text_color_subdued="#62749a",
+        body_text_color_subdued_dark="#62749a",
         background_fill_primary="#ffffff",
-        background_fill_primary_dark="#172333",
-        background_fill_secondary="#edf3fa",
-        background_fill_secondary_dark="#1d2d42",
-        border_color_primary="#d8e1ec",
-        border_color_primary_dark="#304157",
+        background_fill_primary_dark="#ffffff",
+        background_fill_secondary="#edf5ff",
+        background_fill_secondary_dark="#edf5ff",
+        border_color_primary="#c9dcff",
+        border_color_primary_dark="#c9dcff",
         input_background_fill="#ffffff",
-        input_background_fill_dark="#172333",
-        input_border_color="#cbd6e3",
-        input_border_color_dark="#3a4d65",
-        input_border_color_focus="#006a61",
-        input_border_color_focus_dark="#69d5c7",
-        input_placeholder_color="#687489",
-        input_placeholder_color_dark="#a8b4c5",
-        button_primary_background_fill="#17243a",
-        button_primary_background_fill_hover="#223451",
-        button_primary_background_fill_dark="#69d5c7",
-        button_primary_background_fill_hover_dark="#8fe4d8",
+        input_background_fill_dark="#ffffff",
+        input_border_color="#c9dcff",
+        input_border_color_dark="#c9dcff",
+        input_border_color_focus="#168bff",
+        input_border_color_focus_dark="#168bff",
+        input_placeholder_color="#7585a6",
+        input_placeholder_color_dark="#7585a6",
+        button_primary_background_fill="#2563eb",
+        button_primary_background_fill_hover="#1d4ed8",
+        button_primary_background_fill_dark="#2563eb",
+        button_primary_background_fill_hover_dark="#1d4ed8",
         button_primary_text_color="#ffffff",
-        button_primary_text_color_dark="#101925",
-        button_transform_active="scale(0.98)",
-        block_radius="8px",
+        button_primary_text_color_dark="#ffffff",
+        button_transform_active="none",
+        block_radius="14px",
         block_label_background_fill="transparent",
         block_label_background_fill_dark="transparent",
         block_label_border_width="0px",
         block_label_border_width_dark="0px",
         block_label_padding="4px 0",
-        block_label_text_color="#006a61",
-        block_label_text_color_dark="#69d5c7",
-        input_radius="7px",
-        button_large_radius="7px",
-        button_medium_radius="7px",
-        button_small_radius="6px",
+        block_label_text_color="#2563eb",
+        block_label_text_color_dark="#2563eb",
+        input_radius="11px",
+        button_large_radius="11px",
+        button_medium_radius="11px",
+        button_small_radius="10px",
         block_shadow="none",
         block_shadow_dark="none",
     )
@@ -650,12 +953,12 @@ class RuntimeConfig:
 
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
     db_path: str = "./chroma_db"
-    llm_base_url: str = "https://api.deepseek.com/v1"
-    llm_model: str = "deepseek-v4-flash"
+    llm_base_url: str = "https://api.deepseek.com"
+    llm_model: str = "deepseek-flash"
     retrieval_k: int = 12
     context_k: int = 4
-    llm_context_tokens: int = 4096
-    llm_max_tokens: int = 1024
+    llm_context_tokens: int = 8192
+    llm_max_tokens: int = 2048
     retrieval_mode: str = "dense"
     document_routing: bool = False
     query_decomposition: bool = False
@@ -859,9 +1162,24 @@ def configure_model_service(
         return "云端模型服务需要 API Key；Ollama 本地服务可以留空。"
     from openai import OpenAI
 
-    runtime.client = OpenAI(api_key=api_key or "local", base_url=base_url)
+    client = OpenAI(api_key=api_key or "local", base_url=base_url)
+    try:
+        models = client.models.list()
+    except Exception as exc:
+        if getattr(exc, "status_code", None) == 401:
+            return "❌ 连接测试失败，设置未应用：API Key 无效或没有访问权限，请确认复制完整。"
+        if getattr(exc, "status_code", None) == 402:
+            return "❌ 连接测试失败，设置未应用：模型账户余额不足，请先充值或检查额度。"
+        return f"❌ 连接测试失败，设置未应用：{html.escape(str(exc))}"
+    available_models = {
+        str(getattr(item, "id", "")).strip() for item in (models.data or [])
+    }
+    if available_models and model not in available_models:
+        available = "、".join(sorted(available_models))
+        return f"❌ 服务中没有模型 {html.escape(model)}；可用模型：{html.escape(available)}"
+    runtime.client = client
     runtime.config = replace(runtime.config, llm_base_url=base_url, llm_model=model)
-    return f"✅ 已为当前会话配置模型 {html.escape(model)}；API Key 不会写入知识库。"
+    return f"✅ 连接测试成功，当前会话已使用模型 {html.escape(model)}。"
 
 
 def _docx_to_markdown(file_path: str) -> str:
@@ -2740,11 +3058,18 @@ def _pack_contexts(
 def _complete_text(runtime: Runtime, system: str, prompt: str, *, temperature: float = 0.3, json_output: bool = False) -> str:
     if runtime.client is None:
         raise RuntimeError("请先在“设置”页配置模型服务。")
+    request: dict[str, Any] = {
+        "model": runtime.config.llm_model,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+        "temperature": temperature,
+        "max_tokens": runtime.config.llm_max_tokens,
+    }
+    if json_output:
+        request["response_format"] = {"type": "json_object"}
+    if urlsplit(runtime.config.llm_base_url).hostname == "api.deepseek.com":
+        request["extra_body"] = {"thinking": {"type": "disabled"}}
     response = runtime.client.chat.completions.create(
-        model=runtime.config.llm_model,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-        temperature=temperature,
-        max_tokens=runtime.config.llm_max_tokens,
+        **request,
     )
     choice = response.choices[0]
     text = choice.message.content or ""
@@ -3671,6 +3996,138 @@ def format_evidence_panel(result: dict[str, Any]) -> str:
     return "\n\n".join(sections)
 
 
+def _outline_section_candidates(
+    documents: list[str],
+    metadatas: list[dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    """Select one ordered prose block per section, balanced across sources."""
+
+    by_source: dict[str, list[tuple[int, int, str, dict[str, Any]]]] = {}
+    for position, (document, raw_metadata) in enumerate(zip(documents, metadatas)):
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+        source = str(metadata.get("source") or "未知资料")
+        chunk_index = metadata.get("chunk_index")
+        order = chunk_index if isinstance(chunk_index, int) else position
+        by_source.setdefault(source, []).append((order, position, str(document), metadata))
+
+    source_sections: list[list[tuple[str, str]]] = []
+    for source, rows in by_source.items():
+        rows.sort(key=lambda row: (row[0], row[1]))
+        has_headers = any(
+            re.match(r"H[1-6]:", str(row[3].get("headers") or ""))
+            for row in rows
+        )
+        if not has_headers:
+            count = min(8, len(rows))
+            positions = (
+                [0]
+                if count == 1
+                else sorted({round(index * (len(rows) - 1) / (count - 1)) for index in range(count)})
+            )
+            source_sections.append([
+                (f"{source} · 全文位置 {index + 1}/{len(positions)}", rows[position][2])
+                for index, position in enumerate(positions)
+            ])
+            continue
+
+        grouped: dict[str, list[tuple[int, int, str, dict[str, Any]]]] = {}
+        current_header = ""
+        for row in rows:
+            header = str(row[3].get("headers") or "").strip()
+            if re.match(r"H[1-6]:", header):
+                leaf = re.sub(
+                    r"^H[1-6]:\s*", "", header.split(" > ")[-1]
+                ).replace("**", "").strip()
+                if leaf and not leaf[0].islower():
+                    current_header = header
+            if re.search(r"references?|bibliography|参考文献", current_header, re.IGNORECASE):
+                break
+            if not current_header or re.search(
+                r"acknowledg(?:e)?ments?|author contributions?|conflicts? of interest|"
+                r"data availability|funding|ethics statement|致谢|作者贡献|利益冲突|数据可用性",
+                current_header,
+                re.IGNORECASE,
+            ):
+                continue
+            grouped.setdefault(current_header, []).append(row)
+
+        sections = []
+        for header, section_rows in grouped.items():
+            prose = [
+                row
+                for row in section_rows
+                if str(row[3].get("type") or "text") == "text"
+                and len(row[2].strip()) >= 200
+            ] or [
+                row for row in section_rows
+                if str(row[3].get("type") or "text") == "text"
+            ] or section_rows
+            header_parts = []
+            for part in header.split(" > "):
+                match = re.match(r"H([1-6]):\s*(.*)", part)
+                if match:
+                    header_parts.append(
+                        (int(match.group(1)), match.group(2).replace("**", "").strip())
+                    )
+            if len(header_parts) > 1 and header_parts[0][0] == 1:
+                header_parts = header_parts[1:]
+            clean_header = " > ".join(text for _level, text in header_parts)
+            representative = (
+                max(prose, key=lambda row: len(row[2]))
+                if header.startswith("H1:")
+                else prose[0]
+            )
+            sections.append((f"{source} · {clean_header}", representative[2]))
+        source_sections.append(sections)
+
+    candidates: list[str] = []
+    labels: list[str] = []
+    for section_index in range(max((len(items) for items in source_sections), default=0)):
+        for sections in source_sections:
+            if section_index < len(sections):
+                label, document = sections[section_index]
+                labels.append(f"【{label}】")
+                candidates.append(document)
+    return candidates, labels
+
+
+def _outline_candidates_within_budget(
+    runtime: Runtime,
+    system: str,
+    instruction: str,
+    candidates: list[str],
+    labels: list[str],
+) -> list[str]:
+    """Give every section an equal share of the available input window."""
+
+    if not candidates:
+        return []
+    empty_parts = [
+        f"【片段 {index}】{label}\n" for index, label in enumerate(labels, start=1)
+    ]
+    fixed_prompt = instruction + "\n\n" + "\n\n---\n\n".join(empty_parts)
+    limit = runtime.config.llm_context_tokens - runtime.config.llm_max_tokens - 128
+    available = max(
+        1,
+        limit - _estimated_tokens(system) - _estimated_tokens(fixed_prompt) - 64,
+    )
+    per_section = max(1, available // len(candidates))
+    compacted = []
+    for candidate in candidates:
+        if _estimated_tokens(candidate) <= per_section:
+            compacted.append(candidate)
+            continue
+        low, high = 0, len(candidate)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if _estimated_tokens(candidate[:middle]) <= per_section:
+                low = middle
+            else:
+                high = middle - 1
+        compacted.append(candidate[:low].rstrip() + "…")
+    return compacted
+
+
 def generate_mindmap(runtime: Runtime, source_filter: list[str] | None = None) -> str:
     if runtime.collection.count() == 0:
         return "📚 知识库为空，请先上传文档。"
@@ -3678,24 +4135,37 @@ def generate_mindmap(runtime: Runtime, source_filter: list[str] | None = None) -
         return "⚙️ 请先在“设置”页配置模型服务。"
     where = _source_where_clause(_normalise_source_filter(source_filter))
     all_chunks = runtime.collection.get(
-        include=["documents"], **({"where": where} if where else {})
+        include=["documents", "metadatas"], **({"where": where} if where else {})
     )
     documents = all_chunks.get("documents") or []
+    metadatas = all_chunks.get("metadatas") or [{} for _document in documents]
     if not documents:
         return "📚 所选范围没有可用内容，请重新选择文档。"
-    system = "你是一位顶级学术助教。请根据提供的课程资料，生成一份层级清晰、结构完整的学习大纲。"
-    instruction = "请基于以下资料生成 Markdown 格式的层级大纲（使用 # ## ### - 表示层级），不要包含任何开场白或结尾总结，直接输出大纲结构。"
-    candidates = documents[: runtime.config.context_k]
+    system = "你是一位严谨的学术助教。请根据提供的课程资料，生成精炼、完整、便于复习的学习大纲。"
+    instruction = (
+        "请用中文，基于以下按原文顺序提供的章节代表片段生成 Markdown 层级大纲（使用 # ## ### - 表示层级）。"
+        "覆盖每个已提供的学术章节，保留章节从属关系；每个小节只写 1–2 条最重要的信息，"
+        "全文控制在约 1200 个中文字以内。重点保留研究问题、核心方法、实验设计、关键结果、结论与局限。"
+        "不要列出作者、单位、作者贡献、致谢、利益冲突、数据链接或参考文献，也不要编造片段中没有的信息。"
+        "不要包含开场白或结尾总结，直接输出大纲结构。"
+    )
+    candidates, labels = _outline_section_candidates(documents, metadatas)
+    candidates = _outline_candidates_within_budget(
+        runtime, system, instruction, candidates, labels
+    )
     try:
         selected, prompt = _pack_contexts(
             runtime,
             system,
             instruction,
             candidates,
+            labels=labels,
         )
         answer = _complete_text(runtime, system, prompt)
         if len(selected) < len(candidates):
-            answer += f"\n\n⚠️ 输入窗口有限，本次大纲使用了 {len(selected)} 个完整片段。"
+            answer += (
+                f"\n\n⚠️ 输入窗口有限，本次大纲覆盖了 {len(selected)}/{len(candidates)} 个章节代表片段。"
+            )
         return answer
     except Exception as exc:
         return f"❌ 生成大纲失败：{exc}"
@@ -3718,9 +4188,9 @@ def generate_quiz(runtime: Runtime, source_filter: list[str] | None = None) -> s
     )
     system = "你是一个严谨的大学教师。请根据资料出5道单项选择题，用于考察学生对知识的掌握程度。"
     instruction = (
-        "请根据以下资料生成5道单项选择题。只输出合法 JSON 数组，不要使用 Markdown 代码块。"
-        "每项必须包含 question、options、answer、explanation；options 是4个选项文本组成的数组，"
-        "answer 只能是 A、B、C、D。"
+        "请根据以下资料生成5道单项选择题。只输出合法 JSON 对象，不要使用 Markdown 代码块。"
+        "对象格式必须是 {\"questions\": [...]}，questions 中每项必须包含 question、options、"
+        "answer、explanation；options 是4个选项文本组成的数组，answer 只能是 A、B、C、D。"
     )
     try:
         _selected, prompt = _pack_contexts(
@@ -3747,6 +4217,9 @@ def parse_quiz_items(response: str) -> list[dict[str, Any]]:
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
     payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError("题目格式不正确")
+    payload = payload.get("questions")
     if not isinstance(payload, list) or len(payload) != 5:
         raise ValueError("题目数量不是 5 道")
     items = []
@@ -3899,7 +4372,6 @@ def build_demo(
     initial_documents, initial_inventory = inventory_view()
     initial_sources = [source for source, _count in initial_documents]
     with gr.Blocks(title=APP_DISPLAY_NAME) as demo:
-        model_state = "本地模型已就绪" if managed_local_model else "模型服务可配置"
         gr.HTML(
             f"""
             <header class="kb-header">
@@ -3907,21 +4379,19 @@ def build_demo(
                     <span class="kb-mark" aria-hidden="true">文</span>
                     <div>
                         <h1 class="kb-title">{APP_DISPLAY_NAME}</h1>
-                        <p class="kb-subtitle">导入个人文档，进行资料问答、原文核对、大纲整理和自测练习</p>
+                        <p class="kb-subtitle">本地文献阅读与学习工作台</p>
                     </div>
                 </div>
-                <div class="kb-header-meta">
-                    <span class="kb-status"><span class="kb-status-dot" aria-hidden="true"></span>{model_state}</span>
-                </div>
+                <div class="kb-crumb">工作台&nbsp;&nbsp;/&nbsp;&nbsp;<strong>个人知识库</strong></div>
             </header>
             """,
             elem_id="kb-header",
             apply_default_css=False,
         )
         with gr.Tabs(elem_id="kb-workspace"):
-            with gr.Tab("文档资料库"):
+            with gr.Tab("资料库"):
                 page_header(
-                    "文档资料库",
+                    "研究资料库",
                     "导入 PDF、TXT 或 DOCX，建立只保存在当前设备上的检索资料库。",
                 )
                 with gr.Row(equal_height=True, elem_classes="kb-library-grid"):
@@ -3941,6 +4411,7 @@ def build_demo(
                         file_input = gr.File(
                             label="选择文档",
                             file_types=[".pdf", ".txt", ".docx"],
+                            height=170,
                         )
                         upload_button = gr.Button(
                             "添加到知识库",
@@ -3987,9 +4458,9 @@ def build_demo(
                                 lines=2,
                                 interactive=False,
                             )
-            with gr.Tab("资料问答与原文比对"):
+            with gr.Tab("资料问答"):
                 page_header(
-                    "资料问答与原文比对",
+                    "资料问答",
                     "限定资料范围后提问，并对照回答实际使用的原文片段与页码。",
                 )
                 source_select = gr.Dropdown(
@@ -3997,6 +4468,9 @@ def build_demo(
                     choices=initial_sources,
                     value=[],
                     multiselect=True,
+                    filterable=False,
+                    elem_id="kb-answer-sources",
+                    elem_classes="kb-source-select",
                     info="范围会应用到下一次提问；比较多篇时请在问题中写出各篇名称。",
                     render=False,
                 )
@@ -4008,17 +4482,16 @@ def build_demo(
                         gr.HTML(
                             """
                             <div class="kb-panel-title">
-                                <h3>资料范围与原文</h3>
-                                <p>不选择文档时检索全部资料。</p>
+                                <h3>原文依据</h3>
+                                <p>本次回答实际使用的检索片段与页码。</p>
                             </div>
                             """,
                             apply_default_css=False,
                         )
-                        source_select.render()
                         gr.HTML(
                             """
                             <div class="kb-context-note">
-                                下方内容是本次回答实际使用的检索片段，不是模型重新生成的摘要。
+                                这里展示检索原文，不是模型重新生成的摘要。
                             </div>
                             """,
                             apply_default_css=False,
@@ -4040,12 +4513,13 @@ def build_demo(
                             """,
                             apply_default_css=False,
                         )
+                        source_select.render()
                         gr.ChatInterface(
                             fn=answer_with_evidence,
                             title=None,
                             description=None,
                             chatbot=gr.Chatbot(
-                                height="clamp(300px, 48vh, 620px)",
+                                height="clamp(300px, 42vh, 560px)",
                                 label="对话",
                             ),
                             textbox=gr.Textbox(
@@ -4062,10 +4536,13 @@ def build_demo(
             with gr.Tab("学习大纲"):
                 page_header(
                     "学习大纲",
-                    "基于所选资料的部分开头片段整理大纲，不保证覆盖全文。",
+                    "按章节顺序整理所选资料的主要内容，参考文献列表不纳入大纲。",
                 )
                 outline_sources = gr.Dropdown(
                     label="大纲资料范围", choices=initial_sources, value=[], multiselect=True,
+                    filterable=False,
+                    elem_id="kb-outline-sources",
+                    elem_classes="kb-source-select",
                     info="不选择时使用全部资料；更改范围后请重新生成。",
                 )
                 with gr.Row(elem_classes=["kb-panel", "kb-action-bar"]):
@@ -4074,7 +4551,7 @@ def build_demo(
                             """
                             <div class="kb-action-copy">
                                 <h3>从所选资料生成大纲</h3>
-                                <p>生成结果采用 Markdown 层级，可继续复制到笔记工具中整理。</p>
+                                <p>每个正文章节至少选取一个代表片段，生成 Markdown 层级结构。</p>
                             </div>
                             """,
                             apply_default_css=False,
@@ -4094,13 +4571,16 @@ def build_demo(
                     lambda sources: generate_mindmap(runtime, source_filter=sources),
                     inputs=[outline_sources], outputs=output,
                 )
-            with gr.Tab("自测习题与测评"):
+            with gr.Tab("自测练习"):
                 page_header(
-                    "自测习题与测评",
+                    "自测习题",
                     "从所选资料中抽取部分片段生成 5 道单项选择题，提交后显示得分与解析。",
                 )
                 quiz_sources = gr.Dropdown(
                     label="自测资料范围", choices=initial_sources, value=[], multiselect=True,
+                    filterable=False,
+                    elem_id="kb-quiz-sources",
+                    elem_classes="kb-source-select",
                     info="不选择时使用全部资料；更改范围后请重新生成题目。",
                 )
                 with gr.Row(elem_classes=["kb-panel", "kb-action-bar"]):
@@ -4212,9 +4692,10 @@ def build_demo(
                                 label="API Key（Ollama 本地服务可留空）",
                                 type="password",
                                 placeholder="云端服务请输入自己的 Key",
+                                info="应用成功后会保留为隐藏圆点，仅在当前运行进程中使用。",
                             )
                     model_service_button = gr.Button(
-                        "应用模型设置",
+                        "检测连接并应用",
                         variant="primary",
                         elem_id="kb-settings-button",
                     )
@@ -4256,7 +4737,7 @@ def build_demo(
             model_service_button.click(
                 lambda base_url, model, api_key: (
                     configure_model_service(base_url, model, api_key, runtime=runtime),
-                    "",
+                    api_key,
                 ),
                 inputs=[base_url_input, model_input, api_key_input],
                 outputs=[model_service_status, api_key_input],
