@@ -27,7 +27,7 @@ TABLE_LABEL_RE = re.compile(r"\btable\s*([A-Za-z]?\d+[A-Za-z]?)\b", re.IGNORECAS
 TABLE_CAPTION_RE = re.compile(r"^\s*table\s*([A-Za-z]?\d+[A-Za-z]?)\b", re.IGNORECASE)
 TABLE_QUESTION_RE = re.compile(
     r"\btables?\s*[A-Za-z]?\d+[A-Za-z]?\b|\b(?:the|this|following|above)\s+tables?\b|"
-    r"表\s*[A-Za-z]?\d+[A-Za-z]?|(?:该|此|下|上|上述|以下)表(?:格)?|表(?:格)?(?:中|内|里|所示)",
+    r"表\s*[A-Za-z]?\d+[A-Za-z]?|(?:该|此|下|上|上述|以下)(?:答案)?表(?:格)?|(?<!答案)表(?:格)?(?:中|内|里|所示)",
     re.IGNORECASE,
 )
 TABLE_ROW_VALUE_QUESTION_RE = re.compile(
@@ -82,14 +82,15 @@ FORMULA_QUESTION_RE = re.compile(
     r"离散(?:后的?)?.{0,20}(?:系统|方程).{0,12}(?:形式|表达式|写成)|"
     r"(?:finite[- ]element|FEM).{0,30}(?:system|equation|kernel|form)|"
     r"(?:system|equation).{0,20}(?:form|written|expression)|"
-    r"(?:初始化|残差|平滑迭代|更新).{0,32}(?:状态|量|过程|形式|如何|什么|更新|iteration|residual)|"
+    r"(?:初始化|残差|平滑迭代|更新).{0,32}(?:状态|量|过程|形式|更新|iteration|residual)|"
     r"(?:限制|延拓|restriction|prolongation).{0,48}(?:操作|算子|网格|层级|stride|循环|cycle|如何|改变)|"
     r"(?:循环|cycle).{0,24}(?:类型|区别|操作|名称|V-cycle|Backslash)|"
     r"(?:PDE|椭圆).{0,40}(?:区域|定义|domain|defined|边界条件|boundary)",
     re.IGNORECASE,
 )
 LIMITATION_QUESTION_RE = re.compile(
-    r"限制|局限|不足|缺点|失败模式|挑战|"
+    # “限制什么/哪些” asks what a constraint acts on, not for shortcomings.
+    r"限制(?!了?(?:什么|哪些|哪[个类种]))|局限|不足|缺点|失败模式|挑战|"
     r"\blimitations?\b|\bdrawbacks?\b|\bfailure\s+modes?\b|"
     r"\b(?:what|which|how)\b.{0,36}\b(?:limitation|challenge|failure)\b",
     re.IGNORECASE,
@@ -588,6 +589,8 @@ def is_limitation_question(question: str) -> bool:
     # operator. Do not attach limitation evidence to an explicit operator/grid
     # question unless an unambiguous failure/shortcoming cue is present.
     if LIMITATION_OPERATOR_RE.search(value) and not UNAMBIGUOUS_LIMITATION_RE.search(value):
+        return False
+    if re.search(r"(?:停止|字数|词数|长度|次数|时间|预算)限制", value) and not UNAMBIGUOUS_LIMITATION_RE.search(value):
         return False
     return True
 
@@ -1882,47 +1885,6 @@ def validate_answer_against_evidence(
     return result
 
 
-def build_evidence_retry_prompt(
-    question: str,
-    answer: str,
-    evidence_ledger: Iterable[str],
-    validation: dict[str, Any],
-    *,
-    max_lines: int = 4,
-) -> str:
-    """Build a bounded second-pass prompt from the validator's literal lines.
-
-    The prompt is intentionally independent of benchmark gold data. It asks a
-    model to preserve supported parts of the first answer and repair only
-    omissions that are visible in the retrieved evidence. Callers decide
-    whether a second API request is affordable; this helper itself performs
-    no network operation and does not imply that the first answer was wrong.
-    """
-
-    answer_text = str(answer or "").strip()
-    flagged = validation.get("flagged_lines") or []
-    evidence_lines = [
-        str(item.get("line", "")).strip()
-        for item in flagged
-        if isinstance(item, dict) and str(item.get("line", "")).strip()
-    ]
-    if not evidence_lines:
-        evidence_lines = [str(line).strip() for line in evidence_ledger if str(line).strip()]
-    evidence_lines = list(dict.fromkeys(evidence_lines))[: max(0, int(max_lines))]
-    evidence_text = "\n".join(f"- {line}" for line in evidence_lines)
-    reason_text = "、".join(str(reason) for reason in validation.get("reasons") or [])
-    return (
-        "请对下面的科学论文答案做一次严格的证据核对并输出修订后的最终答案。\n"
-        "只允许使用‘证据核对项’中逐字出现的信息；保留原答案中已有且有证据支持的内容，"
-        "补齐与问题直接相关而原答案遗漏的数字、工具/模型名和流程步骤。不要把参考文献年份、"
-        "图轴数字或不相关邻近事实当作答案；无法由证据确定时明确说资料未提供。只输出答案正文，"
-        "不要解释自检过程。\n\n"
-        f"【问题】\n{question}\n\n"
-        f"【原答案】\n{answer_text}\n\n"
-        f"【证据核对项】（触发原因：{reason_text or '未分类'}）\n{evidence_text or '- 无可用证据行'}"
-    )
-
-
 def display_table_cell(value: Any) -> str:
     """Remove presentation markup while preserving the cell's value."""
 
@@ -2162,58 +2124,46 @@ def _combine_header_rows(group_line: str, header_line: str) -> str:
     if not any(clean_groups):
         return header_line
 
-    # A common exporter shape is one leading label followed by repeated
-    # ``@1/@5/@10/@20`` metric cycles.  Group fragments sit inside each cycle
-    # (e.g. ``FinH|ybrid``), so align groups to metric slots rather than
-    # assigning the padding cells to the preceding label.
-    metric_indices = [
-        index
-        for index, value in enumerate(clean_metrics)
-        if re.fullmatch(r"@\d+", value)
-    ]
-    if len(metric_indices) >= 4 and len(metric_indices) >= len(clean_metrics) // 2:
-        cycle_width = next(
-            (
-                offset
-                for offset in range(1, len(metric_indices))
-                if clean_metrics[metric_indices[offset]] == clean_metrics[metric_indices[0]]
-            ),
-            0,
-        )
-        if cycle_width >= 2 and len(metric_indices) % cycle_width == 0:
-            combined = list(clean_groups)
-            prefix = metric_indices[0]
-            for index in range(prefix):
-                if not combined[index] and index < len(clean_groups):
-                    combined[index] = clean_groups[index]
-
-            def join_fragments(fragments: list[str]) -> str:
+    # PDF exporters often split a spanning label across the same slots as a
+    # repeated metric cycle (Precision/Recall/F1, PopQA/NQ/TriviaQA, @1/... ).
+    # The cycle boundaries are stronger evidence than capitalization, which
+    # is lost entirely in all-caps labels such as QUESTION ANSWERING.
+    for prefix in range(1, len(clean_metrics)):
+        remaining = clean_metrics[prefix:]
+        for cycle_width in range(2, len(remaining) // 2 + 1):
+            if len(remaining) % cycle_width:
+                continue
+            cycle = remaining[:cycle_width]
+            if not all(cycle) or cycle * (len(remaining) // cycle_width) != remaining:
+                continue
+            combined = [
+                clean_groups[index] or clean_metrics[index]
+                for index in range(prefix)
+            ]
+            for start in range(prefix, len(clean_metrics), cycle_width):
                 label = ""
-                for fragment in fragments:
+                for fragment in clean_groups[start : start + cycle_width]:
                     if not fragment:
                         continue
                     if not label:
                         label = fragment
-                    elif (
-                        fragment[0].islower()
+                        continue
+                    last_token = label.rsplit(" ", 1)[-1]
+                    joins_wrapped_word = (
+                        len(last_token) <= 4
+                        or label.endswith(("-", "_"))
+                        or "-" in last_token
+                        or (last_token.isupper() and fragment.isupper())
                         or (
-                            label.isalpha()
-                            and fragment.isalpha()
-                            and len(label) <= 4
-                            and len(fragment) <= 6
+                            fragment[0].islower()
+                            and any(character.isupper() for character in fragment[1:])
                         )
-                    ):
-                        label += fragment
-                    else:
-                        label += f" {fragment}"
-                return label
-
-            for start in range(0, len(metric_indices), cycle_width):
-                slots = metric_indices[start : start + cycle_width]
-                fragments = clean_groups[slots[0] : slots[-1] + 1]
-                label = join_fragments(fragments)
-                for column in slots:
-                    combined[column] = f"{label} {clean_metrics[column]}".strip()
+                    )
+                    label += ("" if joins_wrapped_word else " ") + fragment
+                combined.extend(
+                    f"{label} {metric}".strip()
+                    for metric in clean_metrics[start : start + cycle_width]
+                )
             return _join_markdown_cells(combined)
 
     spans: list[list[Any]] = []
@@ -4181,6 +4131,17 @@ def _requested_table_columns(question: str, headers: list[str]) -> list[int]:
         if priority_columns:
             return priority_columns
 
+    if question_metrics and named_group_tokens:
+        grouped_columns = [
+            index
+            for index in (direct_requested or fallback_requested)
+            if named_group_tokens & set(
+                re.findall(r"[a-z][a-z0-9+\-]*", normalize_for_match(headers[index]))
+            )
+        ]
+        if grouped_columns:
+            direct_requested = grouped_columns
+
     # When a question names a category plus one metric (for example three
     # task groups' F1 scores), category tokens also occur in sibling metrics
     # such as EM/GPT-EVAL/ROUGE. Keep only the explicitly requested metric.
@@ -4677,16 +4638,6 @@ def table_labels_from_question(question: str) -> tuple[str, ...]:
 
     return tuple(
         dict.fromkeys(match.group(1).upper() for match in TABLE_LABEL_RE.finditer(question or ""))
-    )
-
-
-def table_numbers_from_question(question: str) -> tuple[int, ...]:
-    """Return distinct explicit table numbers in question order."""
-
-    return tuple(
-        int(label)
-        for label in table_labels_from_question(question)
-        if label.isdigit()
     )
 
 

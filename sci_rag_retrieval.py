@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from itertools import zip_longest
 from collections.abc import Hashable, Iterable
 import math
 import re
@@ -42,9 +43,9 @@ def query_variants(question: str, max_variants: int = 4) -> list[str]:
         return []
     base = original.rstrip("？?!。")
     clauses = [part.strip() for part in _CLAUSE_SEPARATOR_RE.split(base) if part.strip()]
-    if len(clauses) == 1:
-        clause = clauses[0]
-        clauses = []
+    expanded_clauses = []
+    for clause in clauses:
+        parts = [clause] if len(clauses) > 1 else []
         for match in _CONJUNCTION_RE.finditer(clause):
             left = clause[: match.start()].strip()
             right = clause[match.end() :].strip()
@@ -53,12 +54,13 @@ def query_variants(question: str, max_variants: int = 4) -> list[str]:
             left_ascii = bool(re.search(r"[A-Za-z0-9]", left))
             right_ascii = bool(re.search(r"[A-Za-z0-9]", right))
             cue = bool(_QUESTION_CUE_RE.search(left + right))
-            if (left_ascii and right_ascii) or cue:
-                clauses = [left, right]
+            if (left_ascii and right_ascii) or (len(clauses) == 1 and cue):
+                parts = [left, right]
                 break
+        expanded_clauses.extend(parts)
 
     variants: list[str] = []
-    for value in [original, *clauses]:
+    for value in [original, *expanded_clauses]:
         value = value.strip()
         if len(value) < 3 or value in variants:
             continue
@@ -75,7 +77,7 @@ def ensure_source_coverage(
     limit: int,
     preferred_order: Iterable[int] | None = None,
 ) -> list[int]:
-    """Promote one candidate per routed source into a bounded context prefix."""
+    """Interleave routed sources so one source cannot fill the context prefix."""
 
     ordered = list(dict.fromkeys(int(index) for index in order))
     metas = list(metadatas)
@@ -93,19 +95,9 @@ def ensure_source_coverage(
         metadata = metas[index] if isinstance(metas[index], dict) else {}
         return str(metadata.get("benchmark_document_id") or metadata.get("source") or "").strip()
 
-    selected: list[int] = []
-    for source in sources:
-        candidate = next(
-            (index for index in preferred if source_for(index) == source),
-            None,
-        )
-        if candidate is None:
-            candidate = next(
-                (index for index in ordered if source_for(index) == source),
-                None,
-            )
-        if candidate is not None and candidate not in selected:
-            selected.append(candidate)
+    candidates = list(dict.fromkeys([*preferred, *ordered]))
+    groups = [[index for index in candidates if source_for(index) == source] for source in sources]
+    selected = [index for row in zip_longest(*groups) for index in row if index is not None]
     prefix = selected[:prefix_limit]
     prefix.extend(
         index for index in ordered if index not in prefix and len(prefix) < prefix_limit

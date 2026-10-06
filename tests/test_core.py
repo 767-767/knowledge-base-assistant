@@ -1,4 +1,5 @@
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
@@ -6,14 +7,14 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import numpy as np
+
 import app
 import sci_rag_core as core
-from sci_rag_reranking import RerankResult
 from sci_rag_retrieval import DocumentRoute, RankedItem
 from sci_rag_core import (
     Chunk,
     build_evidence_ledger,
-    build_evidence_retry_prompt,
     extract_spatial_figure_chunks,
     formula_evidence_indices,
     extract_table_cell,
@@ -29,6 +30,7 @@ from sci_rag_core import (
     limitation_evidence_indices,
     is_table_question,
     matching_table_indices,
+    table_labels_from_question,
     normalize_for_match,
     parse_markdown_table,
     missing_pdf_formula_blocks,
@@ -38,7 +40,6 @@ from sci_rag_core import (
     split_to_chunks,
     supplement_answer_with_evidence,
     supplement_formula_with_evidence,
-    table_numbers_from_question,
     validate_answer_against_evidence,
 )
 
@@ -138,6 +139,21 @@ TABLE_LIVEXIV_AVG = """||LiveXiv|Verified Subset|Absolute Avg.|
 
 
 class CoreTests(unittest.TestCase):
+    def test_stopping_limits_do_not_request_shortcoming_evidence(self):
+        from sci_rag_core import is_limitation_question
+
+        self.assertFalse(is_limitation_question("seed retrieval 和 graph expansion 的停止限制是什么？"))
+        self.assertFalse(is_limitation_question("检索结果的字数限制是多少？"))
+        for question in (
+            "TANQ 中答案单元格条目数的筛选与问题改写都出现了数字五：它们分别限制什么对象、在什么情况下丢弃样本或停止改写？最后添加推理技能时，最多组合多少种不同技能？",
+            "这个阈值限制了哪些样本？",
+        ):
+            with self.subTest(question=question):
+                self.assertFalse(is_limitation_question(question))
+        self.assertTrue(is_limitation_question("字数限制带来了哪些局限和失败模式？"))
+        self.assertTrue(is_limitation_question("模型的限制有哪些？"))
+        self.assertTrue(is_limitation_question("这个阈值限制了哪些样本，这带来了什么局限？"))
+
     def test_routed_numeric_evidence_normalizes_thousands_separator(self):
         class Collection:
             def count(self):
@@ -277,6 +293,33 @@ class CoreTests(unittest.TestCase):
         )
         self.assertIn("Random baseline is 25%", result["contexts"][0])
         self.assertIn("Random baseline is 25%", client.prompt)
+
+    def test_selected_paper_title_identifies_its_own_dataset_in_prompt(self):
+        from unittest.mock import Mock
+
+        collection = Mock()
+        collection.count.return_value = 1
+        collection.query.return_value = {
+            "ids": [["evidence"]],
+            "documents": [["Only 25% of answers in our dataset exceed 80% overlap."]],
+            "metadatas": [[{"source": "paper.pdf", "type": "text", "page": 4}]],
+        }
+        collection.get.return_value = {
+            "metadatas": [{"headers": "H1: **SCIDQA: Scientific QA Dataset**"}]
+        }
+        embedding = Mock()
+        embedding.encode.return_value.tolist.return_value = [1.0, 0.0]
+        client = Mock()
+        client.chat.completions.create.return_value.choices = [
+            Mock(message=Mock(content="25%"), finish_reason="stop")
+        ]
+        runtime = app.Runtime(app.RuntimeConfig(), client, embedding, collection)
+
+        app.query_knowledge("Summarize this study.", runtime=runtime, source_filter=["paper.pdf"])
+
+        prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+        self.assertIn("文档：SCIDQA: Scientific QA Dataset", prompt)
+        self.assertIn("Only 25% of answers in our dataset", prompt)
 
     def test_table_caption_unit_note_preserves_shared_scale(self):
         note = app._table_caption_unit_note(
@@ -586,6 +629,11 @@ class CoreTests(unittest.TestCase):
                 "MgNO 多重网格平滑迭代开始时如何初始化状态，更新时使用什么量？"
             )
         )
+        self.assertFalse(
+            is_formula_question(
+                "LiveXiv 更新基准时，如何避免每一版都重测所有旧模型？"
+            )
+        )
         self.assertTrue(
             is_formula_question(
                 "TC–RAG 如何定义 conditional perplexity 和 uncertainty？"
@@ -710,25 +758,6 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["status"], "review")
         self.assertIn("partial_high_signal_line", result["reasons"])
         self.assertTrue(any(item["text"] == "ADMETLab" for item in result["missing_markers"]))
-
-    def test_evidence_retry_prompt_is_bounded_and_gold_free(self):
-        ledger = [
-            "【片段 1，paper.pdf，Dataset】The annotation pipeline uses DeepSeek-R1.",
-        ]
-        validation = validate_answer_against_evidence(
-            "标注管道如何构建？",
-            "使用专业工具。",
-            ledger,
-        )
-        prompt = build_evidence_retry_prompt(
-            "标注管道如何构建？",
-            "使用专业工具。",
-            ledger,
-            validation,
-        )
-        self.assertIn("DeepSeek-R1", prompt)
-        self.assertIn("保留原答案中已有", prompt)
-        self.assertNotIn("ground_truth", prompt)
 
     def test_evidence_validator_ignores_unmatched_context_and_empty_ledger(self):
         ok = validate_answer_against_evidence(
@@ -940,6 +969,113 @@ class CoreTests(unittest.TestCase):
             [1],
         )
 
+    def test_footnote_attachment_stays_on_source_page_and_skips_ambiguity(self):
+        from types import SimpleNamespace
+
+        snapshot = SimpleNamespace(
+            ids=["right", "other-source", "other-page", "conflict-a", "conflict-b"],
+            texts=[
+                "> 2No human annotation or proprietary API costs.",
+                "> 2Unrelated other-paper claim.",
+                "> 2Unrelated other-page claim.",
+                "> 3First interpretation.",
+                "> 3Conflicting interpretation.",
+            ],
+            metadatas=[
+                {"source": source, "page": page}
+                for source, page in [
+                    ("paper.pdf", 3), ("other.pdf", 3), ("paper.pdf", 4),
+                    ("paper.pdf", 3), ("paper.pdf", 3),
+                ]
+            ],
+        )
+        with patch.object(app, "_get_lexical_snapshot", return_value=snapshot):
+            texts, metas = app._attach_matching_footnotes(
+                ["Cost-free<sup>2</sup> and another point<sup>3</sup>."],
+                [{"source": "paper.pdf", "page": 3, "type": "text"}],
+                None,
+            )
+        self.assertIn("No human annotation", texts[0])
+        self.assertNotIn("Unrelated", texts[0])
+        self.assertNotIn("interpretation", texts[0])
+        self.assertEqual(metas[0]["footnote_chunk_ids"], ["right"])
+
+    def test_list_expansion_ignores_table_headers_that_look_relevant(self):
+        records = [
+            ("anchor", "Rubric overview.", {"source": "paper.pdf", "type": "text", "chunk_index": 1,
+                                           "headers": "H2: YESciEval rubric"}),
+            ("bridge", "Three dimensions follow.", {"source": "paper.pdf", "type": "text", "chunk_index": 2}),
+            ("rubrics", "Cohesion, Conciseness, Readability.", {"source": "paper.pdf", "type": "text", "chunk_index": 3}),
+            ("table", "Unrelated comparison.", {"source": "paper.pdf", "type": "table", "chunk_index": 9,
+                                              "headers": "|YESciEval rubric|YESciEval rubric|"}),
+        ]
+
+        class Collection:
+            def get(self, **_kwargs):
+                return {
+                    "ids": [row[0] for row in records],
+                    "documents": [row[1] for row in records],
+                    "metadatas": [row[2] for row in records],
+                }
+
+        base = {
+            "ids": [["anchor", "table"]],
+            "documents": [[records[0][1], records[3][1]]],
+            "metadatas": [[records[0][2], records[3][2]]],
+        }
+        runtime = app.Runtime(app.RuntimeConfig(), None, None, Collection())
+        result = app._section_expansion_result(
+            "YESciEval rubric 请列出每个维度的名称", base, runtime,
+            source_filter="paper.pdf",
+        )
+        self.assertEqual(result["ids"][0][:3], ["anchor", "bridge", "rubrics"])
+        self.assertNotIn("table", result["ids"][0])
+
+    def test_section_expansion_keeps_cross_page_sentence_in_one_slot(self):
+        records = [
+            ("anchor", "Pipeline overview.", {"source": "paper.pdf", "type": "text", "page": 4,
+                                               "chunk_index": 20, "headers": "H2: Pipeline"}),
+            ("first", "Step 1 uses a seed dataset.", {"source": "paper.pdf", "type": "text", "page": 4,
+                                                         "chunk_index": 21}),
+            ("bridge", "Step 2 collects evidence for ( _a_ ,\n464", {"source": "paper.pdf", "type": "text",
+                                                                         "page": 4, "chunk_index": 22}),
+            ("continued", "_b_ ) from Wikipedia.", {"source": "paper.pdf", "type": "text",
+                                                       "page": 5, "chunk_index": 23}),
+            ("later", "Step 3 uses PaLM-2 to evaluate evidence.", {"source": "paper.pdf", "type": "text",
+                                                                   "page": 5, "chunk_index": 24}),
+        ]
+
+        class Collection:
+            def get(self, **_kwargs):
+                return {
+                    "ids": [row[0] for row in records],
+                    "documents": [row[1] for row in records],
+                    "metadatas": [row[2] for row in records],
+                }
+
+        runtime = app.Runtime(app.RuntimeConfig(context_k=4), None, None, Collection())
+        base = {key: [[values[0]]] for key, values in {
+            "ids": [records[0][0]], "documents": [records[0][1]], "metadatas": [records[0][2]],
+        }.items()}
+        result = app._section_expansion_result(
+            "What roles does the pipeline use, and how does it evaluate evidence?",
+            base, runtime, source_filter="paper.pdf",
+        )
+        self.assertEqual(result["ids"][0][:4], ["anchor", "first", "bridge", "later"])
+        self.assertIn("_b_ ) from Wikipedia", result["documents"][0][2])
+        self.assertEqual(result["metadatas"][0][2]["window_pages"], [4, 5])
+        self.assertEqual(result["metadatas"][0][2]["window_chunk_ids"], ["bridge", "continued"])
+        self.assertIn("第 4–5 页", app.format_evidence_panel({
+            "contexts": [result["documents"][0][2]],
+            "context_metadatas": [result["metadatas"][0][2]],
+        }))
+        records[2] = ("bridge", "Step 2 is complete.\n464", records[2][2])
+        separate = app._section_expansion_result(
+            "What roles does the pipeline use, and how does it evaluate evidence?",
+            base, runtime, source_filter="paper.pdf",
+        )
+        self.assertEqual(separate["ids"][0][:5], ["anchor", "first", "bridge", "continued", "later"])
+
     def test_composite_section_expansion_skips_multi_source_collection(self):
         class Vector(list):
             def tolist(self):
@@ -1007,6 +1143,16 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(is_table_question("表2中哪个模型最好？"))
         self.assertTrue(is_table_question("下表给出了哪些结果？"))
         self.assertTrue(is_table_question("该表格中哪个模型最好？"))
+
+    def test_answer_table_description_keeps_prose_before_unrelated_tables(self):
+        question = "每个扩展关系和三元组分别对应答案表中的什么？"
+        texts = ["Each relation corresponds to a column in the answer table.", "| Model | Score |\n|---|---|\n| Example | 1 |"]
+        metas = [{"type": "text"}, {"type": "table"}]
+        self.assertFalse(is_table_question(question))
+        self.assertEqual(rerank_table_first(question, texts, metas)[0], [0, 1])
+        self.assertTrue(is_table_question("答案表2中哪个模型最好？"))
+        self.assertTrue(is_table_question("该表格中的答案是什么？"))
+        self.assertTrue(is_table_question("该答案表中的数值是多少？"))
 
     def test_figure_reference_distinguishes_main_and_extended_data_figures(self):
         self.assertEqual(
@@ -1797,7 +1943,7 @@ class CoreTests(unittest.TestCase):
 
     def test_multiple_explicit_table_numbers_are_matched_together(self):
         question = "按 Table 1 和 Table 2 计算两项指标的提升。"
-        self.assertEqual(table_numbers_from_question(question), (1, 2))
+        self.assertEqual(table_labels_from_question(question), ("1", "2"))
         self.assertEqual(
             matching_table_indices(
                 question,
@@ -1972,9 +2118,9 @@ class CoreTests(unittest.TestCase):
             "MgNO overview.",
         ]
         metadatas = [
-            {"source": "drugr.pdf", "type": "text", "page": 1},
+            {"source": "drugr.pdf", "type": "text", "page": 1, "headers": "H1: DrugR Study > H2: Method"},
             {"source": "drugr.pdf", "type": "text", "page": 2},
-            {"source": "mgno.pdf", "type": "text", "page": 1},
+            {"source": "mgno.pdf", "type": "text", "page": 1, "headers": "H1: MgNO Study"},
             {"source": "mgno.pdf", "type": "text", "page": 2},
         ]
 
@@ -2033,6 +2179,8 @@ class CoreTests(unittest.TestCase):
         )
         self.assertIn("GRPO", client.prompt)
         self.assertIn("5 levels", client.prompt)
+        self.assertIn("文档：DrugR Study", client.prompt)
+        self.assertIn("文档：MgNO Study", client.prompt)
 
     def test_caption_detection_does_not_match_stable(self):
         markdown = "Figure 5 stable training dynamics.\n\n|x|y|\n|---|---|\n|0|1|"
@@ -2056,8 +2204,84 @@ class CoreTests(unittest.TestCase):
 
 
 class RuntimeContractTests(unittest.TestCase):
-    def test_app_import_has_no_runtime(self):
-        self.assertIsNone(app._runtime)
+    def test_pdf_loader_keeps_column_text_under_its_own_heading(self):
+        import pymupdf
+
+        entries = [
+            ("text", [70, 70, 290, 110], "Left column continuation.\n\n"),
+            ("section-header", [305, 75, 525, 85], "### Implementation Details\n\n"),
+            ("text", [305, 90, 525, 115], "Recall uses thirty candidates.\n\n"),
+            ("text", [70, 120, 290, 150], "Document Reference belongs to the left column.\n\n"),
+            ("section-header", [70, 160, 290, 170], "### Discussion\n\n"),
+            ("text", [70, 180, 290, 220], "Dataset discussion.\n\n"),
+            ("text", [305, 120, 525, 220], "Reranking keeps three candidates.\n\n"),
+            ("page-footer", [285, 780, 315, 792], "12345\n\n"),
+        ]
+        boxes = []
+        text = ""
+        for box_class, bbox, content in entries:
+            boxes.append({"class": box_class, "bbox": bbox, "pos": (len(text), len(text) + len(content))})
+            text += content
+        page_chunk = {"text": text, "page_boxes": boxes}
+        ordered = app._pdf_markdown_in_column_order(page_chunk, 600)
+        self.assertEqual(ordered, "".join(entries[i][2] for i in (0, 3, 4, 5, 1, 2, 6)))
+        self.assertEqual(app._pdf_markdown_in_column_order(page_chunk, 1200), text.replace("12345\n\n", ""))
+        spanning = {**page_chunk, "page_boxes": [dict(box) for box in boxes]}
+        spanning["page_boxes"][0]["bbox"] = [70, 70, 525, 110]
+        self.assertEqual(app._pdf_markdown_in_column_order(spanning, 600), text.replace("12345\n\n", ""))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "columns.pdf"
+            with pymupdf.open() as document:
+                document.new_page(width=600, height=800)
+                document.save(path)
+            with patch("pymupdf4llm.to_markdown", return_value=[page_chunk]):
+                chunks = app.load_and_split_document(str(path))
+        parameter = next(chunk for chunk in chunks if "Reranking" in chunk.page_content)
+        self.assertIn("Implementation Details", parameter.metadata["headers"])
+        self.assertNotIn("Discussion", parameter.metadata["headers"])
+        reference = next(chunk for chunk in chunks if "Document Reference" in chunk.page_content)
+        self.assertNotIn("Implementation Details", reference.metadata.get("headers", ""))
+
+    def test_pdf_loader_keeps_native_page_chunks(self):
+        import pymupdf
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pages.pdf"
+            with pymupdf.open() as document:
+                for text in ("First page contains retrieval evidence.", "Second page contains model evaluation."):
+                    document.new_page().insert_text((72, 72), text)
+                document.save(path)
+            chunks = app.load_and_split_document(str(path))
+        self.assertEqual({chunk.metadata["page"] for chunk in chunks}, {1, 2})
+        self.assertTrue(all(chunk.metadata["source"] == "pages.pdf" for chunk in chunks))
+
+    def test_pdf_loader_repairs_decimal_dot_markdown_artifact(self):
+        import pymupdf
+
+        text = "TANQ answer tables have 6 _._ 7 rows and 4 columns. Value 0.5 stays unchanged."
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "decimal.pdf"
+            with pymupdf.open() as document:
+                document.new_page().insert_text((72, 72), text)
+                document.save(path)
+            with patch("pymupdf4llm.to_markdown", return_value=[{"text": text, "page_boxes": []}]):
+                chunks = app.load_and_split_document(str(path))
+
+        content = "\n".join(chunk.page_content for chunk in chunks)
+        self.assertIn("6.7 rows", content)
+        self.assertIn("Value 0.5", content)
+        self.assertNotIn("6 _._ 7", content)
+
+    def test_import_does_not_initialize_external_resources(self):
+        with (
+            patch("sentence_transformers.SentenceTransformer") as embedding,
+            patch("openai.OpenAI") as client,
+            patch("chromadb.PersistentClient") as database,
+        ):
+            importlib.reload(app)
+        embedding.assert_not_called()
+        client.assert_not_called()
+        database.assert_not_called()
 
     def test_runtime_config_defaults_dense_and_validates_hybrid_settings(self):
         with patch.dict(
@@ -2081,32 +2305,18 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(config.retrieval_mode, "dense")
         self.assertIsNone(config.reranker_model)
 
-    def test_runtime_config_accepts_generic_and_legacy_model_settings(self):
+    def test_runtime_config_accepts_model_settings(self):
         with patch.dict(
             os.environ,
             {
                 "LLM_BASE_URL": "https://generic.example/v1",
                 "LLM_MODEL": "generic-model",
-                "DEEPSEEK_BASE_URL": "https://legacy.example/v1",
-                "DEEPSEEK_MODEL": "legacy-model",
             },
             clear=True,
         ):
             config = app.RuntimeConfig.from_env()
         self.assertEqual(config.llm_base_url, "https://generic.example/v1")
         self.assertEqual(config.llm_model, "generic-model")
-
-        with patch.dict(
-            os.environ,
-            {
-                "DEEPSEEK_BASE_URL": "https://legacy.example/v1",
-                "DEEPSEEK_MODEL": "legacy-model",
-            },
-            clear=True,
-        ):
-            config = app.RuntimeConfig.from_env()
-        self.assertEqual(config.llm_base_url, "https://legacy.example/v1")
-        self.assertEqual(config.llm_model, "legacy-model")
 
     def test_runtime_config_document_routing_is_opt_in(self):
         with patch.dict(os.environ, {"SCI_RAG_DOCUMENT_ROUTING": "true"}, clear=True):
@@ -2242,6 +2452,7 @@ class RuntimeContractTests(unittest.TestCase):
 
     def test_composite_question_detects_shared_predicate_for_named_sources(self):
         self.assertTrue(app._is_composite_fact_question("TANQ 和 FigEx 分别报告了多大规模的数据集？"))
+        self.assertTrue(app._is_composite_fact_question("请列出每个维度下的三个 rubric。"))
         self.assertIn("entries", app._section_query_terms("TANQ 和 FigEx 分别报告了多大规模的数据集？"))
         self.assertIn("columns", app._section_query_terms("答案表平均有多少行和列？"))
 
@@ -2486,6 +2697,33 @@ class RuntimeContractTests(unittest.TestCase):
             result["context_metadatas"][0]["window_chunk_ids"],
             ["anchor", "continuation"],
         )
+        self.assertEqual(result["context_metadatas"][0]["window_pages"], [6, 7])
+
+    def test_parent_window_joins_previous_page_when_anchor_is_continuation(self):
+        class Collection:
+            def count(self):
+                return 2
+
+            def get(self, **_kwargs):
+                return {
+                    "ids": ["start", "anchor"],
+                    "documents": ["Answer tables have 6.7 rows and", "4 columns."],
+                    "metadatas": [
+                        {"source": "paper.pdf", "page": 6, "type": "text", "chunk_index": 2},
+                        {"source": "paper.pdf", "page": 7, "type": "text", "chunk_index": 3},
+                    ],
+                }
+
+        runtime = app.Runtime(app.RuntimeConfig(parent_window=True), None, None, Collection())
+        contexts, metadatas = app._parent_window_contexts(
+            ["4 columns."],
+            ["anchor"],
+            [{"source": "paper.pdf", "page": 7, "type": "text", "chunk_index": 3}],
+            runtime,
+        )
+        self.assertEqual(contexts, ["Answer tables have 6.7 rows and\n\n4 columns."])
+        self.assertEqual(metadatas[0]["window_chunk_ids"], ["start", "anchor"])
+        self.assertEqual(metadatas[0]["window_pages"], [6, 7])
 
     def test_formula_evidence_promotes_same_source_formula_candidate(self):
         class Vector(list):
@@ -2691,6 +2929,22 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("SciDQA 的问题和答案主要从什么材料中产生", seen)
         self.assertIn("之后如何降低第一人称偏差", seen)
 
+    def test_missing_named_identifier_promotes_one_matching_passage(self):
+        lexical = {
+            "ids": [["generic", "metric"]],
+            "documents": [["General evaluation discussion", "M7Score uses token probabilities"]],
+            "metadatas": [[{"source": "paper.pdf"}, {"source": "paper.pdf"}]],
+        }
+        with patch.object(app, "_lexical_route_evidence_result", return_value=lexical) as search:
+            result = app._missing_identifier_result(
+                "How does M7Score work?", ["General evaluation discussion"], None, "paper.pdf"
+            )
+            self.assertEqual(result["ids"], [["metric"]])
+            self.assertIsNone(app._missing_identifier_result(
+                "How does M7Score work?", ["M7Score overview"], None, "paper.pdf"
+            ))
+            search.assert_called_once()
+
     def test_hybrid_lexical_path_excludes_formula_chunk(self):
         class Vector(list):
             def tolist(self):
@@ -2817,6 +3071,56 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertNotIn("Adjacent prose", result["contexts"][0])
         self.assertNotIn("window_chunk_ids", result["context_metadatas"][0])
 
+    def test_inline_picture_markers_can_contain_nonvisual_evidence(self):
+        class Vector(list):
+            def tolist(self):
+                return list(self)
+
+        class Embedding:
+            def encode(self, _message):
+                return Vector([0.1, 0.2])
+
+        text = (
+            "The schema description follows this template.\n"
+            '<!-- Start of picture text -->{"table_name": "<Table Name>", '
+            '"columns": [["<ColName>", "<Type>", "<Examples>"]]}'
+            "<!-- End of picture text -->"
+        )
+
+        class Collection:
+            def count(self):
+                return 1
+
+            def query(self, **_kwargs):
+                return {
+                    "ids": [["one"]],
+                    "documents": [[text]],
+                    "metadatas": [[{"source": "paper.pdf", "type": "text", "page": 5}]],
+                }
+
+        class Client:
+            def __init__(self):
+                self.prompt = ""
+                self.chat = self.completions = self
+
+            def create(self, **kwargs):
+                self.prompt = kwargs["messages"][1]["content"]
+                return type(
+                    "Response", (),
+                    {"choices": [type("Choice", (), {"message": type("Message", (), {"content": "ok"})()})()]},
+                )()
+
+        client = Client()
+        runtime = app.Runtime(
+            app.RuntimeConfig(retrieval_k=1, context_k=1),
+            client, Embedding(), Collection(),
+        )
+        result = app.query_knowledge("What fields does the schema template contain?", runtime=runtime)
+        self.assertIn('"table_name"', result["contexts"][0])
+        self.assertIn("<ColName>", result["contexts"][0])
+        self.assertIn('"table_name"', client.prompt)
+        self.assertIn("<ColName>", client.prompt)
+
     def test_runtime_rejects_reranker_outside_hybrid_mode(self):
         with self.assertRaises(ValueError):
             app.Runtime(app.RuntimeConfig(), None, None, None, reranker=object())
@@ -2866,7 +3170,7 @@ class RuntimeContractTests(unittest.TestCase):
                     RankedItem(item.key, float(len(order) - index))
                     for index, item in enumerate(order)
                 ]
-                return RerankResult(ranked, 0.01, len(ranked), 0)
+                return ranked
 
         class Client:
             def __init__(self):
@@ -3292,9 +3596,539 @@ class RuntimeContractTests(unittest.TestCase):
 
         joined = "\n".join(result["contexts"])
         self.assertIn("80% unigram overlap", joined)
+        self.assertEqual(result["context_ids"], ["evidence", "anchor"])
         self.assertTrue(all(meta.get("source") == "target.pdf" for meta in result["context_metadatas"]))
 
+    def test_dense_first_hit_does_not_displace_source_local_method_evidence(self):
+        from unittest.mock import Mock
+
+        ids = ["filter", "rephrase", "experiment", "skills"]
+        texts = [
+            "Discard a sample when a single cell has more than five entries.",
+            "Rephrase up to five times; stop when all relations are present.",
+            "Performance decreases as the number of skills increases.",
+            "Combine up to three distinct skills when constructing a question.",
+        ]
+        metas = [{"source": "paper.pdf", "type": "text"} for _ in ids]
+        collection = Mock()
+        collection.count.return_value = 5
+        collection.query.return_value = {
+            "ids": [["overview"]], "documents": [["Paper overview."]],
+            "metadatas": [[{"source": "paper.pdf", "type": "text"}]],
+        }
+        collection.get.return_value = {
+            "ids": ids, "documents": texts, "metadatas": metas,
+        }
+        embedding = Mock()
+        embedding.encode.return_value.tolist.return_value = [1.0, 0.0]
+        client = Mock()
+        client.chat.completions.create.return_value.choices = [
+            Mock(message=Mock(content="ok"), finish_reason="stop")
+        ]
+        runtime = app.Runtime(app.RuntimeConfig(context_k=4), client, embedding, collection)
+        with patch.object(app, "_lexical_route_evidence_result", return_value={
+            "ids": [ids], "documents": [texts], "metadatas": [metas],
+        }), patch.object(app, "_section_expansion_result", return_value=None):
+            result = app.query_knowledge(
+                "筛选、改写与添加技能分别有什么条件？", runtime=runtime,
+                source_filter="paper.pdf",
+            )
+        self.assertEqual(result["context_ids"], ids)
+        prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+        self.assertIn(texts[3], prompt)
+
+    def test_route_lexical_statistics_ignore_other_sources(self):
+        from types import SimpleNamespace
+
+        results = []
+        for foreign_text in ("alpha " * 20, "beta " * 20):
+            texts = ["alpha alpha", foreign_text, "beta beta", "alpha beta table"]
+            snapshot = SimpleNamespace(
+                ids=["alpha", "foreign", "beta", "table"], texts=texts,
+                metadatas=[
+                    {"source": source, "type": kind}
+                    for source, kind in (("chosen", "text"), ("other", "text"),
+                                         ("chosen", "text"), ("chosen", "table"))
+                ],
+                lexical_indices=list(range(4)), index=app.BM25Index(texts),
+            )
+            with patch.object(app, "_get_lexical_snapshot", return_value=snapshot):
+                results.append(app._lexical_route_evidence_result(
+                    "alpha beta", None, SimpleNamespace(document_id="chosen")
+                ))
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(results[0]["ids"][0], ["alpha", "beta"])
+
+    def test_route_lexical_ignores_unmatched_followup_clause(self):
+        from types import SimpleNamespace
+
+        texts = ["Introduction.", "Unanswered ratio is defined here.",
+                 "Acceptable ratio is defined here."]
+        snapshot = SimpleNamespace(
+            ids=["intro", "unanswered", "acceptable"], texts=texts,
+            metadatas=[{"source": "paper.pdf", "type": "text"} for _ in texts],
+            lexical_indices=list(range(len(texts))),
+        )
+        with patch.object(app, "_get_lexical_snapshot", return_value=snapshot):
+            result = app._lexical_route_evidence_result(
+                "unanswered ratio 和 acceptable ratio 如何定义？两者评估行为有何区别？",
+                None, SimpleNamespace(document_id="paper.pdf"),
+            )
+        self.assertCountEqual(result["ids"][0][:2], ["acceptable", "unanswered"])
+
+    def test_route_lexical_follows_same_source_caption_without_adjacent_method(self):
+        from types import SimpleNamespace
+
+        snapshot = SimpleNamespace(
+            ids=["method", "unrelated", "detail", "foreign", "caption"],
+            texts=["Retrieval uses BM25; see Figure 7.", "A different method.",
+                   "Retrieval details.", "Figure 7: incorrect source.",
+                   "Figure 7: The top-3 passages are supplied to the model."],
+            metadatas=[{"source": source} for source in ("a", "a", "a", "b", "a")],
+            lexical_indices=list(range(5)),
+            index=SimpleNamespace(retrieve=lambda *args, **kwargs: [
+                SimpleNamespace(key=0), SimpleNamespace(key=2), SimpleNamespace(key=1)
+            ]),
+        )
+        with patch.object(app, "_get_lexical_snapshot", return_value=snapshot), \
+                patch.object(app, "BM25Index", return_value=snapshot.index):
+            result = app._lexical_route_evidence_result(
+                "如何切分和检索？", None, SimpleNamespace(document_id="a")
+            )
+            self.assertEqual(result["ids"][0], ["method", "caption", "detail", "unrelated"])
+            snapshot.texts[0] = "Retrieval uses BM25 without a figure reference."
+            result = app._lexical_route_evidence_result(
+                "如何切分和检索？", None, SimpleNamespace(document_id="a")
+            )
+            self.assertEqual(result["ids"][0], ["method", "detail", "unrelated"])
+
+    def test_route_lexical_keeps_cross_page_sentence_before_footnote_caption(self):
+        from types import SimpleNamespace
+
+        texts = [
+            "Filter samples with more than five entries.<sup>4</sup>\n"
+            "Question rephrasing starts similarly to\n4See Figure 4 for the prompt.\n465",
+            "|Count|23|", "the earlier step. Run up to 5 iterations; stop when all relations are present.",
+            "Step 5. Combine up to three distinct skills.", "Figure 4: Evidence evaluation prompt.",
+            "the wrong source's continuation.",
+        ]
+        metas = [
+            {"source": "paper.pdf", "type": kind, "chunk_index": index, "page": page}
+            for index, (kind, page) in enumerate([
+                ("text", 5), ("table", 5), ("text", 6), ("text", 6), ("text", 18),
+            ])
+        ] + [{"source": "other.pdf", "type": "text", "chunk_index": 1, "page": 6}]
+        snapshot = SimpleNamespace(
+            ids=[str(i) for i in range(6)], texts=texts, metadatas=metas,
+            lexical_indices=[0, 2, 3, 4, 5],
+            index=SimpleNamespace(retrieve=lambda *args, **kwargs: [
+                SimpleNamespace(key=0), SimpleNamespace(key=2), SimpleNamespace(key=3),
+            ]),
+        )
+        with patch.object(app, "_get_lexical_snapshot", return_value=snapshot), \
+                patch.object(app, "BM25Index", return_value=snapshot.index):
+            result = app._lexical_route_evidence_result(
+                "筛选、改写和技能分别如何限制？", None, SimpleNamespace(document_id="paper.pdf")
+            )
+            self.assertEqual(result["ids"][0][:3], ["0", "2", "3"])
+            self.assertEqual(result["documents"][0][:3], [texts[0], texts[2], texts[3]])
+            self.assertNotIn("5", result["ids"][0])
+            for change in ({"page": 7}, {"headers": "H2: Next section"}, {"chunk_index": 8}):
+                with self.subTest(change=change):
+                    snapshot.metadatas[2] = {**metas[2], **change}
+                    result = app._lexical_route_evidence_result(
+                        "筛选、改写和技能分别如何限制？", None, SimpleNamespace(document_id="paper.pdf")
+                    )
+                    self.assertNotIn("2", result["ids"][0])
+                    snapshot.metadatas[2] = {"source": "paper.pdf", "type": "text", "chunk_index": 2, "page": 6}
+            snapshot.texts[2] = "Step 5. A separate method starts here."
+            result = app._lexical_route_evidence_result(
+                "筛选、改写和技能分别如何限制？", None, SimpleNamespace(document_id="paper.pdf")
+            )
+            self.assertEqual(result["ids"][0][:2], ["0", "4"])
+            self.assertNotIn("2", result["ids"][0])
+        self.assertFalse(app._is_cross_page_continuation("The count is 465", "the earlier step."))
+        self.assertFalse(app._is_cross_page_continuation("A complete sentence.\n465", "the earlier step."))
+
+    def test_route_lexical_method_question_uses_prose_not_version_table(self):
+        from types import SimpleNamespace
+
+        texts = [
+            "Method Alpha (AnsInt) Method Beta (CxtInt) results.",
+            "Method Alpha (AnsInt) Method Beta (CxtInt) results.",
+            "The AnsInt variant integrates answers; the CxtInt variant integrates contexts.",
+        ]
+        snapshot = SimpleNamespace(
+            ids=["table1", "table2", "method"], texts=texts,
+            metadatas=[
+                {"source": "paper.pdf", "type": kind}
+                for kind in ("table", "table", "text")
+            ],
+            lexical_indices=list(range(3)), index=app.BM25Index(texts),
+        )
+        with patch.object(app, "_get_lexical_snapshot", return_value=snapshot):
+            result = app._lexical_route_evidence_result(
+                "AnsInt 与 CxtInt 分别整合什么？", None,
+                SimpleNamespace(document_id="paper.pdf"),
+            )
+        self.assertEqual(result["ids"][0], ["method"])
+
+    def test_route_lexical_classification_keeps_contiguous_list(self):
+        from types import SimpleNamespace
+
+        texts = [
+            "General hallucination statistics.",
+            "Hallucination Taxonomy: four types. Evident conflict.",
+            "Subtle conflict.",
+            "Evident baseless and subtle baseless information.",
+            "Response generation starts here.",
+        ]
+        headers = [
+            "H2: Statistics", "H2: Construction > H3: Taxonomy",
+            "H2: Construction > H3: Taxonomy",
+            "H2: Construction > H3: Evident Baseless",
+            "H2: Construction > H3: 3.2 Response Generation",
+        ]
+        snapshot = SimpleNamespace(
+            ids=[str(i) for i in range(5)], texts=texts,
+            metadatas=[
+                {"source": "paper.pdf", "type": "text", "chunk_index": i,
+                 "headers": header}
+                for i, header in enumerate(headers)
+            ],
+            lexical_indices=list(range(5)), index=app.BM25Index(texts),
+        )
+        with patch.object(app, "_get_lexical_snapshot", return_value=snapshot):
+            result = app._lexical_route_evidence_result(
+                "幻觉分为哪几类？", None,
+                SimpleNamespace(document_id="paper.pdf"),
+            )
+        self.assertEqual(result["ids"][0][:3], ["1", "2", "3"])
+        self.assertNotIn("4", result["ids"][0][:3])
+
+    def test_list_question_keeps_a_cross_page_list_after_a_colon(self):
+        from types import SimpleNamespace
+
+        texts = [
+            "The paper defines six categories of unanswerable requests.",
+            "It rejects six categories of unanswerable requests:",
+            "_Underspecified_, _False-presuppositions_, _Nonsensical_, _Modality-limited_, _Safety Concerns_, and _Out-of-Database_.",
+            "The conclusion compares evaluation metrics.",
+        ]
+        headers = ["H2: Taxonomy", "H2: Introduction", "", "H2: Conclusion"]
+        snapshot = SimpleNamespace(
+            ids=[str(index) for index in range(4)], texts=texts,
+            metadatas=[
+                {"source": "paper.pdf", "type": "text", "chunk_index": index,
+                 "page": 1 if index < 2 else 2, "headers": headers[index]}
+                for index in range(4)
+            ],
+            lexical_indices=list(range(4)),
+            index=SimpleNamespace(retrieve=lambda *args, **kwargs: [
+                SimpleNamespace(key=0), SimpleNamespace(key=1), SimpleNamespace(key=3),
+            ]),
+        )
+        with patch.object(app, "_get_lexical_snapshot", return_value=snapshot), \
+                patch.object(app, "BM25Index", return_value=snapshot.index):
+            result = app._lexical_route_evidence_result(
+                "不可回答请求分为哪六类？", None, SimpleNamespace(document_id="paper.pdf")
+            )
+        self.assertEqual(result["ids"][0][:2], ["1", "2"])
+
+    def test_route_lexical_causal_and_list_questions_keep_section_continuation(self):
+        from types import SimpleNamespace
+
+        texts = ["Generic overview.", "Method explains the first step.",
+                 "|count|2|", "The explanation finishes after the table.",
+                 "Next section."]
+        metas = [
+            {"source": "paper.pdf", "type": kind, "chunk_index": index,
+             **({"headers": header} if header else {})}
+            for index, (kind, header) in enumerate([
+                ("text", ""), ("text", "H2: Ablation Method"),
+                ("table", "|count|"), ("text", ""), ("text", "H2: Next"),
+            ])
+        ]
+        snapshot = SimpleNamespace(
+            ids=[str(index) for index in range(5)], texts=texts,
+            metadatas=metas, lexical_indices=[0, 1, 3, 4],
+            index=SimpleNamespace(retrieve=lambda *args, **kwargs: [
+                SimpleNamespace(key=0), SimpleNamespace(key=1), SimpleNamespace(key=2),
+            ]),
+        )
+        with patch.object(app, "_get_lexical_snapshot", return_value=snapshot), \
+                patch.object(app, "BM25Index", return_value=snapshot.index):
+            result = app._lexical_route_evidence_result(
+                "为什么这样做？", None, SimpleNamespace(document_id="paper.pdf")
+            )
+            listed = app._lexical_route_evidence_result(
+                "消融版本请列出每个版本的做法。", None,
+                SimpleNamespace(document_id="paper.pdf"),
+            )
+        self.assertEqual(result["ids"][0][:3], ["1", "3", "0"])
+        self.assertEqual(listed["ids"][0][:3], ["1", "3", "0"])
+        self.assertIn("ablation", app._section_query_terms("消融版本"))
+        self.assertNotIn("2", result["ids"][0])
+
+    def test_english_list_uses_first_lexical_hit_and_its_continuation(self):
+        from types import SimpleNamespace
+
+        texts = [
+            "Overview.", "Evaluation rubrics begin here.",
+            "The nine rubrics are grouped into three dimensions.",
+            "Cohesion, Conciseness and Readability are the first three.",
+            "Related work compares other evaluation rubrics.",
+        ]
+        snapshot = SimpleNamespace(
+            ids=[str(index) for index in range(5)], texts=texts,
+            metadatas=[
+                {"source": "paper.pdf", "type": "text", "chunk_index": index,
+                 **({"headers": header} if header else {})}
+                for index, header in enumerate([
+                    "H2: Overview", "H2: Evaluation Rubrics", "", "",
+                    "H2: Related Work > H3: Evaluation Rubrics",
+                ])
+            ],
+            lexical_indices=list(range(5)),
+            index=SimpleNamespace(retrieve=lambda *args, **kwargs: [
+                SimpleNamespace(key=2), SimpleNamespace(key=4),
+                SimpleNamespace(key=1),
+            ]),
+        )
+        question = "Which three rubrics belong to each dimension?"
+        self.assertTrue(app._source_local_evidence_requested(question))
+        with patch.object(app, "_get_lexical_snapshot", return_value=snapshot), \
+                patch.object(app, "BM25Index", return_value=snapshot.index):
+            result = app._lexical_route_evidence_result(
+                question, None, SimpleNamespace(document_id="paper.pdf")
+            )
+        self.assertEqual(result["ids"][0][:3], ["2", "3", "4"])
+
+    def test_chinese_retrieval_terms_find_english_evidence_in_selected_source(self):
+        from types import SimpleNamespace
+
+        texts = ["An unrelated overview.", "Candidate sentences are selected.",
+                 "Reranking orders the passages.", "Seed sentences start the search.",
+                 "Expansion will stop when evidence is sufficient.",
+                 "Samples with excessive cell entries are filtered out.",
+                 "Question rephrasing preserves relations.",
+                 "We combine up to three distinct skills for augmentation.",
+                 "Candidate sentences, reranking, seed sentences, expansion stop, filtered entries, rephrasing and skills."]
+        snapshot = SimpleNamespace(
+            ids=["overview", "candidates", "rerank", "seed", "stop", "filter", "rephrase", "skills", "foreign"],
+            texts=texts,
+            metadatas=[{"source": "other" if i == 8 else "chosen"} for i in range(9)],
+            lexical_indices=list(range(9)), index=app.BM25Index(texts),
+        )
+        with patch.object(app, "_get_lexical_snapshot", return_value=snapshot):
+            for question, expected in (("候选句如何选？", "candidates"),
+                                       ("如何重排？", "rerank"),
+                                       ("种子怎么选择？", "seed"),
+                                       ("扩展何时结束？", "stop"),
+                                       ("筛选步骤是什么？", "filter"),
+                                       ("如何改写？", "rephrase"),
+                                       ("最多组合几种技能？", "skills"),
+                                       ("How does filtering work?", "filter"),
+                                       ("Which samples are not kept during filtering?", "filter"),
+                                       ("How does rephrasing work?", "rephrase"),
+                                       ("How many skills can be combined?", "skills")):
+                with self.subTest(question=question):
+                    self.assertTrue(app._source_local_evidence_requested(question))
+                    result = app._lexical_route_evidence_result(
+                        question, None, SimpleNamespace(document_id="chosen")
+                    )
+                    self.assertEqual(result["ids"][0][0], expected)
+                    self.assertNotIn("foreign", result["ids"][0])
+        terms = app._section_query_terms("单元格条目有多少，筛选、改写和技能有哪些步骤？")
+        self.assertTrue({"entries", "filtered", "rephrasing", "skills", "number", "count"} <= terms)
+        self.assertFalse({"dataset", "size", "statistics"} & terms)
+
+    def test_bias_question_reaches_english_evidence_in_selected_source(self):
+        from types import SimpleNamespace
+
+        texts = [
+            "The model led the ranking.",
+            "The question-filtering process may introduce a potential bias in evaluation.",
+            "An unrelated bias in another paper.",
+        ]
+        snapshot = SimpleNamespace(
+            ids=["ranking", "bias", "other"], texts=texts,
+            metadatas=[{"source": source, "type": "text"} for source in ("chosen", "chosen", "other")],
+            lexical_indices=[0, 1, 2], index=app.BM25Index(texts),
+        )
+        question = "结果领先为什么仍可能存在偏差？"
+        self.assertTrue(app._source_local_evidence_requested(question))
+        with patch.object(app, "_get_lexical_snapshot", return_value=snapshot):
+            result = app._lexical_route_evidence_result(
+                question, None, SimpleNamespace(document_id="chosen")
+            )
+        self.assertEqual(result["ids"][0][0], "bias")
+        self.assertNotIn("other", result["ids"][0])
+
+    def test_two_questions_keep_evidence_for_each_clause(self):
+        from types import SimpleNamespace
+
+        texts = [
+            "Task-level ablation of TQA, TFV and FF-TQA reward training.",
+            "Format ablation tests response layout and reward supervision.",
+            "Accuracy rewards: TQA exact match, TFV label match, FF-TQA BLEU and ROUGE-L.",
+            "A format reward requires the template <think>...</think> <answer>{\"answer\": ...}</answer>.",
+            "Prompt template for TFV answers.",
+            "TFV format reward ablation compares template and output structure.",
+        ]
+        snapshot = SimpleNamespace(
+            ids=["ablation-task", "ablation-format", "accuracy", "format", "prompt", "ablation-other"],
+            texts=texts,
+            metadatas=[{"source": "chosen", "type": "text"} for _ in texts],
+            lexical_indices=list(range(len(texts))),
+        )
+        question = "TQA、TFV 和 FF-TQA 分别使用什么准确性奖励？格式奖励要求输出什么结构？"
+        with patch.object(app, "_get_lexical_snapshot", return_value=snapshot):
+            result = app._lexical_route_evidence_result(
+                question, None, SimpleNamespace(document_id="chosen")
+            )
+        self.assertTrue({"accuracy", "format"} <= set(result["ids"][0][:4]))
+
+    def test_shared_dense_clause_evidence_survives_source_local_fallback(self):
+        from types import SimpleNamespace
+
+        question = "图像和文本的总体差异是什么？四种格式的最大差距是多少？"
+        clauses = [part for part in question.split("？") if part]
+        names = ["first", "second", "shared", "fourth", "other"]
+        documents = {name: f"Evidence {name}." for name in names}
+        metadatas = {name: {"source": "paper.pdf", "type": "text"} for name in names}
+
+        class Embedding:
+            def encode(self, value):
+                return SimpleNamespace(tolist=lambda: [value])
+
+        class Collection:
+            def __init__(self, overlap=True):
+                self.overlap = overlap
+
+            def count(self):
+                return 5
+
+            def query(self, **kwargs):
+                value = kwargs["query_embeddings"][0][0]
+                ids = (
+                    ["first", "second", "shared", "fourth"] if value == question else
+                    ["first", "shared", "fourth"] if value == clauses[0] else
+                    ["other", "shared", "second"] if self.overlap else ["other", "second"]
+                )[:kwargs["n_results"]]
+                return {
+                    "ids": [ids],
+                    "documents": [[documents[name] for name in ids]],
+                    "metadatas": [[metadatas[name] for name in ids]],
+                }
+
+            def get(self, **_kwargs):
+                return {"ids": [], "documents": [], "metadatas": []}
+
+        lexical = {
+            "ids": [["first", "second", "fourth"]],
+            "documents": [[documents[name] for name in ("first", "second", "fourth")]],
+            "metadatas": [[metadatas[name] for name in ("first", "second", "fourth")]],
+        }
+        runtime = app.Runtime(
+            app.RuntimeConfig(context_k=3), None, Embedding(), Collection()
+        )
+        with (
+            patch.object(app, "_numeric_route_evidence_result", return_value=None),
+            patch.object(app, "_lexical_route_evidence_result", return_value=lexical),
+            patch.object(app, "_section_expansion_result", return_value=None),
+            patch.object(app, "_missing_identifier_result", return_value=None),
+        ):
+            result = app.query_knowledge(question, runtime, source_filter=["paper.pdf"])
+            runtime.collection = Collection(overlap=False)
+            no_overlap = app.query_knowledge(question, runtime, source_filter=["paper.pdf"])
+        self.assertEqual(result["context_ids"], ["shared", "first", "second"])
+        self.assertEqual(no_overlap["context_ids"], ["first", "second", "fourth"])
+
+    def test_blind_test_question_uses_english_filtering_terms(self):
+        question = "盲测后如何检查错误答案？"
+        self.assertTrue(app._source_local_evidence_requested(question))
+        self.assertTrue(
+            {"blind test", "incorrect", "ground-truth"}
+            <= app._section_query_terms(question)
+        )
+        self.assertIn("filtered", app._section_query_terms("How does filtering work?"))
+        self.assertTrue({"answer", "table", "cell", "entry"} <= app._section_query_terms(
+            "During answer-table filtering, what cell-entry threshold keeps a sample?"
+        ))
+        self.assertTrue({"context", "length"} <= app._section_query_terms(
+            "Which context-length cutoff excludes oracle models?"
+        ))
+        self.assertNotIn("qwen", app._section_query_terms("Qwen-2.5-72b"))
+        self.assertTrue({"triple", "triples"} <= app._section_query_terms(
+            "每个扩展三元组分别对应答案表中的什么？"
+        ))
+        self.assertTrue({"chunk", "chunked", "tokens", "iteration", "iterations", "iterative"} <= app._section_query_terms(
+            "文本块长度和在线推理迭代次数分别是多少？"
+        ))
+        self.assertTrue(app._source_local_evidence_requested(
+            "TANQ 的问题改写是否必须做满五次才停止？如果第一次改写已经包含所有关系，该如何处理？"
+        ))
+
+    def test_acronym_suffix_matches_split_pdf_emphasis(self):
+        terms = app._section_query_terms("LLMgen 和 LLMeval 两项任务分别做什么？")
+        self.assertTrue({"llmgen", "llmeval", "llm", "gen", "eval"} <= terms)
+
+    def test_named_ratio_requests_local_evidence_without_matching_generation(self):
+        self.assertTrue(app._source_local_evidence_requested(
+            "unanswered ratio 和 acceptable ratio 分别如何定义？"
+        ))
+        self.assertFalse(app._source_local_evidence_requested("How is text generation implemented?"))
+
+    def test_scientific_prompt_preserves_in_scope_safety_rules(self):
+        ordinary = app._scientific_system_prompt("比较两篇论文的评测目标", [])
+        self.assertNotIn("【强制规则 4：", ordinary)
+        self.assertNotIn("【强制规则 6：", ordinary)
+        for rule in ("数值必须原样引用", "图形坐标文字不得跨视觉组拼接", "严禁编造"):
+            self.assertIn(rule, ordinary)
+        self.assertNotIn("资料未提供该趋势的明确依据", ordinary)
+        self.assertIn("严禁跨表取数", app._scientific_system_prompt("Table 2 中的得分？", []))
+        self.assertIn("严禁跨表取数", app._scientific_system_prompt("哪些方法得分较高？", [{"type": "table"}]))
+        self.assertIn("公式与符号必须按证据转录", app._scientific_system_prompt("公式是什么？", []))
+        self.assertEqual(app._scientific_system_prompt("解释这些证据", [{"type": "table"}, {"type": "formula"}]),
+                         app.SCIENTIFIC_SYSTEM_PROMPT)
+
+    def test_answer_table_filtering_does_not_invent_statistics_intent(self):
+        from types import SimpleNamespace
+
+        question = "TANQ 在筛选时会丢弃什么情况的答案表？"
+        self.assertTrue(app._source_local_evidence_requested(question))
+        terms = app._section_query_terms(question)
+        self.assertTrue({"answer", "table", "filtered"} <= terms)
+        self.assertFalse({"rows", "columns", "statistics"} & terms)
+        self.assertTrue({"rows", "columns", "statistics", "average"} <=
+                        app._section_query_terms("答案表平均有多少行和多少列？"))
+        texts = [
+            "Dataset statistics: 6.7 rows and 4 columns in tables.",
+            "Samples with more than five entries in any single cell of the answer table are filtered out.",
+            "Samples with more than five entries in any single cell of the answer table are filtered out.",
+        ]
+        snapshot = SimpleNamespace(
+            ids=["statistics", "filter", "foreign"], texts=texts,
+            metadatas=[{"source": source, "type": "text"} for source in ("chosen", "chosen", "other")],
+            lexical_indices=[0, 1, 2], index=app.BM25Index(texts),
+        )
+        with patch.object(app, "_get_lexical_snapshot", return_value=snapshot):
+            result = app._lexical_route_evidence_result(
+                question, None, SimpleNamespace(document_id="chosen")
+            )
+        self.assertEqual(result["ids"][0][0], "filter")
+        self.assertNotIn("foreign", result["ids"][0])
+
     def test_section_aliases_cover_source_local_method_terms(self):
+        for question in (
+            "实体筛选和相似句的设置是什么？",
+            "多文档与图像的实验边界是什么？",
+            "幻觉分为哪几类？",
+            "两个版本分别整合什么？",
+        ):
+            self.assertTrue(app._source_local_evidence_requested(question))
+        self.assertIn("multimodal", app._section_query_terms("图像像素"))
         terms = app._section_query_terms(
             "作者用什么阈值寻找答案与论文段落的重叠，多少比例的答案超过该重叠阈值？"
         )
@@ -3796,6 +4630,34 @@ class RuntimeContractTests(unittest.TestCase):
                 app.add_document_to_db(handle.name, runtime=runtime)
         self.assertIsNone(runtime._lexical_snapshot)
 
+    def test_reimport_replaces_stale_parse_only_after_success(self):
+        import chromadb
+        from unittest.mock import Mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / "paper.txt"
+            file.write_text("unchanged source", encoding="utf-8")
+            collection = chromadb.PersistentClient(path=str(Path(directory) / "db")).get_or_create_collection("reimport")
+            embedding = Mock()
+            embedding.encode.side_effect = lambda texts: np.array([[1.0, 0.0] for _ in texts])
+            runtime = app.Runtime(app.RuntimeConfig(), None, embedding, collection)
+            with patch.object(app, "load_and_split_document", return_value=[Chunk("old parse", {})]):
+                app.add_document_to_db(str(file), runtime)
+            collection.add(ids=["other"], documents=["other document"], embeddings=[[0.0, 1.0]], metadatas=[{"source": "other.txt"}])
+            with patch.object(app, "load_and_split_document", return_value=[Chunk("new parse", {})]):
+                embedding.encode.side_effect = RuntimeError("embedding failed")
+                with self.assertRaisesRegex(RuntimeError, "embedding failed"):
+                    app.add_document_to_db(str(file), runtime)
+                self.assertIn("old parse", collection.get()["documents"])
+                embedding.encode.side_effect = lambda texts: np.array([[1.0, 0.0] for _ in texts])
+                app.add_document_to_db(str(file), runtime)
+                app.add_document_to_db(str(file), runtime)
+            self.assertCountEqual(collection.get()["documents"], ["new parse", "other document"])
+            with patch.object(app, "load_and_split_document", return_value=[]):
+                with self.assertRaisesRegex(ValueError, "没有可导入的文本"):
+                    app.add_document_to_db(str(file), runtime)
+            self.assertCountEqual(collection.get()["documents"], ["new parse", "other document"])
+
     def test_upload_batches_chunks_and_disambiguates_same_named_files(self):
         class Embedding:
             def __init__(self):
@@ -3803,7 +4665,7 @@ class RuntimeContractTests(unittest.TestCase):
 
             def encode(self, texts):
                 self.batch_sizes.append(len(texts))
-                return [[0.1, 0.2] for _text in texts]
+                return np.array([[0.1, 0.2] for _text in texts])
 
         class Collection:
             def __init__(self):
@@ -3862,20 +4724,16 @@ class RuntimeContractTests(unittest.TestCase):
         second_source = next(source for source in sources if source != "report.txt")
         self.assertEqual(embedding.batch_sizes, [64, 1, 1])
         self.assertTrue(second_source.startswith("report ("))
-        app.delete_document(second_source, True, runtime)
+        app.delete_document(second_source, True, runtime=runtime)
         self.assertEqual(
             {metadata[1]["source"] for metadata in collection.records.values()},
             {"report.txt"},
         )
 
     def test_formula_storage_keeps_existing_chunk_indices_and_ids(self):
-        class Vector(list):
-            def tolist(self):
-                return list(self)
-
         class Embedding:
             def encode(self, texts):
-                return [Vector([0.1, 0.2]) for _text in texts]
+                return np.array([[0.1, 0.2] for _text in texts])
 
         class Collection:
             def __init__(self):
@@ -4014,7 +4872,7 @@ class RuntimeContractTests(unittest.TestCase):
         class Reranker:
             def rerank(self, _question, candidates, _documents):
                 ranked = [RankedItem(item.key, 1.0) for item in reversed(candidates)]
-                return RerankResult(ranked, 0.01, len(ranked), 0)
+                return ranked
 
         runtime = app.Runtime(
             config, Client(), Embedding(), Collection(), reranker=Reranker()
@@ -4068,6 +4926,7 @@ class RuntimeContractTests(unittest.TestCase):
     def test_document_inventory_and_confirmed_deletion(self):
         digest = "a" * 64
         shared_digest = "b" * 64
+        third_digest = "c" * 64
 
         class Collection:
             def __init__(self):
@@ -4075,6 +4934,7 @@ class RuntimeContractTests(unittest.TestCase):
                     ("a-1", {"source": "a.pdf", "document_sha256": digest}),
                     ("a-2", {"source": "a.pdf", "document_sha256": shared_digest}),
                     ("b-1", {"source": "b.txt", "document_sha256": shared_digest}),
+                    ("c-1", {"source": "c.txt", "document_sha256": third_digest}),
                 ]
                 self.deleted = []
 
@@ -4110,33 +4970,43 @@ class RuntimeContractTests(unittest.TestCase):
             source_pdf.write_bytes(b"pdf")
             shared_pdf = source_pdf.with_name(f"{shared_digest}.pdf")
             shared_pdf.write_bytes(b"pdf")
+            third_pdf = source_pdf.with_name(f"{third_digest}.pdf")
+            third_pdf.write_bytes(b"pdf")
 
-            self.assertEqual(app.document_inventory(runtime), [("a.pdf", 2), ("b.txt", 1)])
-            self.assertEqual(app.delete_document("a.pdf", False, runtime), "请先确认删除。")
+            self.assertEqual(
+                app.document_inventory(runtime),
+                [("a.pdf", 2), ("b.txt", 1), ("c.txt", 1)],
+            )
+            self.assertEqual(
+                app.delete_document(["a.pdf", "c.txt"], False, runtime=runtime),
+                "请先确认删除。",
+            )
             self.assertEqual(collection.deleted, [])
 
-            status = app.delete_document("a.pdf", True, runtime)
+            status = app.delete_document(["a.pdf", "c.txt"], True, runtime=runtime)
 
-            self.assertIn("2 个文本块", status)
-            self.assertEqual(collection.deleted, ["a-1", "a-2"])
+            self.assertIn("2 份文档（3 个文本块）", status)
+            self.assertEqual(collection.deleted, ["a-1", "a-2", "c-1"])
             self.assertEqual(app.document_inventory(runtime), [("b.txt", 1)])
             self.assertFalse(source_pdf.exists())
             self.assertTrue(shared_pdf.exists())
+            self.assertFalse(third_pdf.exists())
             self.assertIsNone(runtime._lexical_snapshot)
 
     def test_upload_file_preserves_pathlib_path(self):
         source = Path("folder") / "document.txt"
+        runtime = object()
         with patch.object(app, "add_document_to_db", return_value="ok") as add:
-            self.assertEqual(app.upload_file(source), "ok")
-        add.assert_called_once_with(str(source), runtime=None, progress=None)
+            self.assertEqual(app.upload_file(source, runtime), "ok")
+        add.assert_called_once_with(str(source), runtime=runtime, progress=None)
 
     def test_upload_file_reports_parser_errors(self):
         with patch.object(app, "add_document_to_db", side_effect=ValueError("文件损坏")):
-            self.assertEqual(app.upload_file("broken.pdf"), "添加失败：文件损坏")
+            self.assertEqual(app.upload_file("broken.pdf", object()), "添加失败：文件损坏")
 
     def test_quiz_json_is_parsed_and_scored(self):
         response = json.dumps(
-            [
+            {"questions": [
                 {
                     "question": f"问题 {index}",
                     "options": ["甲", "乙", "丙", "丁"],
@@ -4144,7 +5014,7 @@ class RuntimeContractTests(unittest.TestCase):
                     "explanation": f"解析 {index}",
                 }
                 for index in range(1, 6)
-            ],
+            ]},
             ensure_ascii=False,
         )
         items = app.parse_quiz_items(response)
@@ -4194,11 +5064,14 @@ class RuntimeContractTests(unittest.TestCase):
         openai_client.assert_not_called()
 
         with patch("openai.OpenAI") as openai_client:
+            openai_client.return_value.models.list.return_value.data = [
+                type("Model", (), {"id": "test-model"})()
+            ]
             status = app.configure_model_service(
                 "https://example.com/v1",
                 "test-model",
                 "secret-value",
-                runtime,
+                runtime=runtime,
             )
 
         openai_client.assert_called_once_with(
@@ -4208,6 +5081,22 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIs(runtime.client, openai_client.return_value)
         self.assertEqual(runtime.config.llm_model, "test-model")
         self.assertNotIn("secret-value", status)
+        openai_client.return_value.models.list.assert_called_once_with()
+
+        previous_client = runtime.client
+        with patch("openai.OpenAI") as openai_client:
+            error = RuntimeError("unauthorized")
+            error.status_code = 401
+            openai_client.return_value.models.list.side_effect = error
+            status = app.configure_model_service(
+                "https://example.com/v1",
+                "other-model",
+                "invalid-value",
+                runtime=runtime,
+            )
+        self.assertIn("API Key 无效", status)
+        self.assertIs(runtime.client, previous_client)
+        self.assertEqual(runtime.config.llm_model, "test-model")
 
         with patch("openai.OpenAI") as openai_client:
             status = app.configure_model_service(
@@ -4264,8 +5153,96 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(runtime.config.context_k, 4)
         self.assertEqual(app.generate_mindmap(runtime), "ok")
         self.assertEqual(app.generate_quiz(runtime), "ok")
-        for call in completions.calls:
-            self.assertEqual(call["messages"][1]["content"].count("chunk-"), 4)
+        self.assertEqual(completions.calls[0]["messages"][1]["content"].count("chunk-"), 6)
+        self.assertEqual(completions.calls[1]["messages"][1]["content"].count("chunk-"), 4)
+
+    def test_context_budget_skips_oversized_chunks_without_cutting_them(self):
+        runtime = app.Runtime(
+            app.RuntimeConfig(llm_context_tokens=420, llm_max_tokens=100),
+            None,
+            None,
+            None,
+        )
+
+        selected, prompt = app._pack_contexts(
+            runtime,
+            "system",
+            "instruction",
+            ["x" * 1200, "small evidence"],
+        )
+
+        self.assertEqual(selected, [1])
+        self.assertNotIn("x" * 20, prompt)
+        self.assertIn("【片段 1】\nsmall evidence", prompt)
+
+    def test_truncated_generation_is_visible_and_truncated_quiz_is_rejected(self):
+        message = type("Message", (), {"content": "partial"})()
+        choice = type("Choice", (), {"message": message, "finish_reason": "length"})()
+        response = type("Response", (), {"choices": [choice]})()
+        completions = type("Completions", (), {"create": lambda self, **_kwargs: response})()
+        chat = type("Chat", (), {"completions": completions})()
+        runtime = app.Runtime(
+            app.RuntimeConfig(),
+            type("Client", (), {"chat": chat})(),
+            None,
+            None,
+        )
+
+        self.assertIn("尚未完成", app._complete_text(runtime, "system", "prompt"))
+        with self.assertRaisesRegex(ValueError, "未载入测评"):
+            app._complete_text(runtime, "system", "prompt", json_output=True)
+
+    def test_deepseek_generation_disables_thinking_and_requests_json(self):
+        from unittest.mock import Mock
+
+        client = Mock()
+        client.chat.completions.create.return_value.choices = [
+            Mock(message=Mock(content='{"questions": []}'), finish_reason="stop")
+        ]
+        runtime = app.Runtime(app.RuntimeConfig(), client, None, None)
+
+        app._complete_text(runtime, "system", "prompt", json_output=True)
+
+        request = client.chat.completions.create.call_args.kwargs
+        self.assertEqual(request["response_format"], {"type": "json_object"})
+        self.assertEqual(request["extra_body"], {"thinking": {"type": "disabled"}})
+        self.assertEqual(request["max_tokens"], 2048)
+
+    def test_question_budget_keeps_prompt_and_evidence_panel_aligned(self):
+        from unittest.mock import Mock
+
+        collection = Mock()
+        collection.count.return_value = 2
+        collection.query.return_value = {
+            "ids": [["oversized", "fits"]],
+            "documents": [["overlong " * 4000, "Complete short evidence."]],
+            "metadatas": [[{"source": "a.txt"}, {"source": "a.txt"}]],
+        }
+        embedding = Mock()
+        embedding.encode.return_value.tolist.return_value = [1.0, 0.0]
+        client = Mock()
+        client.chat.completions.create.return_value.choices = [
+            Mock(message=Mock(content="Partial answer"), finish_reason="length")
+        ]
+        runtime = app.Runtime(app.RuntimeConfig(), client, embedding, collection)
+        result = app.query_knowledge("Explain this.", runtime=runtime)
+        request = client.chat.completions.create.call_args.kwargs
+        prompt = request["messages"][1]["content"]
+        self.assertEqual(result["context_ids"], ["fits"])
+        self.assertEqual(result["contexts"], ["Complete short evidence."])
+        self.assertIn("【片段 1】", prompt)
+        self.assertNotIn("overlong", prompt)
+        self.assertIn("尚未完成", result["answer"])
+        self.assertLessEqual(
+            sum(app._estimated_tokens(message["content"]) for message in request["messages"])
+            + request["max_tokens"] + 128,
+            runtime.config.llm_context_tokens,
+        )
+        client.chat.completions.create.reset_mock()
+        result = app.query_knowledge("中文" * 4000, runtime=runtime)
+        self.assertIn("输入预算不足", result["answer"])
+        self.assertEqual(result["contexts"], [])
+        client.chat.completions.create.assert_not_called()
 
     def test_learning_generation_filters_real_collection(self):
         import chromadb
@@ -4292,6 +5269,155 @@ class RuntimeContractTests(unittest.TestCase):
                 client.chat.completions.create.reset_mock()
                 self.assertIn("没有可用内容", generate(runtime, source_filter=["deleted.pdf"]))
                 client.chat.completions.create.assert_not_called()
+
+    def test_outline_uses_each_main_section_instead_of_only_opening_chunks(self):
+        from unittest.mock import Mock
+
+        documents = [
+            "INTRODUCTION " * 30,
+            "INTRODUCTION CONTINUED " * 30,
+            "METHODOLOGY " * 30,
+            "RESULTS " * 30,
+            "CONCLUSION " * 30,
+            "REFERENCES " * 30,
+            "APPENDIX " * 30,
+        ]
+        metadatas = [
+            {"source": "paper.pdf", "chunk_index": 0, "headers": "H2: Introduction"},
+            {"source": "paper.pdf", "chunk_index": 1, "headers": "H2: Introduction"},
+            {"source": "paper.pdf", "chunk_index": 2, "headers": "H2: Methodology"},
+            {"source": "paper.pdf", "chunk_index": 3, "headers": "H2: Results"},
+            {"source": "paper.pdf", "chunk_index": 4, "headers": "H2: Conclusion"},
+            {"source": "paper.pdf", "chunk_index": 5, "headers": "H2: References"},
+            {"source": "paper.pdf", "chunk_index": 6, "headers": "H2: Appendix"},
+        ]
+        collection = Mock()
+        collection.count.return_value = len(documents)
+        collection.get.return_value = {
+            "documents": documents,
+            "metadatas": metadatas,
+        }
+        client = Mock()
+        client.chat.completions.create.return_value.choices = [
+            Mock(message=Mock(content="outline"), finish_reason="stop")
+        ]
+        runtime = app.Runtime(app.RuntimeConfig(), client, object(), collection)
+
+        self.assertEqual(app.generate_mindmap(runtime, ["paper.pdf"]), "outline")
+
+        request = client.chat.completions.create.call_args.kwargs
+        prompt = request["messages"][1]["content"]
+        for marker in ("INTRODUCTION", "METHODOLOGY", "RESULTS", "CONCLUSION"):
+            self.assertIn(marker, prompt)
+        self.assertNotIn("REFERENCES", prompt)
+        self.assertNotIn("APPENDIX", prompt)
+
+    def test_outline_filters_non_academic_sections_and_fits_every_section(self):
+        documents = [
+            "PAPER TITLE AND AUTHORS",
+            "ABSTRACT " * 80,
+            "INTRODUCTION " * 120,
+            "METHODS " * 120,
+            "PREDICTED CHANGES " * 120,
+            "RESULTS " * 120,
+            "AUTHOR CONTRIBUTIONS " * 120,
+            "DATA AVAILABILITY " * 120,
+            "CONCLUSION " * 120,
+            "REFERENCES " * 120,
+        ]
+        metadatas = [
+            {"source": "paper.pdf", "chunk_index": 0, "headers": "H1: Paper title"},
+            {"source": "paper.pdf", "chunk_index": 1, "headers": "H1: Paper title"},
+            {"source": "paper.pdf", "chunk_index": 2, "headers": "H2: 1 Introduction"},
+            {"source": "paper.pdf", "chunk_index": 3, "headers": "H2: 2 Methods"},
+            {
+                "source": "paper.pdf",
+                "chunk_index": 4,
+                "headers": "H3: and the predicted changes",
+            },
+            {"source": "paper.pdf", "chunk_index": 5, "headers": "H2: 3 Results"},
+            {
+                "source": "paper.pdf",
+                "chunk_index": 6,
+                "headers": "H2: Author contributions",
+            },
+            {
+                "source": "paper.pdf",
+                "chunk_index": 7,
+                "headers": "H2: Data availability",
+            },
+            {"source": "paper.pdf", "chunk_index": 8, "headers": "H2: Conclusion"},
+            {"source": "paper.pdf", "chunk_index": 9, "headers": "H2: References"},
+        ]
+
+        candidates, labels = app._outline_section_candidates(documents, metadatas)
+        joined_labels = " ".join(labels)
+        self.assertEqual(len(candidates), 5)
+        self.assertNotIn("and the predicted changes", joined_labels)
+        self.assertNotIn("Author contributions", joined_labels)
+        self.assertNotIn("Data availability", joined_labels)
+        self.assertNotIn("References", joined_labels)
+        self.assertTrue(candidates[0].startswith("ABSTRACT"))
+
+        runtime = app.Runtime(
+            app.RuntimeConfig(llm_context_tokens=1600, llm_max_tokens=512),
+            None,
+            None,
+            None,
+        )
+        system = "system"
+        instruction = "instruction"
+        compacted = app._outline_candidates_within_budget(
+            runtime, system, instruction, candidates, labels
+        )
+        selected, prompt = app._pack_contexts(
+            runtime, system, instruction, compacted, labels=labels
+        )
+        self.assertEqual(len(selected), len(candidates))
+        for label in labels:
+            self.assertIn(label, prompt)
+
+    def test_selected_papers_supply_both_named_sources_without_forcing_extra_papers(self):
+        import chromadb
+        from unittest.mock import Mock
+
+        class Embedding:
+            def encode(self, _question):
+                return type("Vector", (list,), {"tolist": lambda self: list(self)})([1.0, 0.0])
+
+        with tempfile.TemporaryDirectory() as directory:
+            collection = chromadb.PersistentClient(path=directory).get_or_create_collection("multi-scope")
+            collection.add(
+                ids=["alpha1", "alpha2", "alpha3", "alpha4", "beta", "gamma"],
+                documents=["Alpha method overview.", "Alpha background.", "Alpha results.",
+                           "Alpha appendix.", "Beta method selects sentences.", "Gamma unrelated."],
+                metadatas=[{"source": "alpha.pdf", "type": "text", "headers": "H1: Alpha"}] * 4
+                + [{"source": "beta.pdf", "type": "text", "headers": "H1: Beta"},
+                   {"source": "gamma.pdf", "type": "text", "headers": "H1: Gamma"}],
+                embeddings=[[1.0, 0.0]] * 4 + [[0.0, 1.0], [0.0, 1.0]],
+            )
+            client = Mock()
+            client.chat.completions.create.return_value.choices = [Mock(message=Mock(content="ok"))]
+            runtime = app.Runtime(app.RuntimeConfig(), client, Embedding(), collection)
+            sources = ["alpha.pdf", "beta.pdf", "gamma.pdf"]
+            result = app.query_knowledge("Alpha 与 Beta 的方法分别是什么？", runtime=runtime, source_filter=sources)
+            self.assertEqual({meta["source"] for meta in result["context_metadatas"]},
+                             {"alpha.pdf", "beta.pdf"})
+            self.assertIn("Beta method", client.chat.completions.create.call_args.kwargs["messages"][1]["content"])
+            self.assertIn("问题词：beta", client.chat.completions.create.call_args.kwargs["messages"][1]["content"])
+
+            result = app.query_knowledge("Alpha 的方法是什么？", runtime=runtime, source_filter=sources)
+            self.assertEqual({meta["source"] for meta in result["context_metadatas"]}, {"alpha.pdf"})
+
+            result = app.query_knowledge(
+                "这两篇论文各自使用了什么方法？请分别说明。",
+                runtime=runtime,
+                source_filter=["alpha.pdf", "beta.pdf"],
+            )
+            self.assertEqual(
+                {meta["source"] for meta in result["context_metadatas"]},
+                {"alpha.pdf", "beta.pdf"},
+            )
 
 
 if __name__ == "__main__":

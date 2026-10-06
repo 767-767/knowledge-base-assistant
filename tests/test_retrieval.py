@@ -62,6 +62,13 @@ class RetrievalTests(unittest.TestCase):
         self.assertIn("MgNO 的二维椭圆 PDE 定义在哪个区域", variants)
         self.assertIn("并考虑哪些边界条件", variants)
 
+    def test_source_coverage_balances_remaining_context_slots(self):
+        metas = [{"source": s} for s in ("a", "a", "a", "b", "b")]
+        self.assertEqual(ensure_source_coverage(range(5), metas, ["a", "b"], 4)[:4],
+                         [0, 3, 1, 4])
+        self.assertEqual(ensure_source_coverage(range(5), metas, ["a", "missing"], 4)[:4],
+                         [0, 1, 2, 3])
+
     def test_query_variants_do_not_split_short_or_empty_queries(self):
         self.assertEqual(query_variants("短题"), [])
         self.assertEqual(query_variants(""), [])
@@ -84,6 +91,12 @@ class RetrievalTests(unittest.TestCase):
         self.assertIn("使用什么代理模型", variants)
         self.assertIn("每个表格集合生成多少个问题", variants)
         self.assertIn("包含哪三种方法", variants)
+
+    def test_query_variants_split_paired_sources_before_followup_question(self):
+        question = "AlphaDoc 与 BetaDoc 的评测目标有什么不同？为什么参考答案相似不保证忠实？"
+        variants = query_variants(question)
+        self.assertEqual(variants, [question, "AlphaDoc", "BetaDoc 的评测目标有什么不同",
+                                    "为什么参考答案相似不保证忠实"])
 
     def test_rrf_deduplicates_each_ranked_list_and_preserves_fused_order(self):
         fused = reciprocal_rank_fusion(

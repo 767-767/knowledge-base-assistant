@@ -1,4 +1,4 @@
-"""Offline dependency smoke check.
+"""Offline dependency check.
 
 Model downloads and API/database initialization belong to the application
 runtime and are intentionally not performed by this script.

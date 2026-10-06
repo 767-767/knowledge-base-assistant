@@ -65,6 +65,27 @@ Narrative text.
         self.assertIsNotNone(cell)
         self.assertEqual(cell["value"], "0.339")
 
+    def test_all_caps_group_headers_follow_repeated_metric_cycles(self):
+        markdown = """Table 5: Response-level detection
+
+|Methods|QUESTIO|NANSWE|RING|DATA-TO-|TEXTWRI|TING|SUMM|ARIZATIO|N|O|VERALL||
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+||Precision|Recall|F1|Precision|Recall|F1|Precision|Recall|F1|Precision|Recall|F1|
+|Finetuned Llama-2-13B|61.6|76.3|68.2|85.4|91.0|88.1|64.0|54.9|59.1|76.9|80.7|78.7|
+"""
+        tables, _ = extract_tables(markdown, "paper.pdf")
+        content = tables[0].page_content
+
+        self.assertIn("OVERALL Precision", content)
+        row = extract_table_row_values(
+            "Table 5 中 Finetuned Llama-2-13B 的 Overall precision、recall 和 F1 分别是多少？",
+            content,
+            tables[0].metadata,
+        )
+
+        self.assertIsNotNone(row)
+        self.assertEqual([item["value"] for item in row["values"]], ["76.9", "80.7", "78.7"])
+
     def test_split_group_header_is_repaired_and_usage_backbone_keeps_both_rows(self):
         markdown = """Table 2: Latency evaluation, measured in seconds.
 

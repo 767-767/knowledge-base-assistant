@@ -32,7 +32,7 @@ class _OfflineClient:
 
     def create(self, **_kwargs: Any) -> SimpleNamespace:
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="offline context gate"))]
+            choices=[SimpleNamespace(message=SimpleNamespace(content="offline context audit"))]
         )
 
 
@@ -53,7 +53,7 @@ def audit_case(case: dict[str, Any], contexts: list[str]) -> dict[str, Any]:
     }
 
 
-def run_gate(
+def run_audit(
     manifest_path: str | Path,
     db_path: str | Path,
 ) -> dict[str, Any]:
@@ -109,7 +109,7 @@ def run_gate(
 
     full = sum(row["status"] == "full" for row in rows)
     return {
-        "schema": "sci-rag-app-context-gate-v1",
+        "schema": "sci-rag-app-context-audit-v1",
         "manifest": str(Path(manifest_path).resolve()),
         "db_chunks": chunk_count,
         "runtime_config": runtime_config_trace(runtime),
@@ -128,12 +128,12 @@ def main() -> int:
     parser.add_argument("--json-out")
     args = parser.parse_args()
     try:
-        report = run_gate(
+        report = run_audit(
             args.manifest,
             args.db_path,
         )
     except (OSError, RuntimeError, ValueError) as exc:
-        print(f"❌ 真实送模上下文门禁失败：{exc}", file=sys.stderr)
+        print(f"❌ 真实送模上下文审计执行失败：{exc}", file=sys.stderr)
         return 1
     print(
         f"真实送模上下文：{report['full_case_count']}/{report['case_count']} full；"
@@ -146,7 +146,7 @@ def main() -> int:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"完整 JSON：{output}")
-    return 0 if not report["failures"] else 2
+    return 0
 
 
 if __name__ == "__main__":

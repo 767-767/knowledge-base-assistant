@@ -1,7 +1,12 @@
 import unittest
+import contextlib
+import io
+from tempfile import TemporaryDirectory
+from pathlib import Path
 from unittest.mock import patch
 
 import app
+from evaluation.paper_pilot import find_paper, main as paper_pilot_main, replay_request
 from evaluation.generation_stability import (
     build_runtime,
     completed_keys,
@@ -11,6 +16,45 @@ from evaluation.generation_stability import (
 
 
 class GenerationStabilityTests(unittest.TestCase):
+    def test_find_paper_checks_supplied_directories_in_order(self):
+        with TemporaryDirectory() as first, TemporaryDirectory() as second:
+            paper = Path(second) / "paper.pdf"
+            paper.touch()
+            self.assertEqual(find_paper("paper.pdf", [Path(first), Path(second)]), paper)
+            with self.assertRaises(FileNotFoundError):
+                find_paper("missing.pdf", [Path(first), Path(second)])
+
+    def test_missing_pilot_cases_file_fails_before_model_or_database_setup(self):
+        with TemporaryDirectory() as directory:
+            missing = str(Path(directory) / "missing.jsonl")
+            stderr = io.StringIO()
+            with patch("sys.argv", ["paper_pilot", "--papers-dir", directory,
+                                    "--cases-file", missing]), \
+                    contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
+                paper_pilot_main()
+            self.assertEqual(error.exception.code, 2)
+            self.assertIn("cases file not found", stderr.getvalue())
+
+    def test_missing_replay_trace_fails_instead_of_reporting_empty_success(self):
+        with TemporaryDirectory() as directory:
+            missing = str(Path(directory) / "missing.jsonl")
+            stderr = io.StringIO()
+            with patch("sys.argv", ["paper_pilot", "--replay-trace", missing]), \
+                    contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
+                paper_pilot_main()
+            self.assertEqual(error.exception.code, 2)
+            self.assertIn("replay trace not found", stderr.getvalue())
+
+    def test_replay_only_changes_model_and_explicit_thinking_control(self):
+        original = {"model": "old", "messages": [{"role": "user", "content": "evidence"}],
+                    "temperature": 0.3, "max_tokens": 1024}
+        row = {"calls": [{"request": original}]}
+        request = replay_request(row, "new", no_thinking=True)
+        self.assertEqual(request, {**original, "model": "new", "reasoning_effort": "none"})
+        self.assertEqual(original["model"], "old")
+        self.assertNotIn("reasoning_effort", original)
+        self.assertEqual(replay_request(row, "old"), original)
+
     def test_select_cases_preserves_manifest_order_and_rejects_unknown(self):
         cases = [
             {"case_id": "b", "question": "B"},
@@ -65,7 +109,7 @@ class GenerationStabilityTests(unittest.TestCase):
         self.assertTrue(trace["formula_evidence_auto"])
         self.assertEqual(trace["llm_model"], config.llm_model)
         self.assertNotIn("LLM_API_KEY", trace)
-        self.assertNotIn("DEEPSEEK_API_KEY", trace)
+        self.assertNotIn("LLM_API_KEY", trace)
         self.assertNotIn("llm_base_url", trace)
 
     def test_build_runtime_passes_explicit_reranker_and_formula_settings(self):

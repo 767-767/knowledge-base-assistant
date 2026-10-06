@@ -214,7 +214,7 @@ Distance Error=3.03`、`Relative Box Size=3.05`。新增回归后定向测试 `1
 `L2 Error (×10−2)`）、加粗标记与实体相邻、普通表首行保护，以及 DOI/作者元数据布局表的
 排除。`tests/test_parser_regression.py` 的 8 个 fixture 测试和现有核心测试均通过。
 
-随后用 `app.load_and_split_document()` 对四篇外部 PDF 做了只读冒烟：SciDQA 为
+随后用 `app.load_and_split_document()` 对四篇外部 PDF 做了只读基础检查：SciDQA 为
 6 个表格块（编号 1、2、3、4、5、7），Scientific Table LLM 为 3 个（1、2、3），
 MgNO 为 7 个（1–7），AlphaFold 3 为 0 个误识别的表格块。MgNO 的两个确定性单元格
 查询分别返回 Table 1 的 `Darcy rough L2 = 0.339` 和 Table 4 的 `L2 Error (×10−2)
@@ -529,9 +529,9 @@ H9 仍按协议保留为 `development-regression`：本结果证明当前开发�
 
 新增回归测试后全量离线 unittest 为 `266/266`，`py_compile` 与 `git diff --check` 通过。临时隔离库 `/private/tmp/scirag_phaseH10_parserfix_m060cn06` 的真实 `app.query_knowledge`（Hybrid、路由、查询分解、parent-window、假客户端）为 `9/12 full、1/12 partial、2/12 zero`。人工检查确认 Table 3、Table 4 和 Table S1 已进入上下文；剩余缺口来自 H10 事实审计字符串没有表达表格的“行标签—列值”关系，并非目标表块缺失。
 
-H10 继续保持 `development-regression`，不用于泛化或答案正确率结论；本轮未调用 DeepSeek、未修改项目 `chroma_db`、未提交或推送。下一步应先改进通用表格事实审计口径，再进行生成验证。
+H10 继续保持 `development-regression`，不用于泛化或答案正确率结论；本轮未调用 DeepSeek、未修改项目 `chroma_db`、未提交或推送。下一步应先改进通用表格事实审计规则，再进行生成验证。
 
-### H10 表格事实审计口径修正（2026-09-07）
+### H10 表格事实审计规则修正（2026-09-07）
 
 事实覆盖审计现在能在单个 Markdown 表格行内关联行标签、列标题和单元格值，并兼容 PDF 去掉千位逗号以及 `Table`/`Tables` 形式差异；不会跨行拼接事实。全量离线 unittest 为 `268/268`，`py_compile` 与 `git diff --check` 通过。
 
