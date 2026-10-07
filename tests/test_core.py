@@ -1,4 +1,3 @@
-import hashlib
 import importlib
 import json
 import os
@@ -4647,18 +4646,18 @@ class RuntimeContractTests(unittest.TestCase):
             with patch.object(app, "load_and_split_document", return_value=[Chunk("new parse", {})]):
                 embedding.encode.side_effect = RuntimeError("embedding failed")
                 with self.assertRaisesRegex(RuntimeError, "embedding failed"):
-                    app.add_document_to_db(str(file), runtime)
+                    app.add_document_to_db(str(file), runtime, replace_existing=True)
                 self.assertIn("old parse", collection.get()["documents"])
                 embedding.encode.side_effect = lambda texts: np.array([[1.0, 0.0] for _ in texts])
-                app.add_document_to_db(str(file), runtime)
-                app.add_document_to_db(str(file), runtime)
+                app.add_document_to_db(str(file), runtime, replace_existing=True)
+                app.add_document_to_db(str(file), runtime, replace_existing=True)
             self.assertCountEqual(collection.get()["documents"], ["new parse", "other document"])
             with patch.object(app, "load_and_split_document", return_value=[]):
                 with self.assertRaisesRegex(ValueError, "没有可导入的文本"):
-                    app.add_document_to_db(str(file), runtime)
+                    app.add_document_to_db(str(file), runtime, replace_existing=True)
             self.assertCountEqual(collection.get()["documents"], ["new parse", "other document"])
 
-    def test_upload_batches_chunks_and_disambiguates_same_named_files(self):
+    def test_upload_batches_chunks_and_requires_confirmation_for_same_name(self):
         class Embedding:
             def __init__(self):
                 self.batch_sizes = []
@@ -4718,16 +4717,16 @@ class RuntimeContractTests(unittest.TestCase):
                 ],
             ):
                 app.add_document_to_db(str(first), runtime)
-                app.add_document_to_db(str(second), runtime)
+                with self.assertRaisesRegex(ValueError, "同名文档已存在"):
+                    app.add_document_to_db(str(second), runtime)
+                app.add_document_to_db(str(second), runtime, replace_existing=True)
 
         sources = {metadata[1]["source"] for metadata in collection.records.values()}
-        second_source = next(source for source in sources if source != "report.txt")
         self.assertEqual(embedding.batch_sizes, [64, 1, 1])
-        self.assertTrue(second_source.startswith("report ("))
-        app.delete_document(second_source, True, runtime=runtime)
+        self.assertEqual(sources, {"report.txt"})
         self.assertEqual(
-            {metadata[1]["source"] for metadata in collection.records.values()},
-            {"report.txt"},
+            [document for document, _metadata in collection.records.values()],
+            ["second"],
         )
 
     def test_formula_storage_keeps_existing_chunk_indices_and_ids(self):
@@ -4758,20 +4757,19 @@ class RuntimeContractTests(unittest.TestCase):
                 Chunk("A ∗ u = f", {"type": "formula"}),
                 Chunk("second", {"type": "text"}),
             ],
-        ), patch.object(app, "file_sha256", return_value="document-hash"):
+        ):
             app.add_document_to_db(handle.name, runtime=runtime)
 
         ids = collection.records[0]["ids"]
         metas = collection.records[0]["metadatas"]
         self.assertEqual([metas[0]["chunk_index"], metas[2]["chunk_index"]], [0, 1])
         self.assertNotIn("chunk_index", metas[1])
+        self.assertRegex(metas[0]["document_version"], r"^[0-9a-f]{32}$")
+        self.assertTrue(ids[0].endswith(":0:text"))
+        self.assertTrue(ids[2].endswith(":1:text"))
         self.assertEqual(
-            ids[0],
-            hashlib.sha256("document-hash:0:text:first".encode("utf-8")).hexdigest(),
-        )
-        self.assertEqual(
-            ids[2],
-            hashlib.sha256("document-hash:1:text:second".encode("utf-8")).hexdigest(),
+            {metadata["document_version"] for metadata in metas},
+            {metas[0]["document_version"]},
         )
 
     def test_query_uses_filtered_contexts_for_generation_and_return(self):
@@ -4924,17 +4922,17 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("不能用其他表格替代", result["answer"])
 
     def test_document_inventory_and_confirmed_deletion(self):
-        digest = "a" * 64
-        shared_digest = "b" * 64
-        third_digest = "c" * 64
+        version = "a" * 32
+        shared_version = "b" * 32
+        third_version = "c" * 32
 
         class Collection:
             def __init__(self):
                 self.records = [
-                    ("a-1", {"source": "a.pdf", "document_sha256": digest}),
-                    ("a-2", {"source": "a.pdf", "document_sha256": shared_digest}),
-                    ("b-1", {"source": "b.txt", "document_sha256": shared_digest}),
-                    ("c-1", {"source": "c.txt", "document_sha256": third_digest}),
+                    ("a-1", {"source": "a.pdf", "document_version": version}),
+                    ("a-2", {"source": "a.pdf", "document_version": shared_version}),
+                    ("b-1", {"source": "b.txt", "document_version": shared_version}),
+                    ("c-1", {"source": "c.txt", "document_version": third_version}),
                 ]
                 self.deleted = []
 
@@ -4965,12 +4963,12 @@ class RuntimeContractTests(unittest.TestCase):
                 collection,
             )
             runtime._lexical_snapshot = object()
-            source_pdf = Path(directory) / "source_pdfs" / f"{digest}.pdf"
+            source_pdf = Path(directory) / "source_pdfs" / f"{version}.pdf"
             source_pdf.parent.mkdir()
             source_pdf.write_bytes(b"pdf")
-            shared_pdf = source_pdf.with_name(f"{shared_digest}.pdf")
+            shared_pdf = source_pdf.with_name(f"{shared_version}.pdf")
             shared_pdf.write_bytes(b"pdf")
-            third_pdf = source_pdf.with_name(f"{third_digest}.pdf")
+            third_pdf = source_pdf.with_name(f"{third_version}.pdf")
             third_pdf.write_bytes(b"pdf")
 
             self.assertEqual(
@@ -4998,7 +4996,12 @@ class RuntimeContractTests(unittest.TestCase):
         runtime = object()
         with patch.object(app, "add_document_to_db", return_value="ok") as add:
             self.assertEqual(app.upload_file(source, runtime), "ok")
-        add.assert_called_once_with(str(source), runtime=runtime, progress=None)
+        add.assert_called_once_with(
+            str(source),
+            runtime=runtime,
+            progress=None,
+            replace_existing=False,
+        )
 
     def test_upload_file_reports_parser_errors(self):
         with patch.object(app, "add_document_to_db", side_effect=ValueError("文件损坏")):

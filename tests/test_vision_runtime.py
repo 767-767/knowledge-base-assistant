@@ -9,7 +9,7 @@ import json
 import numpy as np
 
 import app
-from sci_rag_core import Chunk, file_sha256
+from sci_rag_core import Chunk
 
 
 class _Embedding:
@@ -86,7 +86,7 @@ class VisionRuntimeTests(unittest.TestCase):
         self.assertTrue(config.vision_enabled)
         self.assertEqual(config.vision_model, "vision-test")
 
-    def test_enabled_pdf_is_persisted_by_hash_and_disabled_pdf_is_not(self):
+    def test_enabled_pdf_is_persisted_by_version_and_disabled_pdf_is_not(self):
         with TemporaryDirectory() as directory:
             pdf = Path(directory) / "paper.pdf"
             pdf.write_bytes(b"pdf fixture")
@@ -104,10 +104,15 @@ class VisionRuntimeTests(unittest.TestCase):
                     return_value=[Chunk("text", {"source": "paper.pdf"})],
                 ):
                     app.add_document_to_db(str(pdf), runtime=runtime)
-                target = db_path / "source_pdfs" / f"{file_sha256(pdf)}.pdf"
-                self.assertEqual(target.is_file(), enabled)
                 if enabled:
+                    version = runtime.collection.upserts[0]["metadatas"][0][
+                        "document_version"
+                    ]
+                    target = db_path / "source_pdfs" / f"{version}.pdf"
+                    self.assertTrue(target.is_file())
                     self.assertEqual(target.read_bytes(), pdf.read_bytes())
+                else:
+                    self.assertFalse((db_path / "source_pdfs").exists())
 
     def test_non_pdf_is_not_persisted(self):
         with TemporaryDirectory() as directory:
@@ -130,9 +135,9 @@ class VisionRuntimeTests(unittest.TestCase):
     def test_routed_figure_calls_vision_once_with_two_images_and_no_gold(self):
         with TemporaryDirectory() as directory:
             source = "2602.08213v1.pdf"
-            digest = "a" * 64
+            version = "a" * 32
             collection = _Collection(
-                [("1", "DrugR evidence", {"source": source, "document_sha256": digest})]
+                [("1", "DrugR evidence", {"source": source, "document_version": version})]
             )
             client = _Client()
             runtime = app.Runtime(
@@ -145,7 +150,7 @@ class VisionRuntimeTests(unittest.TestCase):
                 _Embedding(),
                 collection,
             )
-            source_pdf = Path(directory) / "source_pdfs" / f"{digest}.pdf"
+            source_pdf = Path(directory) / "source_pdfs" / f"{version}.pdf"
             source_pdf.parent.mkdir()
             source_pdf.write_bytes(b"pdf")
             image = {
@@ -171,7 +176,7 @@ class VisionRuntimeTests(unittest.TestCase):
     def test_empty_vision_response_is_retried_once(self):
         with TemporaryDirectory() as directory:
             source = "2602.08213v1.pdf"
-            digest = "c" * 64
+            version = "c" * 32
             client = _Client(content=["", "retry answer"])
             runtime = app.Runtime(
                 app.RuntimeConfig(
@@ -181,9 +186,9 @@ class VisionRuntimeTests(unittest.TestCase):
                 ),
                 client,
                 _Embedding(),
-                _Collection([("1", "DrugR evidence", {"source": source, "document_sha256": digest})]),
+                _Collection([("1", "DrugR evidence", {"source": source, "document_version": version})]),
             )
-            source_pdf = Path(directory) / "source_pdfs" / f"{digest}.pdf"
+            source_pdf = Path(directory) / "source_pdfs" / f"{version}.pdf"
             source_pdf.parent.mkdir()
             source_pdf.write_bytes(b"pdf")
             image = {"data_url": "data:image/png;base64,full", "page": 2}
@@ -196,9 +201,9 @@ class VisionRuntimeTests(unittest.TestCase):
     def test_disabled_ambiguous_missing_pdf_and_table_do_not_call_vision(self):
         with TemporaryDirectory() as directory:
             source = "2602.08213v1.pdf"
-            digest = "b" * 64
+            version = "b" * 32
             client = _Client()
-            records = [("1", "DrugR evidence", {"source": source, "document_sha256": digest})]
+            records = [("1", "DrugR evidence", {"source": source, "document_version": version})]
             runtime = app.Runtime(
                 app.RuntimeConfig(db_path=directory, document_routing=True),
                 client,
@@ -232,7 +237,7 @@ class VisionRuntimeTests(unittest.TestCase):
                 client,
                 _Embedding(),
                 _Collection(
-                    records + [("2", "Other evidence", {"source": "other.pdf", "document_sha256": "c" * 64})]
+                    records + [("2", "Other evidence", {"source": "other.pdf", "document_version": "c" * 32})]
                 ),
             )
             self.assertEqual(
@@ -250,8 +255,8 @@ class VisionRuntimeTests(unittest.TestCase):
     def test_api_error_returns_text_rag_fallback_note_without_secret(self):
         with TemporaryDirectory() as directory:
             source = "2602.08213v1.pdf"
-            digest = "d" * 64
-            source_pdf = Path(directory) / "source_pdfs" / f"{digest}.pdf"
+            version = "d" * 32
+            source_pdf = Path(directory) / "source_pdfs" / f"{version}.pdf"
             source_pdf.parent.mkdir()
             source_pdf.write_bytes(b"pdf")
             client = _Client(error=RuntimeError("secret should not be shown"))
@@ -264,7 +269,7 @@ class VisionRuntimeTests(unittest.TestCase):
                 client,
                 _Embedding(),
                 _Collection(
-                    [("1", "DrugR evidence", {"source": source, "document_sha256": digest})]
+                    [("1", "DrugR evidence", {"source": source, "document_version": version})]
                 ),
             )
             image = {

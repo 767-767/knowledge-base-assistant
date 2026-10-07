@@ -9,7 +9,6 @@ when the UI is launched from ``main``.  The parsing and table logic lives in
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-import hashlib
 import html
 import json
 import os
@@ -19,12 +18,12 @@ import re
 import shutil
 from typing import Any, Callable
 from urllib.parse import urlsplit
+import uuid
 
 from sci_rag_core import (
     Chunk,
     build_evidence_ledger,
     extract_spatial_figure_chunks,
-    file_sha256,
     formula_evidence_indices,
     find_table_cell_in_chunks,
     figure_reference_from_question,
@@ -1376,47 +1375,33 @@ def _metadata_for_chroma(metadata: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in metadata.items() if value is not None}
 
 
-def _source_name_for_upload(file_path: str, document_hash: str, runtime: Runtime) -> str:
-    """Keep different files with the same basename independently selectable."""
-
-    source = os.path.basename(file_path)
-    existing = runtime.collection.get(
-        where={"source": {"$eq": source}},
-        include=["metadatas"],
-    )
-    if not _flat_result_values(existing, "ids"):
-        return source
-    existing_hashes = {
-        str(metadata.get("document_sha256", ""))
-        for metadata in _flat_result_values(existing, "metadatas")
-        if isinstance(metadata, dict)
-    }
-    if document_hash in existing_hashes:
-        return source
-    path = Path(source)
-    return f"{path.stem} ({document_hash[:12]}){path.suffix}"
-
-
 def add_document_to_db(
     file_path: str,
     runtime: Runtime,
     progress: Callable[..., Any] | None = None,
+    replace_existing: bool = False,
 ) -> str:
     if progress is not None:
         progress(0.05, desc="正在读取文档")
-    document_hash = file_sha256(file_path)
-    source = _source_name_for_upload(file_path, document_hash, runtime)
+    source = os.path.basename(file_path)
     previous = runtime.collection.get(
         where={"source": {"$eq": source}}, include=["metadatas"]
     )
-    previous_ids = {
-        str(doc_id)
-        for doc_id, metadata in zip(
-            _flat_result_values(previous, "ids"),
-            _flat_result_values(previous, "metadatas"),
+    previous_ids = {str(doc_id) for doc_id in _flat_result_values(previous, "ids")}
+    if previous_ids and not replace_existing:
+        raise ValueError(
+            f"同名文档已存在：{source}。若要替换，请勾选“同名文档已存在时替换”后重新添加。"
         )
-        if metadata.get("document_sha256") == document_hash
+    previous_versions = {
+        str(metadata.get("document_version", "")).strip()
+        for metadata in _flat_result_values(previous, "metadatas")
+        if isinstance(metadata, dict)
+        and re.fullmatch(
+            r"[0-9a-fA-F]{32}",
+            str(metadata.get("document_version", "")).strip(),
+        )
     }
+    document_version = uuid.uuid4().hex
     if progress is not None:
         progress(0.1, desc="正在解析文档")
     chunks = load_and_split_document(
@@ -1428,9 +1413,7 @@ def add_document_to_db(
     if runtime.config.vision_enabled and Path(file_path).suffix.lower() == ".pdf":
         source_dir = Path(runtime.config.db_path) / "source_pdfs"
         source_dir.mkdir(parents=True, exist_ok=True)
-        source_pdf = source_dir / f"{document_hash}.pdf"
-        if not source_pdf.exists():
-            shutil.copyfile(file_path, source_pdf)
+        shutil.copyfile(file_path, source_dir / f"{document_version}.pdf")
     records: list[tuple[str, str, dict[str, Any]]] = []
     normal_chunk_index = 0
     for index, chunk in enumerate(chunks):
@@ -1441,7 +1424,7 @@ def add_document_to_db(
         metadata.update(
             {
                 "source": source,
-                "document_sha256": document_hash,
+                "document_version": document_version,
             }
         )
         if not is_formula:
@@ -1450,11 +1433,9 @@ def add_document_to_db(
             # pre-existing prose/table chunks.
             metadata["chunk_index"] = normal_chunk_index
             normal_chunk_index += 1
-        stable_id = hashlib.sha256(
-            f"{document_hash}:{stable_index}:{metadata.get('type', 'text')}:{text}".encode("utf-8")
-        ).hexdigest()
-        metadata["chunk_id"] = stable_id
-        records.append((stable_id, text, _metadata_for_chroma(metadata)))
+        chunk_id = f"{document_version}:{stable_index}:{metadata.get('type', 'text')}"
+        metadata["chunk_id"] = chunk_id
+        records.append((chunk_id, text, _metadata_for_chroma(metadata)))
 
     for start in range(0, len(records), DOCUMENT_BATCH_SIZE):
         batch = records[start : start + DOCUMENT_BATCH_SIZE]
@@ -1473,9 +1454,11 @@ def add_document_to_db(
             )
     # Retain the old parse until every replacement batch has been written.
     # Empty/failed imports must not erase the existing document.
-    stale_ids = previous_ids - {record[0] for record in records}
-    if records and stale_ids:
-        runtime.collection.delete(ids=sorted(stale_ids))
+    if records and previous_ids:
+        runtime.collection.delete(ids=sorted(previous_ids))
+        source_dir = Path(runtime.config.db_path) / "source_pdfs"
+        for version in previous_versions:
+            (source_dir / f"{version}.pdf").unlink(missing_ok=True)
     runtime.invalidate_lexical_index()
     if progress is not None:
         progress(1, desc="文档已添加")
@@ -1486,12 +1469,18 @@ def upload_file(
     file: str | os.PathLike[str] | None,
     runtime: Runtime,
     progress: Callable[..., Any] | None = None,
+    replace_existing: bool = False,
 ) -> str:
     if file is None:
         return "请选择一个文件"
     file_path = os.fspath(file)
     try:
-        return add_document_to_db(file_path, runtime=runtime, progress=progress)
+        return add_document_to_db(
+            file_path,
+            runtime=runtime,
+            progress=progress,
+            replace_existing=replace_existing,
+        )
     except Exception as exc:
         return f"添加失败：{exc}"
 
@@ -1520,15 +1509,15 @@ def _vision_pdf_for_question(
         source = next(iter(allowed_sources))
     if not source or not source.casefold().endswith(".pdf"):
         return None
-    hashes = {
-        str(metadata.get("document_sha256", "")).strip()
+    versions = {
+        str(metadata.get("document_version", "")).strip()
         for metadata in snapshot.metadatas
         if str(metadata.get("source", "")).strip() == source
-        and str(metadata.get("document_sha256", "")).strip()
+        and str(metadata.get("document_version", "")).strip()
     }
-    if len(hashes) != 1:
+    if len(versions) != 1:
         return None
-    source_pdf = Path(runtime.config.db_path) / "source_pdfs" / f"{next(iter(hashes))}.pdf"
+    source_pdf = Path(runtime.config.db_path) / "source_pdfs" / f"{next(iter(versions))}.pdf"
     return (source_pdf, source)
 
 
@@ -1648,7 +1637,7 @@ def delete_document(
         return "请先确认删除。"
 
     ids: list[str] = []
-    digests: set[str] = set()
+    versions: set[str] = set()
     deleted_sources: list[str] = []
     for selected_source in sources:
         result = runtime.collection.get(
@@ -1660,26 +1649,26 @@ def delete_document(
             continue
         ids.extend(source_ids)
         deleted_sources.append(selected_source)
-        digests.update(
-            str(metadata.get("document_sha256", "")).strip().casefold()
+        versions.update(
+            str(metadata.get("document_version", "")).strip().casefold()
             for metadata in _flat_result_values(result, "metadatas")
             if isinstance(metadata, dict)
             and re.fullmatch(
-                r"[0-9a-fA-F]{64}",
-                str(metadata.get("document_sha256", "")).strip(),
+                r"[0-9a-fA-F]{32}",
+                str(metadata.get("document_version", "")).strip(),
             )
         )
     if not ids:
         return "未找到所选文档。"
     runtime.collection.delete(ids=ids)
     runtime.invalidate_lexical_index()
-    for digest in digests:
+    for version in versions:
         remaining = runtime.collection.get(
-            where={"document_sha256": {"$eq": digest}},
+            where={"document_version": {"$eq": version}},
             include=["metadatas"],
         )
         if not _flat_result_values(remaining, "ids"):
-            (Path(runtime.config.db_path) / "source_pdfs" / f"{digest}.pdf").unlink(
+            (Path(runtime.config.db_path) / "source_pdfs" / f"{version}.pdf").unlink(
                 missing_ok=True
             )
     names = "、".join(deleted_sources)
@@ -4442,6 +4431,10 @@ def build_demo(
                             file_types=[".pdf", ".txt", ".docx"],
                             height=170,
                         )
+                        replace_upload = gr.Checkbox(
+                            label="同名文档已存在时替换",
+                            value=False,
+                        )
                         upload_button = gr.Button(
                             "添加到知识库",
                             variant="primary",
@@ -4727,9 +4720,14 @@ def build_demo(
 
         def handle_upload(
             file: Any,
+            replace_existing: bool,
             progress: Any = gr.Progress(),
         ) -> tuple[Any, ...]:
-            return (upload_file(file, runtime, progress), *library_state())
+            return (
+                upload_file(file, runtime, progress, replace_existing),
+                *library_state(),
+                False,
+            )
 
         def handle_delete(sources: list[str], confirmed: bool) -> tuple[Any, ...]:
             return (
@@ -4755,7 +4753,7 @@ def build_demo(
 
         upload_button.click(
             handle_upload,
-            inputs=file_input,
+            inputs=[file_input, replace_upload],
             outputs=[
                 upload_output,
                 count_output,
@@ -4764,6 +4762,7 @@ def build_demo(
                 source_select,
                 outline_sources,
                 quiz_sources,
+                replace_upload,
             ],
             show_progress_on=upload_output,
         )

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
-import hashlib
 import html
 import re
 import unicodedata
@@ -1104,16 +1103,6 @@ def _restore_bold_boundaries(text: str) -> str:
         return f"{left}{match.group(1)}{right}"
 
     return re.sub(r"\*\*(.*?)\*\*", replace, text, flags=re.DOTALL)
-
-
-def file_sha256(file_path: str | Path) -> str:
-    """Return a stable content hash without loading the whole file in memory."""
-
-    digest = hashlib.sha256()
-    with open(file_path, "rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def normalize_for_match(value: Any) -> str:
