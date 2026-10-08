@@ -34,6 +34,7 @@ from sci_rag_core import (
     parse_markdown_table,
     missing_pdf_formula_blocks,
     repair_latex_json_escapes,
+    requires_full_table_context,
     rerank_table_first,
     select_row_entity,
     split_to_chunks,
@@ -1930,6 +1931,46 @@ class CoreTests(unittest.TestCase):
         self.assertIn("GPT5", filtered[0])
         self.assertIn("DrugR", filtered[0])
 
+    def test_table_synthesis_questions_skip_partial_structured_answers(self):
+        table = (
+            "|Method|Dataset A|Dataset B|Dataset C|\n|---|---|---|---|\n"
+            "|Alpha|10|30|20|\n|Beta|20|10|30|"
+        )
+        questions = (
+            "Table 2 中 Alpha 和 Beta 分别在哪个数据集最高？",
+            "Table 2 中哪两个数据集由 Alpha 最优，另外一个由谁最优？",
+        )
+        for question in questions:
+            self.assertTrue(requires_full_table_context(question, table))
+            self.assertIsNone(
+                find_table_cell_in_chunks(
+                    question, [table], [{"type": "table", "table_number": 2}]
+                )
+            )
+            self.assertEqual(
+                rerank_table_first(
+                    question, [table], [{"type": "table", "table_number": 2}]
+                )[2],
+                [table],
+            )
+
+    def test_colon_descriptors_keep_short_row_names_selectable(self):
+        table = (
+            "||RAG|LC|\n|---|---|---|\n"
+            "|Original|80.34|65.25|\n"
+            "|Variant-1: special token|4.58|69.32|\n"
+            "|Variant-2: which is larger|47.63|64.24|"
+        )
+        row = extract_table_row_values(
+            "Table 3 中 Original、Variant-1 和 Variant-2 的 RAG 与 LC 分别是多少？",
+            table,
+            {"type": "table", "table_number": 3},
+        )
+        self.assertEqual(
+            [[item["value"] for item in entry["values"]] for entry in row["rows"]],
+            [["80.34", "65.25"], ["4.58", "69.32"], ["47.63", "64.24"]],
+        )
+
     def test_derived_value_intent_has_english_chinese_and_lookup_boundaries(self):
         self.assertTrue(is_derived_value_question("Table 1 中两项得分相差多少？"))
         self.assertTrue(is_derived_value_question("Compute the difference between the two scores."))
@@ -2454,6 +2495,41 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertTrue(app._is_composite_fact_question("请列出每个维度下的三个 rubric。"))
         self.assertIn("entries", app._section_query_terms("TANQ 和 FigEx 分别报告了多大规模的数据集？"))
         self.assertIn("columns", app._section_query_terms("答案表平均有多少行和列？"))
+
+    def test_cross_paper_reasoning_terms_expand_for_english_sources(self):
+        terms = app._section_query_terms(
+            "多步推理为什么容易失败，PlanRAG 在哪个环节进行决策，用什么机制缓解？"
+        )
+        self.assertTrue(
+            {"multi-step", "failure", "decision", "stage", "methodology", "re-planning"}
+            <= terms
+        )
+
+    def test_prose_before_picture_marker_remains_retrievable(self):
+        self.assertFalse(
+            app._is_picture_text_chunk(
+                "The fourth failure reason continues here.\n"
+                "<!-- Start of picture text -->chart labels<!-- End of picture text -->"
+            )
+        )
+        self.assertTrue(
+            app._is_picture_text_chunk(
+                "<!-- Start of picture text -->chart labels<!-- End of picture text -->"
+            )
+        )
+
+    def test_numbered_paper_question_covers_both_selected_sources(self):
+        self.assertTrue(
+            app._all_selected_sources_requested(
+                "第一篇认为多步推理为什么容易失败？PlanRAG 如何缓解？",
+                {"paper-a.pdf", "paper-b.pdf"},
+            )
+        )
+
+    def test_chinese_counted_stages_and_categories_are_list_questions(self):
+        self.assertTrue(app._is_composite_fact_question("三个主要阶段是什么？"))
+        self.assertTrue(app._is_composite_fact_question("哪四类典型失败原因？"))
+        self.assertIn("trigger", app._section_query_terms("什么情况下触发下一阶段？"))
 
     def test_spatial_context_adds_page_level_quadrant(self):
         annotated = app._annotate_spatial_context("[x=70.1-71.0%; y=85.4-86.5%] O")

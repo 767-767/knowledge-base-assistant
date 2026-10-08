@@ -1691,8 +1691,11 @@ def _all_selected_sources_requested(question: str, sources: set[str]) -> bool:
         return False
     text = str(question or "")
     chinese_scope = bool(
-        re.search(r"(?:这|所选)?两\s*(?:篇|份|个)?\s*(?:论文|文档|资料)", text)
-        and re.search(r"各自|分别|比较|对比|异同|区别|取舍", text)
+        (
+            re.search(r"(?:这|所选)?两\s*(?:篇|份|个)?\s*(?:论文|文档|资料)", text)
+            and re.search(r"各自|分别|比较|对比|异同|区别|取舍", text)
+        )
+        or re.search(r"第[一二两]\s*篇", text)
     )
     english_scope = bool(
         re.search(r"\b(?:both|two)\s+(?:selected\s+)?(?:papers?|documents?)\b", text, re.I)
@@ -2020,7 +2023,8 @@ def _cross_encoder_reranked_result(
 
 _COMPOSITE_FACT_CUE_RE = re.compile(
     r"多少|哪些|如何|管道|步骤|阶段|效率|代价|开销|以及|并且|同时|与|和|"
-    r"(?:[一二三四五六七八九十0-9]+种|多个|两种|若干).{0,20}(?:什么|哪些|分别)|"
+    r"哪[一二三四五六七八九十0-9]+(?:种|个|类|项|步|阶段)|"
+    r"(?:[一二三四五六七八九十0-9]+(?:种|个|类|项|步|阶段)|多个|两种|若干).{0,20}(?:什么|哪些|分别)|"
     r"\b(?:what|which|how|and|pipeline|dataset)\b",
     re.IGNORECASE,
 )
@@ -2029,7 +2033,8 @@ _ENGLISH_LISTED_FACT_QUESTION_RE = re.compile(
     re.IGNORECASE,
 )
 _LISTED_FACT_QUESTION_RE = re.compile(
-    r"(?:[一二三四五六七八九十0-9]+种|多个|两种|若干).{0,20}(?:什么|哪些|分别)|"
+    r"哪[一二三四五六七八九十0-9]+(?:种|个|类|项|步|阶段)|"
+    r"(?:[一二三四五六七八九十0-9]+(?:种|个|类|项|步|阶段)|多个|两种|若干).{0,20}(?:什么|哪些|分别)|"
     r"列出.{0,30}(?:每个|各)|"
     + _ENGLISH_LISTED_FACT_QUESTION_RE.pattern,
     re.IGNORECASE,
@@ -2108,6 +2113,14 @@ _SECTION_QUERY_ALIASES = {
     "候选实例": ("candidate", "instances"),
     "显式推理": ("explicit-reasoning", "reasoning"),
     "推理": ("reasoning",),
+    "多步": ("multi-step", "multistep", "previous steps", "later steps"),
+    "失败": ("fail", "failure", "unanswerable"),
+    "决策": ("decision", "decision-making", "planning"),
+    "环节": ("stage", "step", "process"),
+    "阶段": ("stage", "step", "process", "planning", "retrieving", "answering"),
+    "触发": ("trigger", "condition", "when", "not good enough"),
+    "机制": ("mechanism", "methodology", "plan", "planning", "re-planning"),
+    "缓解": ("address", "improve", "mitigate"),
     "模型": ("model", "models"),
     "架构": ("architecture", "encoder-decoder", "decoder-only"),
     "主干": ("trunk", "backbone", "architecture"),
@@ -2184,7 +2197,7 @@ _SOURCE_LOCAL_EVIDENCE_CUES = (
     "主干", "结构模块", "替换",
     "评估指标", "评价指标", "加速策略", "全文", "完整文本", "第一人称", "偏差", "实验配置", "配置", "基线", "奖励",
     "管道", "流程", "步骤", "阶段", "效率", "代价", "开销", "变化", "绝对", "工具", "过滤", "人工复核", "样本",
-    "标注", "问题标注", "代理模型", "表格集合", "人类引导", "数量", "条目", "摘要", "领域", "上限", "评分尺度", "输出格式", "构成", "占比", "分类",
+    "标注", "问题标注", "代理模型", "表格集合", "人类引导", "数量", "条目", "摘要", "领域", "上限", "评分尺度", "输出格式", "构成", "占比", "分类", "失败",
     "修订", "数据子集", "选项", "质检", "质量控制", "改写", "技能", "答案表", "盲测",
     "threshold", "overlap", "annotation", "architecture",
     "chunk", "retrieval", "ranking", "seed", "activation", "correct answer", "evaluation", "metrics", "acceleration strategies",
@@ -2265,9 +2278,9 @@ def _section_continuation_indices(
 
 
 def _is_picture_text_chunk(text: Any) -> bool:
-    """Identify pymupdf4llm's OCR/image-text blocks for window isolation."""
+    """Identify chunks that begin as pymupdf4llm image-text blocks."""
 
-    return bool(_PICTURE_TEXT_MARKER_RE.search(str(text or "")))
+    return bool(_PICTURE_TEXT_MARKER_RE.match(str(text or "").lstrip()))
 
 
 def _annotate_spatial_context(text: Any) -> str:
@@ -2404,7 +2417,10 @@ def _lexical_route_evidence_result(
         position: index
         for position, index in enumerate(source_indices)
         if is_table_question(question)
-        or snapshot.metadatas[index].get("type", "text") == "text"
+        or (
+            snapshot.metadatas[index].get("type", "text") == "text"
+            and not _is_picture_text_chunk(snapshot.texts[index])
+        )
     }
     if not positions:
         return None
@@ -3273,7 +3289,7 @@ def query_knowledge(
                         for value in _flat_result_values(variant_numeric, "ids")
                     )
                 lexical_question = evidence_question
-                if len(routed_sources) > 1:
+                if len(routed_sources) > 1 and evidence_question == message:
                     # The source is already fixed. Repeating its identifier
                     # otherwise ranks title/abstract mentions above the predicate.
                     for token in evidence_route.distinctive_tokens:

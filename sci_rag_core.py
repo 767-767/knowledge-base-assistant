@@ -3180,6 +3180,11 @@ def _table_row_labels(table_content: str) -> list[str]:
                 )
                 if stem and stem.group(1) not in labels:
                     labels.append(stem.group(1))
+                descriptor_stem = re.match(
+                    r"^([A-Za-z0-9][A-Za-z0-9+._-]*):\s*\S", display
+                )
+                if descriptor_stem and descriptor_stem.group(1) not in labels:
+                    labels.append(descriptor_stem.group(1))
     return labels
 
 
@@ -4551,6 +4556,8 @@ def find_table_cell_in_chunks(
     if table_number_from_question(question) is None:
         return None
     for idx in matching_table_indices(question, texts, metas):
+        if requires_full_table_context(question, texts[idx]):
+            return None
         row_values = extract_table_row_values(question, texts[idx], metas[idx])
         if row_values is not None:
             return idx, row_values
@@ -4623,6 +4630,33 @@ def is_comparative_table_question(question: str) -> bool:
     return bool(TABLE_COMPARISON_QUESTION_RE.search(question or ""))
 
 
+def requires_full_table_context(question: str, table_content: str) -> bool:
+    """Whether answering requires synthesizing more than one table cell."""
+
+    if is_comparative_table_question(question) or is_derived_value_question(question):
+        return True
+    if re.search(
+        r"哪[一二三四五六七八九十两\d]+个|另外|其余|剩余|"
+        r"which\s+(?:other|remaining)|the\s+other",
+        question or "",
+        re.IGNORECASE,
+    ):
+        return True
+    if not _question_requests_multiple_rows(question):
+        return False
+    parsed = parse_markdown_table(table_content)
+    if parsed is None:
+        return False
+    headers, _rows = parsed
+    entities = _table_question_entities(question, table_content)
+    named_columns = [
+        index
+        for index in _requested_table_columns(question, headers)
+        if display_table_cell(headers[index])
+    ]
+    return len(entities) < 2 and len(named_columns) < 2
+
+
 def table_number_from_question(question: str) -> str | None:
     match = TABLE_LABEL_RE.search(question or "")
     return match.group(1).upper() if match else None
@@ -4667,8 +4701,7 @@ def rerank_table_first(
             # for deterministic single-row lookups so baseline evidence is
             # not discarded before generation.
             if (
-                not is_comparative_table_question(question)
-                and not is_derived_value_question(question)
+                not requires_full_table_context(question, working_texts[table_idx[0]])
                 and _table_usage_group(question, working_texts[table_idx[0]]) is None
                 and len(_table_question_entities(question, working_texts[table_idx[0]])) <= 1
                 and not _table_question_dataset_targets(question, working_texts[table_idx[0]])
